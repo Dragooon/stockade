@@ -1,6 +1,7 @@
 node_modules/
 dist/
 data/
+.next/
 .env
 *.db
 *.db-journal

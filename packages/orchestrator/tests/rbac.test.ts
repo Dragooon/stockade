@@ -1,129 +1,167 @@
-import { describe, it, expect } from 'vitest';
-import { buildAbility, checkAccess, checkToolAccess, resolveUser } from '@/lib/rbac';
-import type { PlatformConfig } from '@/types';
+import { describe, it, expect } from "vitest";
+import {
+  resolveUser,
+  checkAccess,
+  buildPermissionHook,
+} from "../src/rbac.js";
+import type { PlatformConfig } from "../src/types.js";
 
-const testConfig: PlatformConfig = {
+const config: PlatformConfig = {
   channels: {
-    terminal: { enabled: true, agent: 'main' },
-    discord: {
-      enabled: true,
-      token: 'test-token',
-      bindings: [
-        { server: '123', agent: 'main', channels: '*' },
-      ],
-    },
+    terminal: { enabled: true, agent: "main" },
   },
   rbac: {
     roles: {
       owner: {
-        permissions: ['agent:*', 'tool:*'],
+        permissions: ["agent:*", "tool:*"],
       },
       user: {
-        permissions: ['agent:main', 'tool:bash'],
+        permissions: ["agent:main", "tool:Read", "tool:Bash:git*"],
       },
-      limited: {
-        permissions: ['agent:helper'],
+      viewer: {
+        permissions: ["agent:main"],
       },
     },
     users: {
       alice: {
-        roles: ['owner'],
-        identities: { discord: '111', terminal: 'alice' },
+        roles: ["owner"],
+        identities: { discord: "alice-discord-id", terminal: "alice" },
       },
       bob: {
-        roles: ['user'],
-        identities: { discord: '222', terminal: 'bob' },
+        roles: ["user"],
+        identities: { discord: "bob-discord-id", terminal: "bob" },
       },
-      charlie: {
-        roles: ['limited'],
-        identities: { discord: '333' },
+      carol: {
+        roles: ["viewer"],
+        identities: { discord: "carol-discord-id" },
       },
     },
   },
 };
 
-describe('RBAC Engine', () => {
-  describe('resolveUser', () => {
-    it('resolves a discord user by platform identity', () => {
-      const user = resolveUser('111', 'discord', testConfig);
-      expect(user).toBe('alice');
-    });
+describe("resolveUser", () => {
+  it("resolves a known discord user", () => {
+    const user = resolveUser("alice-discord-id", "discord", config);
+    expect(user).not.toBeNull();
+    expect(user!.username).toBe("alice");
+    expect(user!.roles).toEqual(["owner"]);
+    expect(user!.permissions).toContain("agent:*");
+    expect(user!.permissions).toContain("tool:*");
+  });
 
-    it('resolves a terminal user by platform identity', () => {
-      const user = resolveUser('bob', 'terminal', testConfig);
-      expect(user).toBe('bob');
-    });
+  it("resolves a known terminal user", () => {
+    const user = resolveUser("bob", "terminal", config);
+    expect(user).not.toBeNull();
+    expect(user!.username).toBe("bob");
+    expect(user!.roles).toEqual(["user"]);
+  });
 
-    it('returns undefined for unknown user', () => {
-      const user = resolveUser('999', 'discord', testConfig);
-      expect(user).toBeUndefined();
-    });
+  it("returns null for unknown user", () => {
+    const user = resolveUser("unknown-id", "discord", config);
+    expect(user).toBeNull();
+  });
 
-    it('returns undefined for unknown platform', () => {
-      const user = resolveUser('111', 'slack', testConfig);
-      expect(user).toBeUndefined();
+  it("returns null for known user on wrong platform", () => {
+    // carol has no terminal identity
+    const user = resolveUser("carol-discord-id", "terminal", config);
+    expect(user).toBeNull();
+  });
+});
+
+describe("checkAccess", () => {
+  it("grants owner access to any agent (wildcard)", () => {
+    expect(
+      checkAccess("alice-discord-id", "discord", "main", config)
+    ).toBe(true);
+    expect(
+      checkAccess("alice-discord-id", "discord", "researcher", config)
+    ).toBe(true);
+    expect(
+      checkAccess("alice-discord-id", "discord", "anything", config)
+    ).toBe(true);
+  });
+
+  it("grants user access to permitted agent", () => {
+    expect(
+      checkAccess("bob-discord-id", "discord", "main", config)
+    ).toBe(true);
+  });
+
+  it("denies user access to non-permitted agent", () => {
+    expect(
+      checkAccess("bob-discord-id", "discord", "researcher", config)
+    ).toBe(false);
+  });
+
+  it("denies access to unknown user", () => {
+    expect(
+      checkAccess("unknown-id", "discord", "main", config)
+    ).toBe(false);
+  });
+});
+
+describe("buildPermissionHook", () => {
+  it("owner with tool:* allows everything", async () => {
+    const hook = buildPermissionHook("alice-discord-id", "discord", config);
+
+    expect(await hook("Bash", { command: "rm -rf /" })).toMatchObject({
+      behavior: "allow",
+    });
+    expect(await hook("Read", { path: "/etc/passwd" })).toMatchObject({
+      behavior: "allow",
+    });
+    expect(await hook("AnyTool", {})).toMatchObject({ behavior: "allow" });
+  });
+
+  it("user with tool:Read allows Read", async () => {
+    const hook = buildPermissionHook("bob-discord-id", "discord", config);
+
+    expect(await hook("Read", { path: "/tmp/file" })).toMatchObject({
+      behavior: "allow",
     });
   });
 
-  describe('checkAccess', () => {
-    it('owner can access any agent (wildcard)', () => {
-      expect(checkAccess('111', 'discord', 'main', testConfig)).toBe(true);
-      expect(checkAccess('111', 'discord', 'helper', testConfig)).toBe(true);
-      expect(checkAccess('111', 'discord', 'anything', testConfig)).toBe(true);
-    });
+  it("user with tool:Bash:git* allows git commands", async () => {
+    const hook = buildPermissionHook("bob-discord-id", "discord", config);
 
-    it('user can access specifically permitted agent', () => {
-      expect(checkAccess('222', 'discord', 'main', testConfig)).toBe(true);
+    expect(await hook("Bash", { command: "git status" })).toMatchObject({
+      behavior: "allow",
     });
-
-    it('user cannot access non-permitted agent', () => {
-      expect(checkAccess('222', 'discord', 'helper', testConfig)).toBe(false);
-    });
-
-    it('limited user can access only their agent', () => {
-      expect(checkAccess('333', 'discord', 'helper', testConfig)).toBe(true);
-      expect(checkAccess('333', 'discord', 'main', testConfig)).toBe(false);
-    });
-
-    it('unknown user is denied', () => {
-      expect(checkAccess('999', 'discord', 'main', testConfig)).toBe(false);
+    expect(await hook("Bash", { command: "git log --oneline" })).toMatchObject({
+      behavior: "allow",
     });
   });
 
-  describe('checkToolAccess', () => {
-    it('owner roles grant all tools via wildcard', () => {
-      expect(checkToolAccess(['owner'], 'bash', testConfig)).toBe(true);
-      expect(checkToolAccess(['owner'], 'file-read', testConfig)).toBe(true);
-    });
+  it("user with tool:Bash:git* denies non-git Bash commands", async () => {
+    const hook = buildPermissionHook("bob-discord-id", "discord", config);
 
-    it('user role grants specific tool', () => {
-      expect(checkToolAccess(['user'], 'bash', testConfig)).toBe(true);
-    });
-
-    it('user role denies non-granted tool', () => {
-      expect(checkToolAccess(['user'], 'file-write', testConfig)).toBe(false);
-    });
-
-    it('limited role with no tool permissions denies all tools', () => {
-      expect(checkToolAccess(['limited'], 'bash', testConfig)).toBe(false);
-    });
-
-    it('multiple roles combine permissions', () => {
-      expect(checkToolAccess(['limited', 'user'], 'bash', testConfig)).toBe(true);
-    });
+    const result = await hook("Bash", { command: "rm -rf /" });
+    expect(result.behavior).toBe("deny");
+    expect((result as any).message).toContain("Bash");
   });
 
-  describe('buildAbility', () => {
-    it('returns an ability object for a known user', () => {
-      const ability = buildAbility('111', 'discord', testConfig);
-      expect(ability).toBeDefined();
-      expect(ability.can('access', 'agent:main')).toBe(true);
-    });
+  it("user without tool permission is denied", async () => {
+    const hook = buildPermissionHook("bob-discord-id", "discord", config);
 
-    it('returns a restrictive ability for unknown user', () => {
-      const ability = buildAbility('999', 'discord', testConfig);
-      expect(ability).toBeDefined();
-      expect(ability.can('access', 'agent:main')).toBe(false);
-    });
+    const result = await hook("Write", { path: "/tmp/file", content: "x" });
+    expect(result.behavior).toBe("deny");
+  });
+
+  it("unknown user is denied everything", async () => {
+    const hook = buildPermissionHook("unknown-id", "discord", config);
+
+    const result = await hook("Read", {});
+    expect(result.behavior).toBe("deny");
+  });
+
+  it("viewer with no tool permissions is denied all tools", async () => {
+    const hook = buildPermissionHook(
+      "carol-discord-id",
+      "discord",
+      config
+    );
+
+    const result = await hook("Bash", { command: "ls" });
+    expect(result.behavior).toBe("deny");
   });
 });

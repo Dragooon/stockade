@@ -1,16 +1,15 @@
 agents:
   main:
-    model: claude-sonnet-4-20250514
-    provider: anthropic
+    model: sonnet
     system: |
       You are a helpful assistant with access to shell commands and file operations.
+      Keep responses concise.
     tools:
-      - bash
-      - file-read
-      - file-write
-      - file-edit
-    sandbox: false
+      - Bash
+      - Read
+      - Write
+      - Edit
+      - Glob
+      - Grep
     lifecycle: persistent
-    port: 3001
-    memory:
-      dir: ./data/agents/main/memory
+    remote: false

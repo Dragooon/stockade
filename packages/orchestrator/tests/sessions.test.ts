@@ -1,136 +1,58 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { getOrCreateSession, getMessages, saveMessages, deleteSession } from '@/lib/sessions';
-import { createDb } from '@/lib/db';
-import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import * as schema from '@/lib/db/schema';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import Database from "better-sqlite3";
+import {
+  initSessionsTable,
+  getSessionId,
+  setSessionId,
+  deleteSession,
+} from "../src/sessions.js";
 
-describe('Session Manager', () => {
-  let db: BetterSQLite3Database<typeof schema>;
-  let closeDb: () => void;
-  let tmpDir: string;
+describe("sessions", () => {
+  let db: Database.Database;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-test-'));
-    const dbPath = path.join(tmpDir, 'test.db');
-    const testDb = createDb(dbPath);
-    db = testDb.db;
-    closeDb = testDb.close;
+    db = new Database(":memory:");
+    initSessionsTable(db);
   });
 
   afterEach(() => {
-    closeDb();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    db.close();
   });
 
-  describe('getOrCreateSession', () => {
-    it('creates a new session for a new scope', () => {
-      const session = getOrCreateSession(db, 'discord:123:456:789', 'main');
-      expect(session.id).toBeDefined();
-      expect(session.scope).toBe('discord:123:456:789');
-      expect(session.agentId).toBe('main');
-      expect(session.createdAt).toBeGreaterThan(0);
-      expect(session.updatedAt).toBeGreaterThan(0);
-    });
-
-    it('returns existing session for same scope', () => {
-      const session1 = getOrCreateSession(db, 'discord:123:456:789', 'main');
-      const session2 = getOrCreateSession(db, 'discord:123:456:789', 'main');
-      expect(session1.id).toBe(session2.id);
-    });
-
-    it('creates different sessions for different scopes', () => {
-      const session1 = getOrCreateSession(db, 'discord:123:456:789', 'main');
-      const session2 = getOrCreateSession(db, 'discord:123:456:000', 'main');
-      expect(session1.id).not.toBe(session2.id);
-    });
+  it("returns null for unknown scope", () => {
+    expect(getSessionId(db, "discord:111:222:333")).toBeNull();
   });
 
-  describe('getMessages', () => {
-    it('returns empty array for new session', () => {
-      const session = getOrCreateSession(db, 'test:scope', 'main');
-      const messages = getMessages(db, session.id);
-      expect(messages).toEqual([]);
-    });
-
-    it('returns messages in order', () => {
-      const session = getOrCreateSession(db, 'test:scope', 'main');
-      saveMessages(db, session.id, [
-        { role: 'user', content: 'Hello' },
-        { role: 'assistant', content: 'Hi there!' },
-      ]);
-
-      const messages = getMessages(db, session.id);
-      expect(messages).toHaveLength(2);
-      expect(messages[0].role).toBe('user');
-      expect(messages[0].content).toBe('Hello');
-      expect(messages[1].role).toBe('assistant');
-      expect(messages[1].content).toBe('Hi there!');
-    });
+  it("stores and retrieves a session ID", () => {
+    setSessionId(db, "discord:111:222:333", "sess-abc");
+    expect(getSessionId(db, "discord:111:222:333")).toBe("sess-abc");
   });
 
-  describe('saveMessages', () => {
-    it('persists messages to the database', () => {
-      const session = getOrCreateSession(db, 'test:scope', 'main');
-      saveMessages(db, session.id, [
-        { role: 'user', content: 'Question' },
-      ]);
-
-      const messages = getMessages(db, session.id);
-      expect(messages).toHaveLength(1);
-      expect(messages[0].content).toBe('Question');
-    });
-
-    it('appends to existing messages', () => {
-      const session = getOrCreateSession(db, 'test:scope', 'main');
-      saveMessages(db, session.id, [
-        { role: 'user', content: 'First' },
-      ]);
-      saveMessages(db, session.id, [
-        { role: 'assistant', content: 'Response' },
-        { role: 'user', content: 'Second' },
-      ]);
-
-      const messages = getMessages(db, session.id);
-      expect(messages).toHaveLength(3);
-      expect(messages[0].content).toBe('First');
-      expect(messages[1].content).toBe('Response');
-      expect(messages[2].content).toBe('Second');
-    });
-
-    it('updates session updatedAt timestamp', () => {
-      const session = getOrCreateSession(db, 'test:scope', 'main');
-      const initialUpdatedAt = session.updatedAt;
-
-      saveMessages(db, session.id, [
-        { role: 'user', content: 'Hello' },
-      ]);
-
-      const updatedSession = getOrCreateSession(db, 'test:scope', 'main');
-      expect(updatedSession.updatedAt).toBeGreaterThanOrEqual(initialUpdatedAt);
-    });
+  it("overwrites an existing session ID", () => {
+    setSessionId(db, "discord:111:222:333", "sess-old");
+    setSessionId(db, "discord:111:222:333", "sess-new");
+    expect(getSessionId(db, "discord:111:222:333")).toBe("sess-new");
   });
 
-  describe('deleteSession', () => {
-    it('deletes a session and its messages', () => {
-      const session = getOrCreateSession(db, 'test:scope', 'main');
-      saveMessages(db, session.id, [
-        { role: 'user', content: 'Hello' },
-      ]);
+  it("deletes a session", () => {
+    setSessionId(db, "discord:111:222:333", "sess-abc");
+    deleteSession(db, "discord:111:222:333");
+    expect(getSessionId(db, "discord:111:222:333")).toBeNull();
+  });
 
-      deleteSession(db, 'test:scope');
+  it("delete is idempotent for non-existent scope", () => {
+    // Should not throw
+    deleteSession(db, "nonexistent:scope");
+    expect(getSessionId(db, "nonexistent:scope")).toBeNull();
+  });
 
-      const newSession = getOrCreateSession(db, 'test:scope', 'main');
-      expect(newSession.id).not.toBe(session.id);
+  it("handles multiple independent scopes", () => {
+    setSessionId(db, "discord:a:b:c", "sess-1");
+    setSessionId(db, "discord:x:y:z", "sess-2");
+    setSessionId(db, "terminal:local:uuid:user", "sess-3");
 
-      const messages = getMessages(db, newSession.id);
-      expect(messages).toHaveLength(0);
-    });
-
-    it('does nothing for non-existent scope', () => {
-      expect(() => deleteSession(db, 'nonexistent:scope')).not.toThrow();
-    });
+    expect(getSessionId(db, "discord:a:b:c")).toBe("sess-1");
+    expect(getSessionId(db, "discord:x:y:z")).toBe("sess-2");
+    expect(getSessionId(db, "terminal:local:uuid:user")).toBe("sess-3");
   });
 });

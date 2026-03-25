@@ -1,5 +1,5 @@
 {
-  "name": "@agent-platform/orchestrator",
+  "name": "@agent-platform/worker",
   "version": "2.0.0",
   "type": "module",
   "scripts": {
@@ -10,14 +10,12 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.83",
-    "better-sqlite3": "^11.10.0",
-    "discord.js": "^14.18.0",
-    "js-yaml": "^4.1.0",
+    "@hono/node-server": "^1.14.1",
+    "hono": "^4.7.10",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.15.0",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3",
     "vitest": "^3.2.1"

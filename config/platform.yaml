@@ -3,7 +3,7 @@ channels:
     enabled: true
     agent: main
   discord:
-    enabled: true
+    enabled: false
     token: ${DISCORD_TOKEN}
     bindings:
       - server: "1482310397418672170"

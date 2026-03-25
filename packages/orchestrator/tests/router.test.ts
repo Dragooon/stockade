@@ -1,94 +1,88 @@
-import { describe, it, expect } from 'vitest';
-import { resolveAgent, parseScope } from '@/lib/router';
-import type { PlatformConfig } from '@/types';
+import { describe, it, expect } from "vitest";
+import { resolveAgent } from "../src/router.js";
+import type { PlatformConfig } from "../src/types.js";
 
-const testConfig: PlatformConfig = {
+const config: PlatformConfig = {
   channels: {
-    terminal: { enabled: true, agent: 'main' },
+    terminal: { enabled: true, agent: "main" },
     discord: {
       enabled: true,
-      token: 'test-token',
+      token: "test-token",
       bindings: [
-        { server: '111', agent: 'general-agent', channels: '*' },
-        { server: '222', agent: 'specific-agent', channels: ['chan1', 'chan2'] },
-        { server: '333', agent: 'single-chan-agent', channels: 'chan3' },
+        { server: "server-1", agent: "main", channels: "*" },
+        {
+          server: "server-2",
+          agent: "researcher",
+          channels: ["channel-a", "channel-b"],
+        },
+        { server: "server-3", agent: "helper", channels: "channel-x" },
       ],
     },
   },
-  rbac: {
-    roles: {},
-    users: {},
-  },
+  rbac: { roles: {}, users: {} },
 };
 
-describe('Router', () => {
-  describe('parseScope', () => {
-    it('parses a discord scope', () => {
-      const parsed = parseScope('discord:111:456:789');
-      expect(parsed.platform).toBe('discord');
-      expect(parsed.server).toBe('111');
-      expect(parsed.channel).toBe('456');
-      expect(parsed.user).toBe('789');
-    });
-
-    it('parses a terminal scope', () => {
-      const parsed = parseScope('terminal:user123');
-      expect(parsed.platform).toBe('terminal');
-      expect(parsed.user).toBe('user123');
-    });
-
-    it('handles scopes with extra segments', () => {
-      const parsed = parseScope('discord:a:b:c:extra');
-      expect(parsed.platform).toBe('discord');
-      expect(parsed.server).toBe('a');
-      expect(parsed.channel).toBe('b');
-      expect(parsed.user).toBe('c');
-    });
+describe("resolveAgent", () => {
+  it("routes terminal scope to terminal agent", () => {
+    expect(resolveAgent("terminal:uuid:alice", config)).toBe("main");
   });
 
-  describe('resolveAgent', () => {
-    it('resolves terminal scope to terminal agent', () => {
-      const agentId = resolveAgent('terminal:user123', testConfig);
-      expect(agentId).toBe('main');
-    });
+  it("routes discord wildcard binding", () => {
+    expect(
+      resolveAgent("discord:server-1:any-channel:user-1", config)
+    ).toBe("main");
+  });
 
-    it('resolves discord scope with wildcard channel binding', () => {
-      const agentId = resolveAgent('discord:111:any-channel:user1', testConfig);
-      expect(agentId).toBe('general-agent');
-    });
+  it("routes discord exact channel match (array)", () => {
+    expect(
+      resolveAgent("discord:server-2:channel-a:user-1", config)
+    ).toBe("researcher");
+    expect(
+      resolveAgent("discord:server-2:channel-b:user-1", config)
+    ).toBe("researcher");
+  });
 
-    it('resolves discord scope with specific channel match (array)', () => {
-      const agentId = resolveAgent('discord:222:chan1:user1', testConfig);
-      expect(agentId).toBe('specific-agent');
-    });
+  it("routes discord exact channel match (string)", () => {
+    expect(
+      resolveAgent("discord:server-3:channel-x:user-1", config)
+    ).toBe("helper");
+  });
 
-    it('resolves discord scope with specific channel match (string)', () => {
-      const agentId = resolveAgent('discord:333:chan3:user1', testConfig);
-      expect(agentId).toBe('single-chan-agent');
-    });
+  it("throws for unmatched discord channel", () => {
+    expect(() =>
+      resolveAgent("discord:server-2:channel-z:user-1", config)
+    ).toThrow("No binding found");
+  });
 
-    it('throws when no binding matches the channel', () => {
-      expect(() => resolveAgent('discord:222:unknown-chan:user1', testConfig)).toThrow(
-        /no binding/i,
-      );
-    });
+  it("throws for unknown server", () => {
+    expect(() =>
+      resolveAgent("discord:unknown-server:ch:user", config)
+    ).toThrow("No binding found");
+  });
 
-    it('throws when no binding matches the server', () => {
-      expect(() => resolveAgent('discord:999:chan1:user1', testConfig)).toThrow(
-        /no binding/i,
-      );
-    });
+  it("throws for unknown platform", () => {
+    expect(() => resolveAgent("slack:123:456", config)).toThrow(
+      "Unknown platform"
+    );
+  });
 
-    it('throws for unknown platform', () => {
-      expect(() => resolveAgent('slack:user1', testConfig)).toThrow();
-    });
+  it("throws when terminal not configured", () => {
+    const noTerminal: PlatformConfig = {
+      channels: {},
+      rbac: { roles: {}, users: {} },
+    };
+    expect(() => resolveAgent("terminal:uuid:user", noTerminal)).toThrow(
+      "No terminal channel configured"
+    );
+  });
 
-    it('throws when terminal is not configured', () => {
-      const noTerminalConfig: PlatformConfig = {
-        channels: {},
-        rbac: { roles: {}, users: {} },
-      };
-      expect(() => resolveAgent('terminal:user1', noTerminalConfig)).toThrow();
-    });
+  it("throws when discord not configured", () => {
+    const noDiscord: PlatformConfig = {
+      channels: { terminal: { enabled: true, agent: "main" } },
+      rbac: { roles: {}, users: {} },
+    };
+    expect(() =>
+      resolveAgent("discord:server:ch:user", noDiscord)
+    ).toThrow("No discord channel configured");
   });
 });

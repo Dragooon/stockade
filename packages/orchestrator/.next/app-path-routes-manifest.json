@@ -1,6 +1,0 @@
-{
-  "/api/health/route": "/api/health",
-  "/api/message/route": "/api/message",
-  "/api/sessions/[scope]/route": "/api/sessions/[scope]",
-  "/api/subagent/route": "/api/subagent"
-}

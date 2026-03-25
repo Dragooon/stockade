@@ -1,217 +1,237 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { loadAgentsConfig, loadPlatformConfig, substituteEnvVars } from '@/lib/config';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { loadConfig, substituteEnvVars } from "../src/config.js";
 
-describe('Config Loader', () => {
-  let tmpDir: string;
+function makeTmpDir(): string {
+  const dir = join(tmpdir(), `config-test-${randomUUID()}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'config-test-'));
-  });
+function writeYaml(dir: string, name: string, content: string): void {
+  writeFileSync(join(dir, name), content, "utf-8");
+}
 
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-    vi.restoreAllMocks();
-  });
-
-  describe('substituteEnvVars', () => {
-    it('replaces ${VAR} with environment variable values', () => {
-      vi.stubEnv('TEST_TOKEN', 'my-secret-token');
-      const result = substituteEnvVars('token: ${TEST_TOKEN}');
-      expect(result).toBe('token: my-secret-token');
-    });
-
-    it('replaces multiple env vars in one string', () => {
-      vi.stubEnv('HOST', 'localhost');
-      vi.stubEnv('PORT', '3000');
-      const result = substituteEnvVars('${HOST}:${PORT}');
-      expect(result).toBe('localhost:3000');
-    });
-
-    it('leaves string unchanged when no env vars present', () => {
-      const result = substituteEnvVars('no variables here');
-      expect(result).toBe('no variables here');
-    });
-
-    it('replaces missing env vars with empty string', () => {
-      delete process.env.NONEXISTENT_VAR;
-      const result = substituteEnvVars('value: ${NONEXISTENT_VAR}');
-      expect(result).toBe('value: ');
-    });
-  });
-
-  describe('loadAgentsConfig', () => {
-    it('loads and validates a valid agents config', () => {
-      const yaml = `
+const VALID_AGENTS = `
 agents:
   main:
-    model: "claude-sonnet-4-20250514"
-    provider: "anthropic"
-    system: "You are a helpful assistant."
-    tools: ["bash", "file-read"]
-    sandbox: false
+    model: claude-sonnet-4-20250514
+    system: "You are helpful."
+    tools: ["Bash", "Read"]
     lifecycle: persistent
-    port: 4000
+    remote: false
+  researcher:
+    model: claude-haiku-4-5-20251001
+    system: "You research."
+    tools: ["WebSearch"]
+    lifecycle: persistent
+    remote: true
+    port: 3001
+    url: http://localhost:3001
 `;
-      const filePath = path.join(tmpDir, 'agents.yaml');
-      fs.writeFileSync(filePath, yaml);
 
-      const config = loadAgentsConfig(filePath);
-      expect(config.agents.main).toBeDefined();
-      expect(config.agents.main.model).toBe('claude-sonnet-4-20250514');
-      expect(config.agents.main.tools).toEqual(['bash', 'file-read']);
-      expect(config.agents.main.sandbox).toBe(false);
-      expect(config.agents.main.lifecycle).toBe('persistent');
-      expect(config.agents.main.port).toBe(4000);
-    });
-
-    it('loads config with optional fields', () => {
-      const yaml = `
-agents:
-  sandboxed:
-    model: "claude-sonnet-4-20250514"
-    provider: "anthropic"
-    system: "Sandboxed agent"
-    tools: []
-    sandbox: true
-    lifecycle: ephemeral
-    docker:
-      image: "agent:latest"
-      network: "agent-net"
-    memory:
-      dir: "/data/memory"
-    mcp:
-      - name: "test-server"
-        url: "http://localhost:3001"
-`;
-      const filePath = path.join(tmpDir, 'agents.yaml');
-      fs.writeFileSync(filePath, yaml);
-
-      const config = loadAgentsConfig(filePath);
-      expect(config.agents.sandboxed.docker?.image).toBe('agent:latest');
-      expect(config.agents.sandboxed.memory?.dir).toBe('/data/memory');
-      expect(config.agents.sandboxed.mcp?.[0].name).toBe('test-server');
-    });
-
-    it('throws on invalid config (missing required fields)', () => {
-      const yaml = `
-agents:
-  bad:
-    model: "claude-sonnet-4-20250514"
-`;
-      const filePath = path.join(tmpDir, 'agents.yaml');
-      fs.writeFileSync(filePath, yaml);
-
-      expect(() => loadAgentsConfig(filePath)).toThrow();
-    });
-
-    it('throws on invalid lifecycle value', () => {
-      const yaml = `
-agents:
-  bad:
-    model: "claude-sonnet-4-20250514"
-    provider: "anthropic"
-    system: "test"
-    tools: []
-    sandbox: false
-    lifecycle: "invalid"
-`;
-      const filePath = path.join(tmpDir, 'agents.yaml');
-      fs.writeFileSync(filePath, yaml);
-
-      expect(() => loadAgentsConfig(filePath)).toThrow();
-    });
-  });
-
-  describe('loadPlatformConfig', () => {
-    it('loads and validates a valid platform config', () => {
-      const yaml = `
+const VALID_PLATFORM = `
 channels:
   terminal:
     enabled: true
     agent: main
   discord:
     enabled: true
-    token: "test-token"
+    token: test-token-123
     bindings:
-      - server: "123"
+      - server: "111"
         agent: main
         channels: "*"
 rbac:
   roles:
     owner:
-      permissions: ["agent:*", "tool:*"]
+      permissions:
+        - "agent:*"
+        - "tool:*"
     user:
-      permissions: ["agent:main"]
+      permissions:
+        - "agent:main"
   users:
     alice:
-      roles: ["owner"]
+      roles:
+        - owner
       identities:
-        discord: "111"
+        discord: "999"
         terminal: "alice"
 `;
-      const filePath = path.join(tmpDir, 'platform.yaml');
-      fs.writeFileSync(filePath, yaml);
 
-      const config = loadPlatformConfig(filePath);
-      expect(config.channels.terminal?.enabled).toBe(true);
-      expect(config.channels.discord?.bindings).toHaveLength(1);
-      expect(config.rbac.roles.owner.permissions).toContain('agent:*');
-      expect(config.rbac.users.alice.roles).toContain('owner');
-    });
+describe("config", () => {
+  let tmpDir: string;
 
-    it('performs env var substitution in values', () => {
-      vi.stubEnv('DISCORD_TOKEN', 'real-discord-token');
-      const yaml = `
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("loads valid agents and platform config", () => {
+    writeYaml(tmpDir, "agents.yaml", VALID_AGENTS);
+    writeYaml(tmpDir, "platform.yaml", VALID_PLATFORM);
+
+    const config = loadConfig(tmpDir);
+
+    expect(config.agents.agents.main.model).toBe("claude-sonnet-4-20250514");
+    expect(config.agents.agents.main.tools).toEqual(["Bash", "Read"]);
+    expect(config.agents.agents.main.remote).toBe(false);
+    expect(config.agents.agents.researcher.remote).toBe(true);
+    expect(config.agents.agents.researcher.port).toBe(3001);
+
+    expect(config.platform.channels.terminal?.enabled).toBe(true);
+    expect(config.platform.channels.discord?.token).toBe("test-token-123");
+    expect(config.platform.rbac.users.alice.roles).toEqual(["owner"]);
+  });
+
+  it("rejects invalid agents config (missing required field)", () => {
+    writeYaml(
+      tmpDir,
+      "agents.yaml",
+      `
+agents:
+  broken:
+    model: sonnet
+    # missing system, tools, lifecycle
+`
+    );
+    writeYaml(tmpDir, "platform.yaml", VALID_PLATFORM);
+
+    expect(() => loadConfig(tmpDir)).toThrow();
+  });
+
+  it("rejects invalid platform config (bad rbac)", () => {
+    writeYaml(tmpDir, "agents.yaml", VALID_AGENTS);
+    writeYaml(
+      tmpDir,
+      "platform.yaml",
+      `
+channels:
+  terminal:
+    enabled: true
+    agent: main
+rbac:
+  roles: "not-an-object"
+  users: {}
+`
+    );
+
+    expect(() => loadConfig(tmpDir)).toThrow();
+  });
+
+  it("substitutes environment variables", () => {
+    process.env.__TEST_TOKEN = "secret-discord-token";
+
+    writeYaml(tmpDir, "agents.yaml", VALID_AGENTS);
+    writeYaml(
+      tmpDir,
+      "platform.yaml",
+      `
 channels:
   discord:
     enabled: true
-    token: "\${DISCORD_TOKEN}"
+    token: \${__TEST_TOKEN}
+    bindings:
+      - server: "111"
+        agent: main
+        channels: "*"
+rbac:
+  roles:
+    owner:
+      permissions: ["agent:*"]
+  users:
+    bob:
+      roles: [owner]
+      identities:
+        discord: "123"
+`
+    );
+
+    const config = loadConfig(tmpDir);
+    expect(config.platform.channels.discord?.token).toBe(
+      "secret-discord-token"
+    );
+
+    delete process.env.__TEST_TOKEN;
+  });
+
+  it("substitutes missing env var as empty string", () => {
+    delete process.env.__NONEXISTENT_VAR;
+
+    writeYaml(tmpDir, "agents.yaml", VALID_AGENTS);
+    writeYaml(
+      tmpDir,
+      "platform.yaml",
+      `
+channels:
+  discord:
+    enabled: true
+    token: \${__NONEXISTENT_VAR}
     bindings: []
 rbac:
   roles: {}
   users: {}
-`;
-      const filePath = path.join(tmpDir, 'platform.yaml');
-      fs.writeFileSync(filePath, yaml);
+`
+    );
 
-      const config = loadPlatformConfig(filePath);
-      expect(config.channels.discord?.token).toBe('real-discord-token');
-    });
+    // Missing env vars are replaced with "" (lenient substitution)
+    const config = loadConfig(tmpDir);
+    expect(config.platform.channels.discord?.token).toBe("");
+  });
 
-    it('throws on invalid platform config', () => {
-      const yaml = `
-channels: "not-an-object"
-`;
-      const filePath = path.join(tmpDir, 'platform.yaml');
-      fs.writeFileSync(filePath, yaml);
+  it("defaults remote to false when not specified", () => {
+    writeYaml(
+      tmpDir,
+      "agents.yaml",
+      `
+agents:
+  simple:
+    model: sonnet
+    system: "Hello"
+    tools: ["Bash"]
+    lifecycle: ephemeral
+`
+    );
+    writeYaml(tmpDir, "platform.yaml", VALID_PLATFORM);
 
-      expect(() => loadPlatformConfig(filePath)).toThrow();
-    });
+    const config = loadConfig(tmpDir);
+    expect(config.agents.agents.simple.remote).toBe(false);
+  });
+});
 
-    it('supports channels as array of strings', () => {
-      const yaml = `
-channels:
-  discord:
-    enabled: true
-    token: "test"
-    bindings:
-      - server: "123"
-        agent: main
-        channels:
-          - "chan1"
-          - "chan2"
-rbac:
-  roles: {}
-  users: {}
-`;
-      const filePath = path.join(tmpDir, 'platform.yaml');
-      fs.writeFileSync(filePath, yaml);
+describe("substituteEnvVars", () => {
+  it("replaces env vars in strings", () => {
+    process.env.__SUB_TEST = "replaced";
+    expect(substituteEnvVars("before ${__SUB_TEST} after")).toBe(
+      "before replaced after"
+    );
+    delete process.env.__SUB_TEST;
+  });
 
-      const config = loadPlatformConfig(filePath);
-      expect(config.channels.discord?.bindings[0].channels).toEqual(['chan1', 'chan2']);
-    });
+  it("handles nested objects", () => {
+    process.env.__SUB_NESTED = "deep";
+    const result = substituteEnvVars({ a: { b: "${__SUB_NESTED}" } });
+    expect(result).toEqual({ a: { b: "deep" } });
+    delete process.env.__SUB_NESTED;
+  });
+
+  it("handles arrays", () => {
+    process.env.__SUB_ARR = "item";
+    const result = substituteEnvVars(["${__SUB_ARR}", "plain"]);
+    expect(result).toEqual(["item", "plain"]);
+    delete process.env.__SUB_ARR;
+  });
+
+  it("passes through non-string primitives", () => {
+    expect(substituteEnvVars(42)).toBe(42);
+    expect(substituteEnvVars(true)).toBe(true);
+    expect(substituteEnvVars(null)).toBe(null);
   });
 });
