@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { PlatformConfig } from "../src/types.js";
 
 // Mock discord.js
+const BOT_USER_ID = "bot-123";
 const mockOn = vi.fn();
 const mockLogin = vi.fn().mockResolvedValue(undefined);
 const mockDestroy = vi.fn();
@@ -11,7 +12,7 @@ vi.mock("discord.js", () => ({
     on: mockOn,
     login: mockLogin,
     destroy: mockDestroy,
-    user: { tag: "TestBot#0001" },
+    user: { tag: "TestBot#0001", id: BOT_USER_ID },
   })),
   GatewayIntentBits: {
     Guilds: 1,
@@ -37,6 +38,26 @@ const discordConfig: DiscordConfig = {
   ],
 };
 
+/** Create a mock Discord message with bot mention */
+function mockMessage(overrides: Record<string, unknown> = {}) {
+  const defaults = {
+    author: { bot: false, id: "user-42" },
+    guildId: "server-1",
+    channelId: "any-channel",
+    content: `<@${BOT_USER_ID}> Hello`,
+    mentions: { has: (id: string) => id === BOT_USER_ID },
+    channel: { isThread: () => false, sendTyping: vi.fn().mockResolvedValue(undefined) },
+    reply: vi.fn(),
+  };
+  return { ...defaults, ...overrides };
+}
+
+function getMessageHandler() {
+  return mockOn.mock.calls.find(
+    (c) => c[0] === "messageCreate"
+  )![1] as (msg: Record<string, unknown>) => Promise<void>;
+}
+
 describe("DiscordAdapter", () => {
   let onMessage: ReturnType<typeof vi.fn>;
 
@@ -52,12 +73,12 @@ describe("DiscordAdapter", () => {
     expect(mockLogin).toHaveBeenCalledWith("test-token");
   });
 
-  it("registers messageCreate, threadCreate, and ready handlers", async () => {
+  it("registers messageCreate, threadCreate, and clientReady handlers", async () => {
     const adapter = new DiscordAdapter(discordConfig, onMessage);
     await adapter.start();
 
     const registeredEvents = mockOn.mock.calls.map((c) => c[0]);
-    expect(registeredEvents).toContain("ready");
+    expect(registeredEvents).toContain("clientReady");
     expect(registeredEvents).toContain("messageCreate");
     expect(registeredEvents).toContain("threadCreate");
   });
@@ -65,19 +86,22 @@ describe("DiscordAdapter", () => {
   it("ignores bot messages", async () => {
     const adapter = new DiscordAdapter(discordConfig, onMessage);
     await adapter.start();
+    const handler = getMessageHandler();
 
-    const messageHandler = mockOn.mock.calls.find(
-      (c) => c[0] === "messageCreate"
-    )![1] as (msg: Record<string, unknown>) => Promise<void>;
+    await handler(mockMessage({ author: { bot: true, id: "bot-id" } }));
 
-    await messageHandler({
-      author: { bot: true, id: "bot-id" },
-      guildId: "server-1",
-      channelId: "any-channel",
-      content: "bot message",
-      channel: { isThread: () => false, sendTyping: vi.fn() },
-      reply: vi.fn(),
-    });
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it("ignores messages without mention (non-thread)", async () => {
+    const adapter = new DiscordAdapter(discordConfig, onMessage);
+    await adapter.start();
+    const handler = getMessageHandler();
+
+    await handler(mockMessage({
+      content: "Hello without mention",
+      mentions: { has: () => false },
+    }));
 
     expect(onMessage).not.toHaveBeenCalled();
   });
@@ -85,80 +109,56 @@ describe("DiscordAdapter", () => {
   it("ignores messages from unbound servers", async () => {
     const adapter = new DiscordAdapter(discordConfig, onMessage);
     await adapter.start();
+    const handler = getMessageHandler();
 
-    const messageHandler = mockOn.mock.calls.find(
-      (c) => c[0] === "messageCreate"
-    )![1] as (msg: Record<string, unknown>) => Promise<void>;
-
-    await messageHandler({
-      author: { bot: false, id: "user-1" },
-      guildId: "unknown-server",
-      channelId: "some-channel",
-      content: "hello",
-      channel: { isThread: () => false, sendTyping: vi.fn() },
-      reply: vi.fn(),
-    });
+    await handler(mockMessage({ guildId: "unknown-server" }));
 
     expect(onMessage).not.toHaveBeenCalled();
   });
 
-  it("builds correct scope for wildcard binding", async () => {
+  it("builds correct scope and strips mention for wildcard binding", async () => {
     onMessage.mockResolvedValue("Response");
     const adapter = new DiscordAdapter(discordConfig, onMessage);
     await adapter.start();
+    const handler = getMessageHandler();
 
-    const messageHandler = mockOn.mock.calls.find(
-      (c) => c[0] === "messageCreate"
-    )![1] as (msg: Record<string, unknown>) => Promise<void>;
-
-    const mockReply = vi.fn();
-    await messageHandler({
-      author: { bot: false, id: "user-42" },
-      guildId: "server-1",
-      channelId: "any-channel",
-      content: "Hello",
-      channel: { isThread: () => false, sendTyping: vi.fn().mockResolvedValue(undefined) },
-      reply: mockReply,
-    });
+    const msg = mockMessage();
+    await handler(msg);
 
     expect(onMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         scope: "discord:server-1:any-channel:user-42",
-        content: "Hello",
+        content: "Hello", // mention stripped
         userId: "user-42",
         platform: "discord",
       })
     );
 
-    expect(mockReply).toHaveBeenCalledWith("Response");
+    expect(msg.reply).toHaveBeenCalledWith("Response");
   });
 
-  it("builds thread scope for thread messages", async () => {
+  it("responds to thread messages without mention", async () => {
     onMessage.mockResolvedValue("Thread response");
     const adapter = new DiscordAdapter(discordConfig, onMessage);
     await adapter.start();
+    const handler = getMessageHandler();
 
-    const messageHandler = mockOn.mock.calls.find(
-      (c) => c[0] === "messageCreate"
-    )![1] as (msg: Record<string, unknown>) => Promise<void>;
-
-    const mockReply = vi.fn();
-    await messageHandler({
-      author: { bot: false, id: "user-42" },
-      guildId: "server-1",
+    const msg = mockMessage({
       channelId: "thread-id",
       content: "Thread msg",
+      mentions: { has: () => false }, // no mention
       channel: {
         isThread: () => true,
         parentId: "parent-channel",
         sendTyping: vi.fn().mockResolvedValue(undefined),
       },
-      reply: mockReply,
     });
+    await handler(msg);
 
     expect(onMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         scope: "discord:server-1:parent-channel:thread-id:user-42",
+        content: "Thread msg",
       })
     );
   });
@@ -166,19 +166,12 @@ describe("DiscordAdapter", () => {
   it("ignores messages from unbound channels (array binding)", async () => {
     const adapter = new DiscordAdapter(discordConfig, onMessage);
     await adapter.start();
+    const handler = getMessageHandler();
 
-    const messageHandler = mockOn.mock.calls.find(
-      (c) => c[0] === "messageCreate"
-    )![1] as (msg: Record<string, unknown>) => Promise<void>;
-
-    await messageHandler({
-      author: { bot: false, id: "user-1" },
+    await handler(mockMessage({
       guildId: "server-2",
       channelId: "channel-z",
-      content: "hello",
-      channel: { isThread: () => false, sendTyping: vi.fn() },
-      reply: vi.fn(),
-    });
+    }));
 
     expect(onMessage).not.toHaveBeenCalled();
   });
@@ -187,19 +180,12 @@ describe("DiscordAdapter", () => {
     onMessage.mockResolvedValue("ok");
     const adapter = new DiscordAdapter(discordConfig, onMessage);
     await adapter.start();
+    const handler = getMessageHandler();
 
-    const messageHandler = mockOn.mock.calls.find(
-      (c) => c[0] === "messageCreate"
-    )![1] as (msg: Record<string, unknown>) => Promise<void>;
-
-    await messageHandler({
-      author: { bot: false, id: "user-1" },
+    await handler(mockMessage({
       guildId: "server-2",
       channelId: "channel-a",
-      content: "hi",
-      channel: { isThread: () => false, sendTyping: vi.fn().mockResolvedValue(undefined) },
-      reply: vi.fn(),
-    });
+    }));
 
     expect(onMessage).toHaveBeenCalled();
   });
@@ -216,21 +202,11 @@ describe("DiscordAdapter", () => {
     onMessage.mockRejectedValue(new Error("Agent down"));
     const adapter = new DiscordAdapter(discordConfig, onMessage);
     await adapter.start();
+    const handler = getMessageHandler();
 
-    const messageHandler = mockOn.mock.calls.find(
-      (c) => c[0] === "messageCreate"
-    )![1] as (msg: Record<string, unknown>) => Promise<void>;
+    const msg = mockMessage();
+    await handler(msg);
 
-    const mockReply = vi.fn();
-    await messageHandler({
-      author: { bot: false, id: "user-1" },
-      guildId: "server-1",
-      channelId: "any",
-      content: "crash",
-      channel: { isThread: () => false, sendTyping: vi.fn().mockResolvedValue(undefined) },
-      reply: mockReply,
-    });
-
-    expect(mockReply).toHaveBeenCalledWith("Error: Agent down");
+    expect(msg.reply).toHaveBeenCalledWith("Error: Agent down");
   });
 });

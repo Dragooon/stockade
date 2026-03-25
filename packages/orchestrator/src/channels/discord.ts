@@ -30,7 +30,7 @@ export class DiscordAdapter {
   }
 
   async start(): Promise<void> {
-    this.client.on("ready", () => {
+    this.client.on("clientReady", () => {
       console.log(`Discord bot logged in as ${this.client.user?.tag}`);
     });
 
@@ -57,25 +57,41 @@ export class DiscordAdapter {
     const serverId = message.guildId;
     if (!serverId) return;
 
+    // Only respond when mentioned or in a thread the bot is in
+    const isMentioned = message.mentions.has(this.client.user!.id);
+    const isThread = message.channel.isThread();
+    if (!isMentioned && !isThread) return;
+
     // Find a matching binding
     const channelId = message.channelId;
     const binding = this.findBinding(serverId, channelId);
-    if (!binding) return;
+    // For threads, check the parent channel's binding
+    const parentChannelId = isThread
+      ? (message.channel as unknown as { parentId: string }).parentId
+      : channelId;
+    const effectiveBinding = binding ?? this.findBinding(serverId, parentChannelId);
+    if (!effectiveBinding) return;
 
     // Build scope
-    const isThread = message.channel.isThread();
     const scope = isThread
       ? discordThreadScope(
           serverId,
-          (message.channel as unknown as { parentId: string }).parentId,
+          parentChannelId,
           channelId,
           message.author.id
         )
       : discordScope(serverId, channelId, message.author.id);
 
+    // Strip the bot mention from content
+    const content = message.content
+      .replace(new RegExp(`<@!?${this.client.user!.id}>`, "g"), "")
+      .trim();
+
+    if (!content) return; // empty after stripping mention
+
     const channelMessage: ChannelMessage = {
       scope,
-      content: message.content,
+      content,
       userId: message.author.id,
       platform: "discord",
     };

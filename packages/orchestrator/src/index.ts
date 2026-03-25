@@ -1,3 +1,4 @@
+import { config as loadEnv } from "dotenv";
 import Database from "better-sqlite3";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,10 @@ import { DiscordAdapter } from "./channels/discord.js";
 import type { ChannelMessage } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// 0. Load .env from config dir
+const envPath = resolve(__dirname, "../../../config/.env");
+loadEnv({ path: envPath });
 
 // 1. Load config
 const configDir = resolve(__dirname, "../../../config");
