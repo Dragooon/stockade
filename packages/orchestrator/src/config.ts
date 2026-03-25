@@ -14,6 +14,7 @@ const agentConfigSchema = z.object({
   remote: z.boolean().default(false),
   port: z.number().optional(),
   url: z.string().optional(),
+  subagents: z.array(z.string()).optional(),
 });
 
 const agentsConfigSchema = z.object({

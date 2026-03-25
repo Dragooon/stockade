@@ -1,10 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { AgentConfig, ChannelMessage } from "../src/types.js";
+import type {
+  AgentConfig,
+  AgentsConfig,
+  ChannelMessage,
+  PlatformConfig,
+} from "../src/types.js";
+import type { DispatchContext } from "../src/dispatcher.js";
 
 // Mock the Agent SDK before importing dispatcher
 const mockQuery = vi.fn();
+const mockTool = vi.fn();
+const mockCreateSdkMcpServer = vi.fn();
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: mockQuery,
+  tool: mockTool,
+  createSdkMcpServer: mockCreateSdkMcpServer,
 }));
 
 // Mock global fetch for remote dispatch
@@ -47,6 +57,58 @@ const remoteAgent: AgentConfig = {
   remote: true,
   port: 3001,
   url: "http://localhost:3001",
+};
+
+const agentWithSubagents: AgentConfig = {
+  model: "claude-sonnet-4-20250514",
+  system: "You can delegate to sub-agents.",
+  tools: ["Bash", "Read"],
+  lifecycle: "persistent",
+  remote: false,
+  subagents: ["researcher"],
+};
+
+const allAgents: AgentsConfig = {
+  agents: {
+    main: agentWithSubagents,
+    researcher: remoteAgent,
+  },
+};
+
+const platformConfig: PlatformConfig = {
+  channels: {
+    terminal: { enabled: true, agent: "main" },
+  },
+  rbac: {
+    roles: {
+      owner: { permissions: ["agent:*", "tool:*"] },
+      user: { permissions: ["agent:main"] },
+    },
+    users: {
+      alice: {
+        roles: ["owner"],
+        identities: { terminal: "alice" },
+      },
+      bob: {
+        roles: ["user"],
+        identities: { terminal: "bob" },
+      },
+    },
+  },
+};
+
+const ownerContext: DispatchContext = {
+  allAgents,
+  platform: platformConfig,
+  userId: "alice",
+  userPlatform: "terminal",
+};
+
+const restrictedContext: DispatchContext = {
+  allAgents,
+  platform: platformConfig,
+  userId: "bob",
+  userPlatform: "terminal",
 };
 
 describe("dispatch — in-process (local)", () => {
@@ -120,6 +182,188 @@ describe("dispatch — in-process (local)", () => {
         }),
       })
     );
+  });
+});
+
+describe("dispatch — sub-agent MCP integration", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Set up tool() mock to capture the handler and return a sentinel
+    mockTool.mockImplementation(
+      (name: string, _desc: string, _schema: unknown, handler: Function) => ({
+        __mockTool: true,
+        name,
+        handler,
+      })
+    );
+    mockCreateSdkMcpServer.mockReturnValue({ __mockMcpServer: true });
+  });
+
+  it("creates MCP server when agent has subagents and context is provided", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "sess-1" },
+        { type: "result", result: "Done" },
+      ])
+    );
+
+    await dispatch(
+      "main",
+      baseMessage,
+      agentWithSubagents,
+      null,
+      undefined,
+      ownerContext
+    );
+
+    // Verify MCP server was created
+    expect(mockCreateSdkMcpServer).toHaveBeenCalledWith({
+      name: "orchestrator",
+      version: "1.0.0",
+      tools: [expect.objectContaining({ name: "ask_agent" })],
+    });
+
+    // Verify mcpServers was passed to query options
+    const opts = mockQuery.mock.calls[0][0].options;
+    expect(opts.mcpServers).toEqual({
+      orchestrator: { __mockMcpServer: true },
+    });
+
+    // Verify ask_agent tool was added to allowedTools
+    expect(opts.allowedTools).toEqual([
+      "Bash",
+      "Read",
+      "mcp__orchestrator__ask_agent",
+    ]);
+  });
+
+  it("does NOT create MCP server when agent has no subagents", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "sess-1" },
+        { type: "result", result: "Done" },
+      ])
+    );
+
+    await dispatch("main", baseMessage, localAgent, null, undefined, ownerContext);
+
+    expect(mockCreateSdkMcpServer).not.toHaveBeenCalled();
+    const opts = mockQuery.mock.calls[0][0].options;
+    expect(opts.mcpServers).toBeUndefined();
+    expect(opts.allowedTools).toEqual(["Bash", "Read"]);
+  });
+
+  it("does NOT create MCP server when context is missing", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "sess-1" },
+        { type: "result", result: "Done" },
+      ])
+    );
+
+    await dispatch("main", baseMessage, agentWithSubagents, null);
+
+    expect(mockCreateSdkMcpServer).not.toHaveBeenCalled();
+  });
+
+  it("ask_agent handler dispatches to remote sub-agent via fetch", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "sess-1" },
+        { type: "result", result: "Done" },
+      ])
+    );
+
+    // Set up fetch mock for the remote sub-agent
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        result: "Research findings here",
+        sessionId: "sess-sub-1",
+      }),
+    });
+
+    await dispatch(
+      "main",
+      baseMessage,
+      agentWithSubagents,
+      null,
+      undefined,
+      ownerContext
+    );
+
+    // Get the ask_agent handler that was passed to tool()
+    const toolCall = mockTool.mock.calls[0];
+    const handler = toolCall[3];
+
+    // Invoke the handler as if the agent called ask_agent
+    const result = await handler({ agentId: "researcher", task: "Find info on X" });
+
+    // Should have dispatched to the remote researcher via fetch
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:3001/run",
+      expect.objectContaining({ method: "POST" })
+    );
+
+    // Result should contain the remote agent's response
+    expect(result).toEqual({
+      content: [{ type: "text", text: "Research findings here" }],
+    });
+  });
+
+  it("ask_agent handler denies access for unauthorized user", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "sess-1" },
+        { type: "result", result: "Done" },
+      ])
+    );
+
+    // bob only has agent:main, not agent:researcher
+    await dispatch(
+      "main",
+      { ...baseMessage, userId: "bob" },
+      agentWithSubagents,
+      null,
+      undefined,
+      restrictedContext
+    );
+
+    const handler = mockTool.mock.calls[0][3];
+    const result = await handler({ agentId: "researcher", task: "Find info" });
+
+    expect(result).toEqual({
+      content: [
+        { type: "text", text: 'Access denied: user cannot invoke agent "researcher"' },
+      ],
+    });
+    // Should NOT have dispatched
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("ask_agent handler returns error for unknown agent", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "sess-1" },
+        { type: "result", result: "Done" },
+      ])
+    );
+
+    await dispatch(
+      "main",
+      baseMessage,
+      agentWithSubagents,
+      null,
+      undefined,
+      ownerContext
+    );
+
+    const handler = mockTool.mock.calls[0][3];
+    const result = await handler({ agentId: "nonexistent", task: "Do something" });
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: "Unknown agent: nonexistent" }],
+    });
   });
 });
 

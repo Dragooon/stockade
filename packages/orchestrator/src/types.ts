@@ -7,6 +7,7 @@ export interface AgentConfig {
   remote: boolean;
   port?: number;
   url?: string;
+  subagents?: string[];
 }
 
 /** Top-level agents.yaml shape */

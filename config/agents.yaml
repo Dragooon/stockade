@@ -4,6 +4,9 @@ agents:
     system: |
       You are a helpful assistant with access to shell commands and file operations.
       Keep responses concise.
+
+      You can delegate tasks to sub-agents using the ask_agent tool:
+      - researcher: for web research and information gathering
     tools:
       - Bash
       - Read
@@ -11,5 +14,18 @@ agents:
       - Edit
       - Glob
       - Grep
+    subagents:
+      - researcher
     lifecycle: persistent
+    remote: false
+
+  researcher:
+    model: haiku
+    system: |
+      You are a research agent. Search the web for information and summarize findings clearly.
+      Be thorough but concise.
+    tools:
+      - WebSearch
+      - WebFetch
+    lifecycle: ephemeral
     remote: false

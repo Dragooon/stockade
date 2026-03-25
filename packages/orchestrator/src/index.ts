@@ -8,7 +8,7 @@ import { loadConfig } from "./config.js";
 import { resolveAgent } from "./router.js";
 import { checkAccess, buildPermissionHook } from "./rbac.js";
 import { initSessionsTable, getSessionId, setSessionId } from "./sessions.js";
-import { dispatch } from "./dispatcher.js";
+import { dispatch, type DispatchContext } from "./dispatcher.js";
 import { TerminalAdapter } from "./channels/terminal.js";
 import { DiscordAdapter } from "./channels/discord.js";
 import type { ChannelMessage } from "./types.js";
@@ -48,12 +48,20 @@ async function handleMessage(msg: ChannelMessage): Promise<string> {
     config.platform
   );
 
+  const context: DispatchContext = {
+    allAgents: config.agents,
+    platform: config.platform,
+    userId: msg.userId,
+    userPlatform: msg.platform,
+  };
+
   const result = await dispatch(
     agentId,
     msg,
     agentConfig,
     sessionId,
-    permissionHook
+    permissionHook,
+    context
   );
 
   setSessionId(db, msg.scope, result.sessionId);
