@@ -1,0 +1,38 @@
+{
+  "name": "@agent-platform/orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@casl/ability": "^6.7.2",
+    "better-sqlite3": "^11.7.0",
+    "dockerode": "^4.0.4",
+    "drizzle-orm": "^0.38.0",
+    "execa": "^9.5.2",
+    "js-yaml": "^4.1.0",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "uuid": "^11.0.5",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/dockerode": "^3.3.34",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/uuid": "^10.0.0",
+    "drizzle-kit": "^0.30.0",
+    "typescript": "^5.7.0",
+    "vite-tsconfig-paths": "^6.1.1",
+    "vitest": "^3.0.0"
+  }
+}

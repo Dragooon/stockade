@@ -1,0 +1,6 @@
+{
+  "/api/health/route": "app/api/health/route.js",
+  "/api/message/route": "app/api/message/route.js",
+  "/api/sessions/[scope]/route": "app/api/sessions/[scope]/route.js",
+  "/api/subagent/route": "app/api/subagent/route.js"
+}

@@ -1,0 +1,14 @@
+{
+  "..\\..\\..\\node_modules\\.pnpm\\next@15.5.14_@opentelemetry_79f4517c1845915572cb8673f986b15d\\node_modules\\next\\dist\\client\\index.js -> ../pages/_app": {
+    "id": 8195,
+    "files": [
+      "static/chunks/195.08429dfe78b1cef7.js"
+    ]
+  },
+  "..\\..\\..\\node_modules\\.pnpm\\next@15.5.14_@opentelemetry_79f4517c1845915572cb8673f986b15d\\node_modules\\next\\dist\\client\\index.js -> ../pages/_error": {
+    "id": 7022,
+    "files": [
+      "static/chunks/22.88e343721374a575.js"
+    ]
+  }
+}

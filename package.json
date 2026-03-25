@@ -5,6 +5,16 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "dev": "pnpm -r --parallel dev",
-    "start": "pnpm -r --parallel start"
+    "start": "pnpm -r --parallel start",
+    "start:agent": "PORT=3001 AGENT_ID=main node packages/agent/dist/index.js",
+    "start:orchestrator": "pnpm --filter @agent-platform/orchestrator start -- -p 3000",
+    "start:terminal": "ORCHESTRATOR_URL=http://localhost:3000 TERMINAL_ENABLED=true TERMINAL_AGENT=main node --import tsx packages/channels/src/main.ts",
+    "start:all": "bash start.sh"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
   }
 }

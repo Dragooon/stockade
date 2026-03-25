@@ -1,0 +1,28 @@
+channels:
+  terminal:
+    enabled: true
+    agent: main
+  discord:
+    enabled: true
+    token: ${DISCORD_TOKEN}
+    bindings:
+      - server: "1482310397418672170"
+        agent: main
+        channels: "*"
+
+rbac:
+  roles:
+    owner:
+      permissions:
+        - "agent:*"
+        - "tool:*"
+    user:
+      permissions:
+        - "agent:main"
+  users:
+    shitiz:
+      roles:
+        - owner
+      identities:
+        discord: "274195702220062720"
+        terminal: "mail"
