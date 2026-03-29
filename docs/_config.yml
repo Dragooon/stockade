@@ -1,5 +1,2 @@
 title: Stockade
 description: Multi-agent orchestrator for Claude with layered security
-remote_theme: pages-themes/hacker@v0.2.0
-plugins:
-  - jekyll-remote-theme
