@@ -16,6 +16,7 @@ import { ContainerManager, DockerClient, DispatchQueue } from "./containers/inde
 import { startSchedulerLoop, stopSchedulerLoop } from "./scheduler/index.js";
 import type { ChannelMessage, AskApprovalFn, ApprovalChannel } from "./types.js";
 import { buildGatedAskApproval, resolveEffectivePermissions } from "./gatekeeper.js";
+import { watchConfigFiles } from "./watch.js";
 
 import { PLATFORM_HOME } from "./config.js";
 
@@ -27,7 +28,7 @@ const envPath = resolve(PLATFORM_HOME, ".env");
 loadEnv({ path: envPath });
 
 // 1. Load config from platform home, resolve repo-relative paths against project root
-const config = loadConfig(PLATFORM_HOME, projectRoot);
+let config = loadConfig(PLATFORM_HOME, projectRoot);
 const paths = config.platform.paths!;
 
 // Ensure data directories exist
@@ -262,7 +263,7 @@ async function handleMessage(msg: ChannelMessage, approvalChannel?: ApprovalChan
 
 // 5. Start channels
 // Resolve gatekeeper agent config (if gatekeeper is enabled)
-const gatekeeperAgentConfig = config.platform.gatekeeper?.enabled
+let gatekeeperAgentConfig = config.platform.gatekeeper?.enabled
   ? config.agents.agents[config.platform.gatekeeper.agent]
   : undefined;
 
@@ -299,9 +300,27 @@ if (config.platform.channels.discord?.enabled) {
   console.log("Discord channel started");
 }
 
-// 6. Graceful shutdown
+// 6. Hot reload config on file changes
+// Agent definitions, RBAC, gatekeeper, and .env are reloaded live.
+// Channels, container manager, and paths are NOT reloaded (require restart).
+const stopWatch = watchConfigFiles(PLATFORM_HOME, envPath, projectRoot, (next) => {
+  config = { agents: next.agents, platform: { ...next.platform, paths: config.platform.paths } };
+
+  // Re-resolve gatekeeper agent config
+  gatekeeperAgentConfig = config.platform.gatekeeper?.enabled
+    ? config.agents.agents[config.platform.gatekeeper.agent]
+    : undefined;
+
+  // Ensure directories exist for any new agents
+  for (const agentId of Object.keys(config.agents.agents)) {
+    mkdirSync(resolve(paths.agents_dir, agentId), { recursive: true });
+  }
+});
+
+// 7. Graceful shutdown
 async function shutdown() {
   // Stop accepting new work
+  stopWatch();
   dispatchQueue.shutdown();
   stopSchedulerLoop();
 

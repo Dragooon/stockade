@@ -21,8 +21,11 @@ type AppEnv = {
 /**
  * Start the gateway API server.
  * Provides credential storage (apw store) and token management.
+ *
+ * Accepts a config getter for hot-reloading provider and gateway settings.
+ * Listen address/port use the initial config (changing requires restart).
  */
-export function startGateway(config: ProxyConfig) {
+export function startGateway(getConfig: () => ProxyConfig) {
   const app = new Hono<AppEnv>();
 
   // ── Auth middleware ─────────────────────────────────────────
@@ -54,7 +57,7 @@ export function startGateway(config: ProxyConfig) {
       return c.json({ error: "Credential scope denied for this key" }, 403);
     }
 
-    const ttlMs = config.gateway.ref_ttl * 1000;
+    const ttlMs = getConfig().gateway.ref_ttl * 1000;
     const ref = issueRef(rawToken, key, ttlMs);
     console.log(`[gateway] issued ref for key="${key}"`);
     return c.json({ ref: ref.ref, expiresAt: ref.expiresAt });
@@ -86,7 +89,7 @@ export function startGateway(config: ProxyConfig) {
     }
 
     // Write to provider
-    await storeCredential(config.provider, key, body.value);
+    await storeCredential(getConfig().provider, key, body.value);
     console.log(`[gateway] stored credential: ${key}`);
 
     // If route metadata provided, log it (actual config update is a future enhancement)
@@ -117,7 +120,7 @@ export function startGateway(config: ProxyConfig) {
       body.agentId,
       body.credentials ?? [],
       body.storeKeys,
-      config.gateway.token_ttl
+      getConfig().gateway.token_ttl
     );
 
     console.log(`[gateway] issued token for agent "${body.agentId}"`);
@@ -139,17 +142,18 @@ export function startGateway(config: ProxyConfig) {
     return c.json({ ok: true });
   });
 
-  const host = config.host ?? "127.0.0.1";
+  const initialConfig = getConfig();
+  const host = initialConfig.host ?? "127.0.0.1";
   const server = serve({
     fetch: app.fetch,
     hostname: host,
-    port: config.gateway.port,
+    port: initialConfig.gateway.port,
   });
 
   // Sweep expired/consumed ref tokens every 60s
   const sweepHandle = startRefSweep(60_000);
   server.on("close", () => clearInterval(sweepHandle));
 
-  console.log(`[gateway] listening on ${host}:${config.gateway.port}`);
+  console.log(`[gateway] listening on ${host}:${initialConfig.gateway.port}`);
   return server;
 }

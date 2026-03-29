@@ -187,7 +187,7 @@ describe("HTTP Proxy (real)", () => {
     };
 
     // 1d. Start the REAL proxy
-    proxyServer = startHttpProxy(config);
+    proxyServer = startHttpProxy(() => config);
     await once(proxyServer, "listening");
     proxyPort = (proxyServer.address() as { port: number }).port;
   });
@@ -350,7 +350,7 @@ describe("CONNECT tunnel (real)", () => {
       gateway: { port: 10256, token_ttl: 3600 },
     };
 
-    proxyServer = startHttpProxy(config);
+    proxyServer = startHttpProxy(() => config);
     await once(proxyServer, "listening");
     proxyPort = (proxyServer.address() as { port: number }).port;
   });

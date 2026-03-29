@@ -12,9 +12,13 @@ import { ensureSSHCA, validateAgentCert, type SshCaBundle } from "./certs.js";
  * Start the SSH tunnel server (jump host / bastion).
  * Agents connect with short-lived certificates.
  * The proxy authenticates to targets using real SSH keys from the credential provider.
+ *
+ * Accepts a config getter for hot-reloading policy and routes.
+ * SSH CA and host key are loaded once at startup.
  */
-export function startSshTunnel(config: ProxyConfig): InstanceType<typeof SshServer> {
-  const ca = ensureSSHCA(config.ssh.ca_key);
+export function startSshTunnel(getConfig: () => ProxyConfig): InstanceType<typeof SshServer> {
+  const initialConfig = getConfig();
+  const ca = ensureSSHCA(initialConfig.ssh.ca_key);
 
   // Generate a host key for our SSH server
   // ssh2 requires traditional PEM (PKCS1), not PKCS8
@@ -29,13 +33,13 @@ export function startSshTunnel(config: ProxyConfig): InstanceType<typeof SshServ
       hostKeys: [hostKey],
     },
     (client: Connection) => {
-      handleClient(client, config, ca);
+      handleClient(client, getConfig(), ca);
     }
   );
 
-  const host = config.host ?? "127.0.0.1";
-  server.listen(config.ssh.port, host, () => {
-    console.log(`[ssh-tunnel] listening on ${host}:${config.ssh.port}`);
+  const host = initialConfig.host ?? "127.0.0.1";
+  server.listen(initialConfig.ssh.port, host, () => {
+    console.log(`[ssh-tunnel] listening on ${host}:${initialConfig.ssh.port}`);
   });
 
   return server;

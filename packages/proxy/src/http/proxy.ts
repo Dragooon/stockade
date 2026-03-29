@@ -11,12 +11,17 @@ import { ensureCA, generateCert, type CaBundle } from "./tls.js";
 /**
  * Start the HTTP forward proxy.
  * Handles both plain HTTP (via request handler) and HTTPS (via CONNECT tunnel).
+ *
+ * Accepts a config getter so policy, routes, and provider settings
+ * can be hot-reloaded without restarting the server.
+ * TLS CA is loaded once at startup (changing certs requires restart).
  */
-export function startHttpProxy(config: ProxyConfig): ReturnType<typeof createServer> {
-  const ca = ensureCA(config.http.tls.ca_cert, config.http.tls.ca_key);
+export function startHttpProxy(getConfig: () => ProxyConfig): ReturnType<typeof createServer> {
+  const initialConfig = getConfig();
+  const ca = ensureCA(initialConfig.http.tls.ca_cert, initialConfig.http.tls.ca_key);
 
   const server = createServer((req, res) => {
-    handleHttpRequest(req, res, config, ca).catch((err) => {
+    handleHttpRequest(req, res, getConfig(), ca).catch((err) => {
       console.error("[http-proxy] request error:", err);
       if (!res.headersSent) {
         res.writeHead(502, { "Content-Type": "text/plain" });
@@ -27,15 +32,15 @@ export function startHttpProxy(config: ProxyConfig): ReturnType<typeof createSer
 
   // Handle CONNECT for HTTPS tunneling
   server.on("connect", (req, clientSocket: net.Socket, head) => {
-    handleConnect(req, clientSocket, head, config, ca).catch((err) => {
+    handleConnect(req, clientSocket, head, getConfig(), ca).catch((err) => {
       console.error("[http-proxy] CONNECT error:", err);
       clientSocket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
     });
   });
 
-  const host = config.host ?? "127.0.0.1";
-  server.listen(config.http.port, host, () => {
-    console.log(`[http-proxy] listening on ${host}:${config.http.port}`);
+  const host = initialConfig.host ?? "127.0.0.1";
+  server.listen(initialConfig.http.port, host, () => {
+    console.log(`[http-proxy] listening on ${host}:${initialConfig.http.port}`);
   });
 
   return server;

@@ -214,7 +214,7 @@ describe("HTTP proxy — integration", () => {
     });
 
     // Start the real proxy
-    proxyServer = startHttpProxy(config);
+    proxyServer = startHttpProxy(() => config);
     await once(proxyServer, "listening");
     proxyPort = (proxyServer.address() as { port: number }).port;
 
@@ -397,7 +397,7 @@ describe("CONNECT tunnel — policy enforcement", () => {
 
   beforeAll(async () => {
     const config = buildTestConfig();
-    proxyServer = startHttpProxy(config);
+    proxyServer = startHttpProxy(() => config);
     await once(proxyServer, "listening");
     proxyPort = (proxyServer.address() as { port: number }).port;
   });
