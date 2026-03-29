@@ -13,7 +13,7 @@ COPY packages/worker/ packages/worker/
 RUN pnpm install --frozen-lockfile
 
 # Build the worker
-RUN pnpm --filter @agent-platform/worker build
+RUN pnpm --filter @stockade/worker build
 
 # ── Production stage ──────────────────────────────────────────────
 FROM node:22-slim
@@ -36,6 +36,10 @@ RUN pnpm install --frozen-lockfile --prod
 
 # Copy built output from builder
 COPY --from=builder /app/packages/worker/dist packages/worker/dist
+
+# Copy entrypoint (strip Windows CRLF line endings)
+COPY packages/worker/entrypoint.sh /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 WORKDIR /app/packages/worker
 
