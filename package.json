@@ -7,10 +7,10 @@
     "test": "pnpm -r test",
     "dev": "pnpm -r --parallel dev",
     "start": "bash bin/stockade",
+    "start:proxy": "node --import tsx packages/proxy/src/index.ts",
     "start:orchestrator": "node --import tsx packages/orchestrator/src/index.ts",
     "start:worker": "node --import tsx packages/worker/src/index.ts",
-    "start:proxy": "bash bin/stockade proxy",
-    "start:validate": "bash bin/stockade validate",
+    "start:validate": "node --import tsx packages/orchestrator/src/validate.ts",
     "setup": "bash bin/setup.sh",
     "setup:no-docker": "bash bin/setup.sh --no-docker"
   },
