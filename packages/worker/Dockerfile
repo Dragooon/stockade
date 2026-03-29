@@ -39,9 +39,9 @@ COPY --from=builder /app/packages/worker/dist packages/worker/dist
 
 WORKDIR /app/packages/worker
 
-# Create directories for SSH cert injection and Claude Code credentials
-RUN mkdir -p /home/node/.ssh /home/node/.claude \
-    && chown -R node:node /home/node/.ssh /home/node/.claude
+# Create directories for SSH cert injection, Claude Code credentials, and workspace
+RUN mkdir -p /home/node/.ssh /home/node/.claude /workspace \
+    && chown -R node:node /home/node/.ssh /home/node/.claude /workspace
 
 # Install apw CLI (credential proxy ref token tool)
 COPY packages/proxy/src/cli/apw /usr/local/bin/apw

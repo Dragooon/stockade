@@ -28,7 +28,8 @@ export async function provisionContainer(
   containersConfig: ContainersConfig,
   proxyGatewayUrl: string,
   dataDir: string,
-  port: number
+  port: number,
+  agentsDir?: string
 ): Promise<ProvisionResult> {
   const containerDir = resolve(dataDir, "containers", agentId);
   mkdirSync(containerDir, { recursive: true });
@@ -104,6 +105,15 @@ export async function provisionContainer(
     if (existsSync(caCertPath)) {
       volumes.push(`${caCertPath}:/certs/proxy-ca.crt:ro`);
     }
+  }
+
+  // Agent workspace — mount the agent's host workspace as /workspace in the container.
+  // The SDK uses this as cwd, so CLAUDE.md, skills, and memory are available.
+  if (agentsDir) {
+    const workspaceDir = resolve(agentsDir, agentId);
+    mkdirSync(workspaceDir, { recursive: true });
+    volumes.push(`${workspaceDir}:/workspace`);
+    env.AGENT_WORKSPACE = "/workspace";
   }
 
   // Agent-specific volumes from config

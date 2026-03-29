@@ -100,7 +100,8 @@ if (config.platform.containers) {
     docker,
     config.platform.containers,
     proxyGatewayUrl,
-    paths.data_dir
+    paths.data_dir,
+    paths.agents_dir
   );
 
   // Ensure Docker network exists

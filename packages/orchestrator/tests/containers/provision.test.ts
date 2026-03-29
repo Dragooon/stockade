@@ -140,6 +140,62 @@ describe("provisionContainer", () => {
     expect(content.claudeAiOauth.accessToken).toBe("sk-ant-stub-container-proxy-handles-auth");
   });
 
+  it("mounts agent workspace when agentsDir is provided", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        token: "apw-main-ws",
+        expiresAt: Date.now() + 86400000,
+      }),
+    });
+
+    const agentsDir = resolve(tmpBase, "agents");
+    const result = await provisionContainer(
+      "main",
+      agentConfig,
+      containersConfig,
+      "http://localhost:10256",
+      tmpBase,
+      3001,
+      agentsDir
+    );
+
+    // Workspace volume is mounted read-write
+    const wsVolume = result.volumes.find((v: string) => v.includes("/workspace"));
+    expect(wsVolume).toBeDefined();
+    expect(wsVolume).toContain(resolve(agentsDir, "main"));
+    expect(wsVolume).not.toContain(":ro");
+
+    // AGENT_WORKSPACE env var is set
+    expect(result.env.AGENT_WORKSPACE).toBe("/workspace");
+
+    // Workspace dir was created on host
+    expect(existsSync(resolve(agentsDir, "main"))).toBe(true);
+  });
+
+  it("omits workspace mount when agentsDir is not provided", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        token: "apw-main-nows",
+        expiresAt: Date.now() + 86400000,
+      }),
+    });
+
+    const result = await provisionContainer(
+      "main",
+      agentConfig,
+      containersConfig,
+      "http://localhost:10256",
+      tmpBase,
+      3001
+    );
+
+    const wsVolume = result.volumes.find((v: string) => v.includes("/workspace"));
+    expect(wsVolume).toBeUndefined();
+    expect(result.env.AGENT_WORKSPACE).toBeUndefined();
+  });
+
   it("includes agent-specific volumes", async () => {
     mockFetch.mockResolvedValue({
       ok: true,

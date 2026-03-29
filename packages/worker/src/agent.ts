@@ -13,6 +13,7 @@ export async function runAgent(request: WorkerRunRequest): Promise<WorkerRunResp
     systemPrompt: request.systemPrompt,
     resume: request.sessionId ?? undefined,
     maxTurns: request.maxTurns ?? DEFAULT_MAX_TURNS,
+    cwd: process.env.AGENT_WORKSPACE ?? process.cwd(),
   };
 
   // Only set allowedTools when explicitly provided — omitting enables all tools

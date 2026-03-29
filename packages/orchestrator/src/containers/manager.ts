@@ -22,7 +22,8 @@ export class ContainerManager {
     private readonly docker: DockerClient,
     private readonly config: ContainersConfig,
     private readonly proxyGatewayUrl: string,
-    private readonly dataDir: string
+    private readonly dataDir: string,
+    private readonly agentsDir?: string
   ) {
     this.portAllocator = new PortAllocator(config.port_range);
   }
@@ -86,7 +87,8 @@ export class ContainerManager {
         this.config,
         this.proxyGatewayUrl,
         this.dataDir,
-        port
+        port,
+        this.agentsDir
       );
     } catch (err) {
       this.portAllocator.release(port);
