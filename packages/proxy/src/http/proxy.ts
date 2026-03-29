@@ -5,6 +5,7 @@ import type { ProxyConfig } from "../shared/types.js";
 import { evaluatePolicy } from "../shared/policy.js";
 import { resolveCredential } from "../shared/credentials.js";
 import { stripHeaders, injectCredential, matchRoute } from "./injector.js";
+import { rewriteBody } from "./body-rewriter.js";
 import { ensureCA, generateCert, type CaBundle } from "./tls.js";
 
 /**
@@ -77,7 +78,19 @@ async function handleHttpRequest(
 
   // Forward the request
   const targetUrl = url.toString();
-  const body = await collectBody(req);
+  let body = await collectBody(req);
+
+  // Ref token substitution: replace apw-ref:... tokens with real credentials
+  if (method !== "GET" && method !== "HEAD") {
+    const ct = headers["content-type"] ?? "";
+    const rewritten = await rewriteBody(body, ct, config.provider);
+    if (rewritten.replaced) {
+      body = rewritten.body;
+      if (headers["content-length"]) {
+        headers["content-length"] = String(body.length);
+      }
+    }
+  }
 
   const response = await fetch(targetUrl, {
     method,
@@ -210,7 +223,19 @@ async function handleMitmRequest(
   }
 
   // Collect request body
-  const body = await collectBody(req);
+  let body = await collectBody(req);
+
+  // Ref token substitution: replace apw-ref:... tokens with real credentials
+  if (method !== "GET" && method !== "HEAD" && body.length > 0) {
+    const ct = headers["content-type"] ?? "";
+    const rewritten = await rewriteBody(body, ct, config.provider);
+    if (rewritten.replaced) {
+      body = rewritten.body;
+      if (headers["content-length"]) {
+        headers["content-length"] = String(body.length);
+      }
+    }
+  }
 
   // Forward to upstream
   const scheme = port === 443 ? "https" : "http";

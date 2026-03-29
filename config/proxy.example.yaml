@@ -2,7 +2,10 @@
 # Copy to proxy.yaml and customize.
 
 proxy:
-  host: "0.0.0.0"
+  # Bind address. Use "127.0.0.1" (default) to restrict to local access.
+  # Use "0.0.0.0" if Docker containers need to reach the proxy via
+  # host.docker.internal (pair with firewall rules — see scripts/setup-firewall.ps1).
+  host: "127.0.0.1"
 
   # Credential provider — CLI command templates.
   # Supports any secret manager: 1Password, Bitwarden, AWS SM, files, etc.

@@ -71,6 +71,8 @@ export const ProviderSchema = z.object({
 export const GatewaySchema = z.object({
   port: z.number().int().positive().default(10256),
   token_ttl: z.number().positive().default(86400),
+  /** TTL for credential reference tokens (seconds). Default: 5 minutes. */
+  ref_ttl: z.number().positive().default(300),
 });
 
 // ─── Top-level ProxyConfig ──────────────────────────────────────
@@ -112,6 +114,20 @@ export interface GatewayToken {
   credentials: string[];
   storeKeys?: string[];
   expiresAt: number;
+}
+
+/** An opaque reference token that stands in for a real credential in request bodies. */
+export interface RefToken {
+  /** The full ref string: "apw-ref:<key>:<nonce>" */
+  ref: string;
+  /** The credential key this ref resolves to */
+  credentialKey: string;
+  /** The gateway token that issued this ref (for scope validation) */
+  gatewayToken: string;
+  /** Absolute timestamp (ms) when this ref expires */
+  expiresAt: number;
+  /** Whether this ref has been consumed (one-time use) */
+  consumed: boolean;
 }
 
 /** Request context for policy evaluation */

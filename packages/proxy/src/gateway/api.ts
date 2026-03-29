@@ -5,9 +5,11 @@ import { storeCredential, invalidateCache } from "../shared/credentials.js";
 import {
   issueToken,
   validateToken,
+  checkCredentialScope,
   checkStoreScope,
   revokeToken,
 } from "./tokens.js";
+import { issueRef, startRefSweep } from "./refs.js";
 
 type AppEnv = {
   Variables: {
@@ -38,6 +40,24 @@ export function startGateway(config: ProxyConfig) {
     c.set("tokenData", tokenData);
     c.set("rawToken", token);
     await next();
+  });
+
+  // ── GET /gateway/ref/* — Issue a credential reference token ──
+  // Returns an opaque ref string the agent can place in request bodies.
+  // The proxy substitutes it with the real credential on the wire.
+  app.get("/gateway/ref/*", async (c) => {
+    const key = new URL(c.req.url).pathname.replace(/^\/gateway\/ref\//, "");
+    const rawToken = c.get("rawToken") as string;
+
+    if (!checkCredentialScope(rawToken, key)) {
+      console.log(`[gateway] ref denied: key="${key}"`);
+      return c.json({ error: "Credential scope denied for this key" }, 403);
+    }
+
+    const ttlMs = config.gateway.ref_ttl * 1000;
+    const ref = issueRef(rawToken, key, ttlMs);
+    console.log(`[gateway] issued ref for key="${key}"`);
+    return c.json({ ref: ref.ref, expiresAt: ref.expiresAt });
   });
 
   // ── POST /gateway/store/* — Store a credential ──────────
@@ -125,6 +145,10 @@ export function startGateway(config: ProxyConfig) {
     hostname: host,
     port: config.gateway.port,
   });
+
+  // Sweep expired/consumed ref tokens every 60s
+  const sweepHandle = startRefSweep(60_000);
+  server.on("close", () => clearInterval(sweepHandle));
 
   console.log(`[gateway] listening on ${host}:${config.gateway.port}`);
   return server;

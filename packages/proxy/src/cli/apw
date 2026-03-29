@@ -20,6 +20,29 @@ COMMAND="${1:-}"
 shift 2>/dev/null || true
 
 case "$COMMAND" in
+  read)
+    KEY="${1:-}"
+    if [ -z "$KEY" ]; then
+      echo "Usage: apw read <key>" >&2
+      exit 1
+    fi
+
+    RESPONSE=$(curl -s -w "\n%{http_code}" \
+      -H "Authorization: Bearer $APW_TOKEN" \
+      "${APW_GATEWAY}/gateway/ref/${KEY}")
+
+    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+    BODY_RESP=$(echo "$RESPONSE" | sed '$d')
+
+    if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+      # Extract the ref token from JSON and print it raw (no newline)
+      echo "$BODY_RESP" | grep -o '"ref":"[^"]*"' | cut -d'"' -f4 | tr -d '\n'
+    else
+      echo "Error ($HTTP_CODE): $BODY_RESP" >&2
+      exit 1
+    fi
+    ;;
+
   store)
     KEY="${1:-}"
     shift 2>/dev/null || true
@@ -82,9 +105,9 @@ case "$COMMAND" in
     ;;
 
   *)
-    echo "Usage: apw store <key> [--host H --header H --format F]" >&2
-    echo "" >&2
-    echo "Reads secret value from stdin and stores it via the gateway." >&2
+    echo "Usage:" >&2
+    echo "  apw read <key>                              — get a ref token for a credential" >&2
+    echo "  apw store <key> [--host H --header H --format F]  — store a credential from stdin" >&2
     exit 1
     ;;
 esac
