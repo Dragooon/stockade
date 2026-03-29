@@ -1,5 +1,7 @@
 # Stockade
 
+[**dragooon.github.io/stockade**](https://dragooon.github.io/stockade/)
+
 > **Alpha software.** Architecture is stable and tested (749 tests), but APIs and config format may change. Not yet recommended for production use.
 
 Multi-agent orchestrator for Claude with layered security. Agents run in containers with no secrets, no direct internet, and per-tool permission rules — but you can poke precise holes when you need to.
