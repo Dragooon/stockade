@@ -4,176 +4,38 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Stockade</title>
-<style>
-:root {
-  --bg: #0a0a0a;
-  --fg: #e0e0e0;
-  --accent: #4fc3f7;
-  --muted: #888;
-  --border: #222;
-  --code-bg: #141414;
-  --max-w: 720px;
-}
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-  background: var(--bg);
-  color: var(--fg);
-  line-height: 1.6;
-  padding: 0 20px;
-}
-a { color: var(--accent); text-decoration: none; }
-a:hover { text-decoration: underline; }
-
-.container { max-width: var(--max-w); margin: 0 auto; padding: 60px 0; }
-
-h1 {
-  font-size: 2.5rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  margin-bottom: 12px;
-}
-.tagline {
-  color: var(--muted);
-  font-size: 1.1rem;
-  margin-bottom: 40px;
-}
-
-h2 {
-  font-size: 1.2rem;
-  font-weight: 600;
-  margin: 40px 0 16px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
-}
-
-.diagram {
-  background: var(--code-bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 20px;
-  overflow-x: auto;
-  font-size: 0.85rem;
-  line-height: 1.5;
-  margin: 20px 0;
-  white-space: pre;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.85rem;
-  margin: 16px 0;
-}
-th, td {
-  padding: 8px 12px;
-  text-align: left;
-  border-bottom: 1px solid var(--border);
-}
-th {
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.layers {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 12px;
-  margin: 16px 0;
-}
-.layer {
-  background: var(--code-bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 14px 18px;
-}
-.layer-name {
-  color: var(--accent);
-  font-weight: 600;
-  font-size: 0.9rem;
-}
-.layer-desc {
-  color: var(--muted);
-  font-size: 0.85rem;
-  margin-top: 4px;
-}
-
-code {
-  background: var(--code-bg);
-  padding: 2px 6px;
-  border-radius: 3px;
-  font-size: 0.9em;
-}
-
-.links {
-  margin-top: 40px;
-  display: flex;
-  gap: 20px;
-  flex-wrap: wrap;
-}
-.links a {
-  background: var(--code-bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 10px 20px;
-  font-size: 0.9rem;
-  transition: border-color 0.2s;
-}
-.links a:hover {
-  border-color: var(--accent);
-  text-decoration: none;
-}
-
-nav {
-  display: flex;
-  gap: 20px;
-  margin-bottom: 40px;
-  font-size: 0.9rem;
-}
-nav a { color: var(--muted); }
-nav a:hover, nav a.active { color: var(--accent); }
-
-footer {
-  margin-top: 60px;
-  padding-top: 20px;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 0.8rem;
-}
-</style>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="container">
 
 <nav>
   <a href="./" class="active">Home</a>
-  <a href="./guide.html">Guide</a>
+  <a href="./quickstart.html">Quick Start</a>
+  <a href="./architecture.html">Architecture</a>
+  <a href="./docs.html">Docs</a>
   <a href="https://github.com/Dragooon/stockade">GitHub</a>
 </nav>
 
 <h1>Stockade</h1>
 <p class="tagline">Multi-agent orchestrator for Claude with layered security.</p>
 
+<div class="warn">Alpha software. Architecture is stable and tested (749 tests), but APIs and config format may change.</div>
+
 <p>Agents run in containers with no secrets, no direct internet, and per-tool permission rules. You poke precise holes when you need to.</p>
 
-<h2>Architecture</h2>
+<h2>Built on Claude Code</h2>
 
-<div class="diagram">User (Terminal / Discord)
-  |
-  v
-Orchestrator --- RBAC --- Session Manager
-  |
-  |-- Local agents (in-process, Agent SDK)
-  |
-  '-- Sandboxed agents --> Container --> Credential Proxy --> Internet
-                           (no secrets)  (injects per-route)  (allowlist only)</div>
+<p>Stockade runs on the <a href="https://github.com/anthropic-ai/claude-code-sdk">Anthropic Agent SDK</a> &mdash; the same runtime that powers Claude Code. Each agent is a Claude Code session with access to built-in tools: <code>Bash</code>, <code>Read</code>, <code>Write</code>, <code>Edit</code>, <code>Glob</code>, <code>Grep</code>, <code>WebSearch</code>, <code>WebFetch</code>.</p>
 
-<table>
-<tr><th>Package</th><th>Role</th></tr>
-<tr><td><code>orchestrator</code></td><td>Config, routing, RBAC, sessions, channels, dispatch, container lifecycle</td></tr>
-<tr><td><code>worker</code></td><td>HTTP server wrapping Agent SDK, runs inside containers</td></tr>
-<tr><td><code>proxy</code></td><td>MITM credential proxy, network policy, TLS interception</td></tr>
-</table>
+<p>What Stockade adds:</p>
+<ul>
+  <li><strong>Multi-agent orchestration</strong> &mdash; parent agents delegate via <code>ask_agent</code> MCP tool</li>
+  <li><strong>Remote execution</strong> &mdash; Agent SDK runs inside containers, dispatched via HTTP</li>
+  <li><strong>Permission layer</strong> &mdash; <code>allow</code> / <code>deny</code> / <code>ask</code> rules per agent, per tool, per path</li>
+  <li><strong>Credential isolation</strong> &mdash; MITM proxy injects API keys at the network level</li>
+  <li><strong>Session management</strong> &mdash; channel scopes mapped to SDK session IDs in SQLite</li>
+</ul>
 
 <h2>Security Layers</h2>
 
@@ -187,15 +49,19 @@ Orchestrator --- RBAC --- Session Manager
     <div class="layer-desc">MITM proxy strips auth headers and injects credentials per route. Agents never see API keys.</div>
   </div>
   <div class="layer">
-    <div class="layer-name">3. Tool Permissions</div>
-    <div class="layer-desc">Per-agent rules: <code>deny:Write(/config/**)</code>, <code>allow:Bash(git *)</code></div>
+    <div class="layer-name">3. Tool Permissions (allow / deny / ask)</div>
+    <div class="layer-desc">Per-agent rules with path globs: <code>deny:Write(/config/**)</code>, <code>allow:Bash(git *)</code>. No match = ask user.</div>
   </div>
   <div class="layer">
-    <div class="layer-name">4. RBAC</div>
+    <div class="layer-name">4. Gatekeeper</div>
+    <div class="layer-desc">AI-powered risk assessment for <code>ask</code> rules. Auto-approves low-risk, prompts user for higher.</div>
+  </div>
+  <div class="layer">
+    <div class="layer-name">5. RBAC</div>
     <div class="layer-desc">User roles control agent and tool access. Identity flows through sub-agent chains.</div>
   </div>
   <div class="layer">
-    <div class="layer-name">5. Network Policy</div>
+    <div class="layer-name">6. Network Policy</div>
     <div class="layer-desc">Deny-by-default allowlist per host, path, and HTTP method.</div>
   </div>
 </div>
@@ -204,19 +70,21 @@ Orchestrator --- RBAC --- Session Manager
 
 <table>
 <tr><th></th><th>OpenClaw</th><th>NanoClaw</th><th>NemoClaw</th><th>Stockade</th></tr>
-<tr><td>Security</td><td>App-level allowlists</td><td>Container isolation</td><td>Landlock + seccomp + netns</td><td>5-layer (containers + RBAC + permissions + proxy + network)</td></tr>
-<tr><td>Credentials</td><td>In-process</td><td>Gateway injection</td><td>Host-only via OpenShell</td><td>MITM proxy, per-route, agents never see secrets</td></tr>
-<tr><td>Permissions</td><td>Global</td><td>Per-group filesystem</td><td>FS + process + network policy</td><td>Per-agent, per-tool, per-path</td></tr>
-<tr><td>Multi-agent</td><td>Single</td><td>Single per group</td><td>Single (wraps OpenClaw)</td><td>Hierarchical with ask_agent MCP</td></tr>
-<tr><td>Tests</td><td>Unknown</td><td>Minimal</td><td>Unknown (alpha)</td><td>749 across 3 packages</td></tr>
+<tr><td>Isolation</td><td>Optional containers, app-level perms</td><td>Container per group</td><td>Landlock + seccomp + netns</td><td>6-layer (see above)</td></tr>
+<tr><td>Credentials</td><td>In-process</td><td>Gateway injection</td><td>Host-only via OpenShell</td><td>MITM proxy, per-route</td></tr>
+<tr><td>Multi-agent</td><td>Single</td><td>Single per group</td><td>Single (wraps OpenClaw)</td><td>Hierarchical ask_agent MCP</td></tr>
+<tr><td>Codebase</td><td>~500k lines</td><td>~2k lines</td><td>Thin CLI over OpenClaw</td><td>~8k lines, 749 tests</td></tr>
+<tr><td>Status</td><td>Production</td><td>Production</td><td>Alpha</td><td>Alpha</td></tr>
 </table>
 
 <div class="links">
-  <a href="./guide.html">Quick Start Guide</a>
-  <a href="https://github.com/Dragooon/stockade">View on GitHub</a>
+  <a href="./quickstart.html">Quick Start</a>
+  <a href="./architecture.html">Architecture</a>
+  <a href="./docs.html">Full Documentation</a>
+  <a href="https://github.com/Dragooon/stockade">GitHub</a>
 </div>
 
-<footer>MIT License. Built on the Anthropic Agent SDK.</footer>
+<footer>MIT License. Built on the <a href="https://github.com/anthropic-ai/claude-code-sdk">Anthropic Agent SDK</a>.</footer>
 
 </div>
 </body>

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stockade - Architecture</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+
+<nav>
+  <a href="./">Home</a>
+  <a href="./quickstart.html">Quick Start</a>
+  <a href="./architecture.html" class="active">Architecture</a>
+  <a href="./docs.html">Docs</a>
+  <a href="https://github.com/Dragooon/stockade">GitHub</a>
+</nav>
+
+<h1 class="page-title">Architecture</h1>
+<p class="subtitle">How the pieces fit together.</p>
+
+<h2>Overview</h2>
+
+<div class="diagram">User (Terminal / Discord)
+  |
+  v
+Orchestrator --- RBAC --- Sessions (SQLite)
+  |
+  |-- Permission Engine (allow / deny / ask)
+  |     |
+  |     '-- Gatekeeper (AI risk review, optional)
+  |
+  |-- Local Agent (in-process, Agent SDK)
+  |
+  '-- Sandboxed Agent
+        |
+        Container (Docker, internal network, no secrets)
+          |
+          Worker (Hono HTTP server, Agent SDK query())
+            |
+            Credential Proxy (MITM, per-route injection)
+              |
+              Network Policy (deny-by-default allowlist)
+                |
+                Internet</div>
+
+<h2>Packages</h2>
+
+<table>
+<tr><th>Package</th><th>What it does</th></tr>
+<tr><td><code>orchestrator</code></td><td>Config loading, RBAC, session management, message routing, channel adapters (terminal + Discord), agent dispatch, container lifecycle, permission engine, gatekeeper, task scheduler</td></tr>
+<tr><td><code>worker</code></td><td>HTTP server (<code>/run</code> + <code>/health</code>) wrapping the Agent SDK's <code>query()</code>. Runs inside containers. Stateless &mdash; each request carries model, system prompt, tools, session ID.</td></tr>
+<tr><td><code>proxy</code></td><td>MITM HTTP proxy with TLS interception. Route-based credential injection. SSH tunnel with certificate auth. Gateway API for token management. Provider-agnostic secret resolution (file, 1Password, AWS SM, etc).</td></tr>
+</table>
+
+<h2>Message Flow</h2>
+
+<div class="diagram">1. Message arrives via channel (terminal / Discord)
+2. RBAC checks caller identity and permissions
+3. Router resolves which agent handles the message
+4. Permission engine evaluates tool rules:
+   - allow → proceed
+   - deny  → block
+   - ask   → gatekeeper reviews risk → auto-approve or prompt user
+5. If sandboxed: orchestrator ensures container, dispatches POST /run
+   If local: orchestrator calls Agent SDK query() directly
+6. Agent can delegate to sub-agents via ask_agent MCP tool
+   (RBAC re-evaluated at each hop with original caller identity)
+7. Response flows back through the channel</div>
+
+<h2>Sub-Agent Delegation</h2>
+
+<p>The orchestrator injects an <code>ask_agent</code> MCP tool into each agent's session at runtime. When an agent calls it:</p>
+
+<ol>
+  <li>The orchestrator intercepts the tool call</li>
+  <li>RBAC is re-checked using the <strong>original caller's identity</strong> (not the agent's)</li>
+  <li>The sub-agent is dispatched (local or container) with its own permissions</li>
+  <li>Result flows back to the parent agent as the tool response</li>
+</ol>
+
+<p>This means a Discord user's permissions apply even when the orchestrator delegates three levels deep: user &rarr; main &rarr; engineer &rarr; researcher.</p>
+
+<h2>Container Lifecycle</h2>
+
+<h3>Shared mode (default)</h3>
+<p>One container per agent type, reused across all sessions. The worker is stateless; the Agent SDK manages session state via <code>sessionId</code>.</p>
+
+<div class="diagram">First request for agent "researcher":
+  1. ContainerManager.ensure("researcher")
+  2. Provision: request gateway token from proxy
+  3. docker create (image, network, env vars, volume mounts)
+  4. docker start
+  5. Poll GET /health until ok
+  6. Cache container URL
+
+Subsequent requests:
+  1. ContainerManager.ensure("researcher") → cached URL
+  2. POST /run directly</div>
+
+<h3>Session-isolated mode</h3>
+<p>Set <code>container.isolation: session</code> for agents that need filesystem isolation between conversations. Each scope gets its own container, torn down on idle timeout.</p>
+
+<h2>Credential Proxy</h2>
+
+<p>Containers set <code>HTTP_PROXY</code> / <code>HTTPS_PROXY</code> pointing to the proxy. All HTTPS traffic is intercepted via MITM with a dynamically-generated cert signed by a local CA.</p>
+
+<div class="diagram">Agent HTTPS request:
+  1. CONNECT api.anthropic.com:443
+  2. Proxy terminates TLS (dynamic cert from local CA)
+  3. Reads plaintext request
+  4. Network policy check (host + path + method)
+     - deny → 403
+     - allow → continue
+  5. Strip outgoing auth headers (authorization, x-api-key)
+  6. Route match → resolve credential from provider
+  7. Inject credential into headers
+  8. Forward to upstream
+  9. Relay response back to agent</div>
+
+<p>The credential provider is a CLI command template. It works with any secret manager:</p>
+<pre><code># File-based (default)
+read: "cat config/secrets/{key}"
+
+# 1Password
+read: "op read op://{key}"
+
+# AWS Secrets Manager
+read: "aws secretsmanager get-secret-value --secret-id {key} --query SecretString --output text"</code></pre>
+
+<h2>Permission Engine</h2>
+
+<p>Per-agent, first-match-wins rules. Three actions:</p>
+
+<table>
+<tr><th>Action</th><th>Behavior</th></tr>
+<tr><td><code>allow</code></td><td>Tool invocation proceeds silently</td></tr>
+<tr><td><code>deny</code></td><td>Tool invocation is blocked, agent sees error</td></tr>
+<tr><td><code>ask</code></td><td>Human-in-the-loop approval required</td></tr>
+</table>
+
+<p>If no rule matches, the default is <code>ask</code>.</p>
+
+<h3>Selector syntax</h3>
+<pre><code>"allow:*"                      # all tools
+"deny:Write"                   # specific tool, all invocations
+"allow:Bash(git *)"            # tool + command glob
+"deny:Write(/config/**)"       # tool + path glob
+"ask:Edit(~/secrets/**)"       # tool + home-relative path</code></pre>
+
+<h3>Path prefixes</h3>
+<table>
+<tr><th>Prefix</th><th>Resolves to</th></tr>
+<tr><td><code>/</code></td><td>Platform root (<code>~/.stockade</code>)</td></tr>
+<tr><td><code>~/</code></td><td>Home directory</td></tr>
+<tr><td><code>./</code></td><td>Agent working directory</td></tr>
+<tr><td><code>//</code></td><td>Absolute path</td></tr>
+</table>
+
+<p>Symlinks are resolved to canonical paths. <code>..</code> traversal is normalized. Case-insensitive matching on Windows.</p>
+
+<h2>Gatekeeper</h2>
+
+<p>Optional AI-powered risk review for <code>ask</code> rules. Before a tool invocation reaches the user for approval, a gatekeeper agent evaluates it:</p>
+
+<div class="diagram">Tool invocation matches "ask" rule:
+  1. Gatekeeper agent reviews the invocation
+  2. Assigns risk level: low / medium / high / critical
+  3. If risk ≤ auto_approve_risk threshold:
+     → auto-approve + notify channel
+  4. If risk > threshold:
+     → present to user with risk review attached
+     → user approves or denies</div>
+
+<p>The gatekeeper is itself an agent defined in config &mdash; its model and system prompt are fully customizable.</p>
+
+<div class="links">
+  <a href="./docs.html">Detailed Configuration &rarr;</a>
+</div>
+
+<footer>MIT License. Built on the <a href="https://github.com/anthropic-ai/claude-code-sdk">Anthropic Agent SDK</a>.</footer>
+
+</div>
+</body>
+</html>

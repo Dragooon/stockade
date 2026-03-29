@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stockade - Quick Start</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+
+<nav>
+  <a href="./">Home</a>
+  <a href="./quickstart.html" class="active">Quick Start</a>
+  <a href="./architecture.html">Architecture</a>
+  <a href="./docs.html">Docs</a>
+  <a href="https://github.com/Dragooon/stockade">GitHub</a>
+</nav>
+
+<h1 class="page-title">Quick Start</h1>
+<p class="subtitle">From clone to running in under 5 minutes.</p>
+
+<h2>Prerequisites</h2>
+<ul>
+  <li>Node.js 22+</li>
+  <li>pnpm</li>
+  <li>Docker (for sandboxed agents)</li>
+  <li>An Anthropic API key</li>
+</ul>
+
+<h2>Install</h2>
+
+<pre><code>git clone https://github.com/Dragooon/stockade.git
+cd stockade
+pnpm install</code></pre>
+
+<h2>Configure</h2>
+
+<pre><code>cp config/config.example.yaml config/config.yaml
+cp config/proxy.example.yaml config/proxy.yaml</code></pre>
+
+<p>Add your API key:</p>
+
+<pre><code>mkdir -p config/secrets
+echo "sk-ant-..." > config/secrets/anthropic-api-key</code></pre>
+
+<div class="note">The <code>config/secrets/</code> directory is gitignored. Secrets never leave your machine.</div>
+
+<h2>Run</h2>
+
+<h3>Simple mode (no containers)</h3>
+<p>Set <code>sandboxed: false</code> on your agents in config.yaml, then:</p>
+<pre><code>pnpm start:orchestrator</code></pre>
+<p>Agents run in-process. Fast to iterate, no Docker needed. Less isolation.</p>
+
+<h3>Full stack (containers + proxy)</h3>
+<pre><code># Terminal 1: Start the credential proxy
+pnpm start:proxy
+
+# Terminal 2: Start the orchestrator
+pnpm start:orchestrator</code></pre>
+
+<p>The orchestrator auto-provisions containers on first message to a sandboxed agent. Docker must be running.</p>
+
+<h2>Add Discord</h2>
+
+<p>Edit <code>config/config.yaml</code>:</p>
+
+<pre><code>channels:
+  discord:
+    enabled: true
+    token: ${DISCORD_TOKEN}
+    bindings:
+      - server: "YOUR_SERVER_ID"
+        agent: main
+        channels: "*"</code></pre>
+
+<p>Set <code>DISCORD_TOKEN</code> in <code>.env</code> or your environment. The agent receives all messages in bound channels and uses its system prompt to decide when to respond vs stay silent.</p>
+
+<h2>Verify</h2>
+
+<pre><code># Run all tests
+pnpm test
+
+# Start the orchestrator with terminal channel
+pnpm start:orchestrator
+# Type a message — the main agent responds</code></pre>
+
+<div class="links">
+  <a href="./architecture.html">Architecture &rarr;</a>
+  <a href="./docs.html">Full Documentation &rarr;</a>
+</div>
+
+<footer>MIT License. Built on the <a href="https://github.com/anthropic-ai/claude-code-sdk">Anthropic Agent SDK</a>.</footer>
+
+</div>
+</body>
+</html>
