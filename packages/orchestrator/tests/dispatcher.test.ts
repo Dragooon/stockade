@@ -9,9 +9,11 @@ import type {
 import type { DispatchContext } from "../src/dispatcher.js";
 
 // Mock the Agent SDK before importing dispatcher
-const mockQuery = vi.fn();
-const mockTool = vi.fn();
-const mockCreateSdkMcpServer = vi.fn();
+const { mockQuery, mockTool, mockCreateSdkMcpServer } = vi.hoisted(() => ({
+  mockQuery: vi.fn(),
+  mockTool: vi.fn(),
+  mockCreateSdkMcpServer: vi.fn(),
+}));
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: mockQuery,
   tool: mockTool,

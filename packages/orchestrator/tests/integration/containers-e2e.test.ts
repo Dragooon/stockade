@@ -42,7 +42,8 @@ const { statSync } = await import("node:fs");
 
 // ── Mock Agent SDK for dispatcher tests ─────────────────────────────────────
 
-const mockQuery = vi.fn();
+const { mockQuery: mockQuery_ } = vi.hoisted(() => ({ mockQuery: vi.fn() }));
+const mockQuery = mockQuery_;
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: (...args: unknown[]) => mockQuery(...args),
   tool: vi.fn(),

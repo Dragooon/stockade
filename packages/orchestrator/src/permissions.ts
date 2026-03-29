@@ -137,6 +137,16 @@ export const FILE_PATH_FIELDS: Record<string, string> = {
 };
 
 /**
+ * Tool groups: rules written for one tool also apply to its group members.
+ * e.g. `allow:Read(/agents/**)` also allows Glob and Grep on that path,
+ * and `deny:Write(/config/**)` also denies Edit on that path.
+ */
+const TOOL_GROUPS: Record<string, string[]> = {
+  Read: ["Read", "Glob", "Grep"],
+  Write: ["Write", "Edit"],
+};
+
+/**
  * Extract the target file path from a tool invocation's input.
  * Returns null for non-file tools or when no path is present.
  */
@@ -315,8 +325,11 @@ export async function ruleMatches(
   input: Record<string, unknown>,
   ctx: PermissionContext,
 ): Promise<boolean> {
-  // Tool name check — "*" matches all tools
-  if (rule.tool !== "*" && rule.tool !== tool) return false;
+  // Tool name check — "*" matches all tools, tool groups expand matches
+  if (rule.tool !== "*" && rule.tool !== tool) {
+    const group = TOOL_GROUPS[rule.tool];
+    if (!group || !group.includes(tool)) return false;
+  }
 
   // No pattern → matches all invocations of this tool (or all tools if *)
   if (!rule.pattern) return true;

@@ -14,6 +14,7 @@
  * what a tool invocation does.
  */
 
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { formatToolApproval } from "./permissions.js";
 import type { AgentConfig, AskApprovalFn, ApprovalChannel } from "./types.js";
 
@@ -173,50 +174,27 @@ export async function reviewToolInvocation(
   input: Record<string, unknown>,
   agentConfig: AgentConfig,
 ): Promise<GatekeeperReview> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    console.warn("[gatekeeper] ANTHROPIC_API_KEY not set — falling back to medium risk");
-    return fallbackReview(tool, "no API key");
-  }
-
-  const model = agentConfig.model;
   const systemPrompt = agentConfig.system || DEFAULT_GATEKEEPER_SYSTEM;
   const toolDescription = formatToolApproval(tool, input);
 
   const userMessage = `Assess the risk of this tool invocation:\n\nTool: ${tool}\n${toolDescription}\n\nFull input:\n${JSON.stringify(input, null, 2)}`;
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 300,
-        system: systemPrompt,
-        messages: [{ role: "user", content: userMessage }],
-      }),
-    });
+    let result = "";
 
-    if (!response.ok) {
-      const body = await response.text();
-      console.error(`[gatekeeper] API error ${response.status}: ${body}`);
-      return fallbackReview(tool, "API error");
+    for await (const message of query({
+      prompt: userMessage,
+      options: {
+        model: agentConfig.model,
+        systemPrompt,
+        maxTurns: 1,
+        allowedTools: [],
+      } as any,
+    })) {
+      if ("result" in message) result = (message as { result: string }).result;
     }
 
-    const data = (await response.json()) as {
-      content: Array<{ type: string; text?: string }>;
-    };
-
-    const text = data.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("");
-
-    return parseReview(text);
+    return parseReview(result);
   } catch (err) {
     console.error(
       "[gatekeeper] Request failed:",

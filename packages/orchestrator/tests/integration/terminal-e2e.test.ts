@@ -13,9 +13,11 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 
 // ─── Mock the Agent SDK before any production imports that load it ───────────
-const mockQuery = vi.fn();
-const mockTool = vi.fn();
-const mockCreateSdkMcpServer = vi.fn();
+const { mockQuery, mockTool, mockCreateSdkMcpServer } = vi.hoisted(() => ({
+  mockQuery: vi.fn(),
+  mockTool: vi.fn(),
+  mockCreateSdkMcpServer: vi.fn(),
+}));
 
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: mockQuery,
