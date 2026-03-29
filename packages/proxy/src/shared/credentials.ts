@@ -4,7 +4,8 @@ const cache = new Map<string, CachedCredential>();
 
 /**
  * Resolve a credential value by executing the provider's `read` command.
- * Results are cached in memory with the configured TTL.
+ * Checks per-key overrides first (first match wins), then falls back
+ * to the default read command. Results are cached with the configured TTL.
  */
 export async function resolveCredential(
   provider: Provider,
@@ -15,7 +16,18 @@ export async function resolveCredential(
     return cached.value;
   }
 
-  const cmd = provider.read.replace(/\{key\}/g, key);
+  // Check overrides first (first match wins)
+  let readCmd = provider.read;
+  if (provider.overrides) {
+    for (const override of provider.overrides) {
+      if (globMatch(override.match, key)) {
+        readCmd = override.read;
+        break;
+      }
+    }
+  }
+
+  const cmd = readCmd.replace(/\{key\}/g, key);
   const value = await execProviderCommand(cmd);
 
   cache.set(key, {
@@ -24,6 +36,14 @@ export async function resolveCredential(
   });
 
   return value;
+}
+
+function globMatch(pattern: string, value: string): boolean {
+  if (pattern === value) return true;
+  if (pattern === "*") return true;
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  const regexStr = "^" + escaped.replace(/\*/g, "[^]*") + "$";
+  return new RegExp(regexStr).test(value);
 }
 
 /**

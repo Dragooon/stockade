@@ -60,11 +60,19 @@ export const SshConfigSchema = z.object({
 });
 
 // ─── Provider ───────────────────────────────────────────────────
+const ProviderOverrideSchema = z.object({
+  /** Glob pattern matched against the credential key. First match wins. */
+  match: z.string(),
+  read: z.string(),
+});
+
 export const ProviderSchema = z.object({
   read: z.string(),
   write: z.string(),
   update: z.string(),
   cache_ttl: z.number().nonnegative().default(300),
+  /** Per-key overrides — checked before the default `read` command. */
+  overrides: z.array(ProviderOverrideSchema).default([]),
 });
 
 // ─── Gateway ────────────────────────────────────────────────────

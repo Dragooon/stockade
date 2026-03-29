@@ -876,7 +876,9 @@ proxy:
     expect(config.policy.rules[0].host).toBe("api.example.com");
     expect(config.policy.rules[0].action).toBe("allow");
     expect(config.http.port).toBe(8080);
-    expect(config.http.tls.ca_cert).toBe("./ca.crt");
+    expect(config.http.tls.ca_cert).toContain("ca.crt");
+    // Path is now resolved to absolute by loadProxyConfig
+    expect(require("node:path").isAbsolute(config.http.tls.ca_cert)).toBe(true);
     expect(config.http.strip_headers).toEqual(["authorization"]);
     expect(config.http.routes).toHaveLength(1);
     expect(config.http.routes[0].credential).toBe("Vault/API/key");

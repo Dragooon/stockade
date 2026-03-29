@@ -17,16 +17,17 @@ import { startSchedulerLoop, stopSchedulerLoop } from "./scheduler/index.js";
 import type { ChannelMessage, AskApprovalFn, ApprovalChannel } from "./types.js";
 import { buildGatedAskApproval, resolveEffectivePermissions } from "./gatekeeper.js";
 
+import { PLATFORM_HOME } from "./config.js";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "../../..");
 
-// 0. Load .env from config dir
-const envPath = resolve(projectRoot, "config/.env");
+// 0. Load .env from platform home (~/.stockade/.env)
+const envPath = resolve(PLATFORM_HOME, ".env");
 loadEnv({ path: envPath });
 
-// 1. Load config (paths resolved relative to project root)
-const configDir = resolve(projectRoot, "config");
-const config = loadConfig(configDir, projectRoot);
+// 1. Load config from platform home, resolve repo-relative paths against project root
+const config = loadConfig(PLATFORM_HOME, projectRoot);
 const paths = config.platform.paths!;
 
 // Ensure data directories exist

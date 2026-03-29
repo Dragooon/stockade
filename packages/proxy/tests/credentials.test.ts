@@ -19,6 +19,7 @@ const provider: Provider = {
   write: "op item create --vault AgentVault --title {key} --category password password={value}",
   update: "op item edit {key} --vault AgentVault password={value}",
   cache_ttl: 60,
+  overrides: [],
 };
 
 describe("resolveCredential", () => {
@@ -78,6 +79,75 @@ describe("resolveCredential", () => {
     await resolveCredential(zeroTtl, "AgentVault/Ttl/key");
 
     expect(mockExecaCommand).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("resolveCredential — overrides", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    invalidateCache();
+  });
+
+  it("uses override read command when key matches exactly", async () => {
+    const withOverrides: Provider = {
+      ...provider,
+      overrides: [
+        { match: "claude-oauth-token", read: "get-claude-token" },
+      ],
+    };
+    mockExecaCommand.mockResolvedValue({ stdout: "oauth-abc" });
+
+    const result = await resolveCredential(withOverrides, "claude-oauth-token");
+
+    expect(result).toBe("oauth-abc");
+    expect(mockExecaCommand).toHaveBeenCalledWith("get-claude-token", { shell: true });
+  });
+
+  it("uses override read command when key matches glob", async () => {
+    const withOverrides: Provider = {
+      ...provider,
+      overrides: [
+        { match: "op:*", read: "op read op://{key}" },
+      ],
+    };
+    mockExecaCommand.mockResolvedValue({ stdout: "from-1password" });
+
+    const result = await resolveCredential(withOverrides, "op:Vault/API/key");
+
+    expect(result).toBe("from-1password");
+    expect(mockExecaCommand).toHaveBeenCalledWith("op read op://op:Vault/API/key", { shell: true });
+  });
+
+  it("falls through to default read when no override matches", async () => {
+    const withOverrides: Provider = {
+      ...provider,
+      overrides: [
+        { match: "claude-oauth-token", read: "get-claude-token" },
+      ],
+    };
+    mockExecaCommand.mockResolvedValue({ stdout: "default-value" });
+
+    await resolveCredential(withOverrides, "AgentVault/Some/key");
+
+    expect(mockExecaCommand).toHaveBeenCalledWith(
+      "op read op://AgentVault/Some/key",
+      { shell: true }
+    );
+  });
+
+  it("first matching override wins", async () => {
+    const withOverrides: Provider = {
+      ...provider,
+      overrides: [
+        { match: "special-*", read: "first-backend {key}" },
+        { match: "special-key", read: "second-backend {key}" },
+      ],
+    };
+    mockExecaCommand.mockResolvedValue({ stdout: "first-wins" });
+
+    await resolveCredential(withOverrides, "special-key");
+
+    expect(mockExecaCommand).toHaveBeenCalledWith("first-backend special-key", { shell: true });
   });
 });
 

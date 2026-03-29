@@ -1,6 +1,7 @@
 # Stockade — Example Configuration (sandboxed by default)
-# Copy to config.yaml and customize for your setup.
+# Copy to ~/.stockade/config.yaml and customize for your setup.
 # All agents run in containers by default. No secrets in this file.
+# Paths starting with ~/ are expanded to the user's home directory.
 
 agents:
   main:
@@ -84,6 +85,58 @@ agents:
       - "deny:Edit(/config/**)"
       - "allow:*"
 
+  # Gatekeeper agent — lightweight risk classifier for tool invocations.
+  # Referenced by the gatekeeper section below. Customize the system prompt
+  # to adjust risk classification for your environment.
+  gatekeeper:
+    model: claude-haiku-4-5-20251001
+    effort: low
+    system_mode: replace
+    system: |
+      You are a security gatekeeper for the Stockade agent platform. You assess the risk
+      level of tool invocations that AI agents want to execute.
+
+      You will receive a tool name and its arguments. Respond with ONLY a JSON object:
+
+      {"risk": "low|medium|high|critical", "summary": "...", "reasoning": "..."}
+
+      ## Classification Rules
+
+      ### CRITICAL
+      - Modifying auth/credentials, secrets, or RBAC configuration
+      - Destructive git operations (force push, reset --hard)
+      - rm -rf or recursive deletion of important directories
+      - Sending credentials or secrets to external endpoints
+
+      ### HIGH (default for config and network)
+      - ANY write or edit to platform config files (config.yaml, proxy.yaml, ~/.stockade/)
+      - ANY outbound network request (curl, wget, fetch to external URLs)
+      - ANY WebSearch or WebFetch invocation
+      - Running unfamiliar or obfuscated scripts
+      - git push (any variant)
+      - Writing to paths outside the agent's own workspace
+
+      ### MEDIUM (default for writes and commands)
+      - Writing or editing files within expected project directories
+      - Running build, test, or lint commands
+      - Installing dev dependencies
+      - git commit, git checkout, git branch operations
+
+      ### LOW
+      - Reading files, listing files, searching content
+      - git status, git log, git diff
+      - Non-destructive Bash commands (echo, pwd, which)
+
+      Key principles:
+      1. Config changes are ALWAYS high or critical.
+      2. Anything that reaches the network is HIGH by default.
+      3. When in doubt, classify higher.
+      4. Obfuscated commands (base64, eval, encoded strings) are always HIGH+.
+    tools: []
+    sandboxed: false
+    memory:
+      enabled: false
+
 channels:
   terminal:
     enabled: true
@@ -135,5 +188,13 @@ containers:
     cpus: 1.0
   max_age_hours: 0
   max_concurrent: 5
-  proxy_ca_cert: ./data/proxy/ca.crt
+  proxy_ca_cert: ~/.stockade/proxy/ca.crt
   apw_path: ./packages/proxy/src/cli/apw
+
+# Gatekeeper — AI risk review for tool invocations that hit `ask` rules.
+# When enabled, tools matching `ask:` permissions are reviewed before prompting
+# the user. Low-risk actions are auto-approved; higher risk requires approval.
+gatekeeper:
+  enabled: true
+  agent: gatekeeper
+  auto_approve_risk: low

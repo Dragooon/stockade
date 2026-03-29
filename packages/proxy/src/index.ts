@@ -1,16 +1,13 @@
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { dirname } from "node:path";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { loadProxyConfig } from "./shared/config.js";
 import { startHttpProxy } from "./http/proxy.js";
 import { startSshTunnel } from "./ssh/tunnel.js";
 import { startGateway } from "./gateway/api.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// Load config
-const configDir = resolve(__dirname, "../../../config");
-const config = loadProxyConfig(configDir);
+// Load config from platform home (~/.stockade/)
+const PLATFORM_HOME = join(homedir(), ".stockade");
+const config = loadProxyConfig(PLATFORM_HOME);
 
 console.log("[proxy] starting all servers...");
 

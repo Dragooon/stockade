@@ -103,14 +103,19 @@ const unifiedConfigSchema = z.object({
 // --- Environment variable substitution ---
 
 /**
- * Recursively substitute `${ENV_VAR}` patterns in strings within a value.
- * Throws if a referenced env var is not set.
+ * Recursively substitute `${ENV_VAR}` patterns and expand `~/` prefixes
+ * in strings within a value.
  */
 export function substituteEnvVars(value: unknown): unknown {
   if (typeof value === "string") {
-    return value.replace(/\$\{(\w+)\}/g, (_match, varName: string) => {
+    let result = value.replace(/\$\{(\w+)\}/g, (_match, varName: string) => {
       return process.env[varName] ?? "";
     });
+    // Expand ~ prefix to home directory
+    if (result.startsWith("~/") || result === "~") {
+      result = join(homedir(), result.slice(2));
+    }
+    return result;
   }
   if (Array.isArray(value)) {
     return value.map(substituteEnvVars);
