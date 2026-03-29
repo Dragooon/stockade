@@ -8,6 +8,7 @@ Multi-agent orchestrator for Claude with layered security. Agents run in contain
 
 ## Contents
 
+- [Built on Claude Code](#built-on-claude-code)
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
 - [Security Layers](#security-layers)
@@ -15,6 +16,18 @@ Multi-agent orchestrator for Claude with layered security. Agents run in contain
 - [Project Structure](#project-structure)
 - [Comparison](#comparison)
 - [Tests](#tests)
+
+## Built on Claude Code
+
+Stockade is built on the [Anthropic Agent SDK](https://github.com/anthropic-ai/claude-code-sdk) (`@anthropic-ai/claude-agent-sdk`) — the same runtime that powers Claude Code. Each agent is a Claude Code session with access to the SDK's built-in tools: `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebSearch`, `WebFetch`.
+
+What Stockade adds on top:
+
+- **Multi-agent orchestration** — A parent agent delegates to sub-agents via an `ask_agent` MCP tool that the orchestrator injects at runtime. The SDK handles tool execution; Stockade handles routing, permissions, and identity propagation.
+- **Remote execution** — The worker package wraps the SDK's `query()` function in an HTTP server. The orchestrator POSTs to it; the SDK runs inside the container. Same Claude Code session, different process boundary.
+- **Permission layer** — The SDK exposes tools to agents. Stockade intercepts tool invocations and evaluates them against per-agent `allow`/`deny`/`ask` rules before execution. Unmatched invocations require human approval.
+- **Credential isolation** — The SDK needs an API key to call Anthropic. Instead of passing it into the container, Stockade routes all HTTPS through a MITM proxy that injects the key at the network level. The SDK works normally; it just doesn't know the real key.
+- **Session management** — The SDK's `sessionId` is used to resume conversations. Stockade maps channel scopes (e.g., `discord:server:channel:user`) to session IDs in SQLite, so conversations persist across messages.
 
 ## Quick Start
 
@@ -47,21 +60,31 @@ graph TD
     Orch["Orchestrator"]
     RBAC["RBAC"]
     Sessions["Session Manager"]
-    Local["Local Agent<br/>(in-process)"]
+    Perms["Permission Engine<br/>allow / deny / ask"]
+    GK["Gatekeeper<br/>(AI risk review)"]
+    Local["Local Agent<br/>(in-process, Agent SDK)"]
     Container["Container<br/>(no secrets)"]
     Proxy["Credential Proxy<br/>(injects per-route)"]
-    Internet["Internet<br/>(allowlist only)"]
+    Policy["Network Policy<br/>(deny-by-default)"]
+    Internet["Internet"]
 
     User --> Orch
     Orch --- RBAC
     Orch --- Sessions
-    Orch --> Local
-    Orch --> Container
+    Orch --> Perms
+    Perms -->|"ask"| GK
+    GK -->|"auto-approve<br/>or prompt user"| Perms
+    Perms -->|"allow"| Local
+    Perms -->|"allow"| Container
     Container --> Proxy
-    Proxy --> Internet
+    Proxy --> Policy
+    Policy -->|"allow"| Internet
 
     style Container fill:#1a1a2e,stroke:#4fc3f7,color:#e0e0e0
     style Proxy fill:#1a1a2e,stroke:#4fc3f7,color:#e0e0e0
+    style Perms fill:#1a1a2e,stroke:#4fc3f7,color:#e0e0e0
+    style GK fill:#1a1a2e,stroke:#e6a700,color:#e0e0e0
+    style Policy fill:#1a1a2e,stroke:#4fc3f7,color:#e0e0e0
     style RBAC fill:#0d1117,stroke:#888,color:#e0e0e0
     style Sessions fill:#0d1117,stroke:#888,color:#e0e0e0
 ```
@@ -126,17 +149,51 @@ The orchestrator delegates to sub-agents via the `ask_agent` MCP tool. RBAC is e
 
 **2. Credential proxy** — All outbound HTTP goes through a MITM proxy that strips auth headers and injects credentials per route. Agents never see API keys.
 
-**3. Tool permissions** — Per-agent rules control which tools can access which paths:
+**3. Tool permissions** — Per-agent, first-match-wins rules with three actions:
+
+| Action | Behavior |
+|---|---|
+| `allow` | Tool invocation proceeds silently |
+| `deny` | Tool invocation is blocked |
+| `ask` | Human-in-the-loop approval required (default when no rule matches) |
+
 ```yaml
 permissions:
-  - "deny:Write(/config/**)"     # can't modify config
-  - "allow:Bash(git *)"          # can run git commands
-  - "allow:Read"                 # can read anything
+  - "deny:Write(/config/**)"     # block config writes
+  - "deny:Bash(rm *)"            # block rm commands
+  - "allow:Bash(git *)"          # allow git
+  - "allow:Read"                 # allow all reads
+  - "ask:Write"                  # prompt user for other writes
+  # no match → ask (HITL approval)
 ```
 
-**4. RBAC** — Users get roles that control which agents and tools they can access. Identity flows through the entire sub-agent chain.
+Selectors support tool names, path globs, and command globs. Paths resolve `~/` (home), `/` (platform root), `./` (agent cwd), and `//` (absolute). Symlinks are resolved and `..` traversal is normalized.
 
-**5. Network policy** — Deny-by-default allowlist. Each host/path/method combination is explicitly allowed or denied.
+**4. Gatekeeper** — Optional AI-powered risk assessment for `ask` rules. Before a tool invocation reaches the user, a gatekeeper agent reviews it and assigns a risk level (low/medium/high/critical). Low-risk actions can be auto-approved with a notification; higher-risk actions are presented with the risk review attached.
+
+```yaml
+gatekeeper:
+  enabled: true
+  agent: reviewer          # any agent defined in config
+  auto_approve_risk: low   # auto-approve low-risk, prompt for rest
+```
+
+**5. RBAC** — Users get roles that control which agents and tools they can access. Identity flows through the entire sub-agent chain — a Discord user's permissions apply even when the orchestrator delegates three levels deep.
+
+**6. Network policy** — Deny-by-default allowlist. Each host/path/method combination is explicitly allowed or denied:
+
+```yaml
+policy:
+  default: deny
+  rules:
+    - host: "api.anthropic.com"
+      action: allow
+    - host: "api.github.com"
+      method: "GET"
+      action: allow
+    - host: "api.github.com"
+      action: deny              # block non-GET GitHub requests
+```
 
 ## Configuration
 
