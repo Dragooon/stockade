@@ -32,16 +32,13 @@ Stockade adds multi-agent orchestration, container isolation, credential injecti
 ```bash
 git clone https://github.com/Dragooon/stockade.git
 cd stockade
-pnpm install
-
-cp config/config.example.yaml config/config.yaml
-cp config/proxy.example.yaml config/proxy.yaml
-
-mkdir -p config/secrets
-echo "your-anthropic-api-key" > config/secrets/anthropic-api-key
-
-pnpm start:orchestrator
+pnpm setup              # checks prereqs, installs deps, creates configs, builds
+pnpm start:orchestrator # start and send a message
 ```
+
+Or without Docker: `pnpm setup:no-docker`
+
+**Using Claude Code?** Open the project in Claude Code and run `/setup` — it handles everything including API key detection from your existing Claude Code credentials.
 
 The default config runs all agents sandboxed in containers. Set `sandboxed: false` on any agent to run it locally without Docker.
 

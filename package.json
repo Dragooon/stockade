@@ -10,7 +10,9 @@
     "start:orchestrator": "node --import tsx packages/orchestrator/src/index.ts",
     "start:worker": "node --import tsx packages/worker/src/index.ts",
     "start:proxy": "node --import tsx packages/proxy/src/index.ts",
-    "start:validate": "node --import tsx packages/orchestrator/src/validate.ts"
+    "start:validate": "node --import tsx packages/orchestrator/src/validate.ts",
+    "setup": "bash bin/setup.sh",
+    "setup:no-docker": "bash bin/setup.sh --no-docker"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
