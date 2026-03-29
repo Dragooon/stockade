@@ -203,12 +203,12 @@ Orchestrator --- RBAC --- Session Manager
 <h2>Comparison</h2>
 
 <table>
-<tr><th></th><th>OpenClaw</th><th>NanoClaw</th><th>Stockade</th></tr>
-<tr><td>Security</td><td>App-level allowlists</td><td>Container isolation</td><td>5-layer (containers + RBAC + permissions + proxy + network)</td></tr>
-<tr><td>Credentials</td><td>In-process</td><td>Gateway injection</td><td>MITM proxy, per-route, agents never see secrets</td></tr>
-<tr><td>Permissions</td><td>Global</td><td>Per-group filesystem</td><td>Per-agent, per-tool, per-path</td></tr>
-<tr><td>Multi-agent</td><td>Single</td><td>Single per group</td><td>Hierarchical with ask_agent MCP</td></tr>
-<tr><td>Tests</td><td>Unknown</td><td>Minimal</td><td>491 across 3 packages</td></tr>
+<tr><th></th><th>OpenClaw</th><th>NanoClaw</th><th>NemoClaw</th><th>Stockade</th></tr>
+<tr><td>Security</td><td>App-level allowlists</td><td>Container isolation</td><td>Landlock + seccomp + netns</td><td>5-layer (containers + RBAC + permissions + proxy + network)</td></tr>
+<tr><td>Credentials</td><td>In-process</td><td>Gateway injection</td><td>Host-only via OpenShell</td><td>MITM proxy, per-route, agents never see secrets</td></tr>
+<tr><td>Permissions</td><td>Global</td><td>Per-group filesystem</td><td>FS + process + network policy</td><td>Per-agent, per-tool, per-path</td></tr>
+<tr><td>Multi-agent</td><td>Single</td><td>Single per group</td><td>Single (wraps OpenClaw)</td><td>Hierarchical with ask_agent MCP</td></tr>
+<tr><td>Tests</td><td>Unknown</td><td>Minimal</td><td>Unknown (alpha)</td><td>749 across 3 packages</td></tr>
 </table>
 
 <div class="links">

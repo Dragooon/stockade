@@ -6,16 +6,17 @@ Multi-agent orchestrator for Claude with layered security. Agents run in contain
 
 Existing Claude agent platforms force a choice: sandbox everything (safe but limited) or trust everything (flexible but risky). Stockade gives you **granular control** — each agent gets exactly the permissions it needs, enforced at multiple layers.
 
-| | [OpenClaw](https://github.com/openclaw/openclaw) | [NanoClaw](https://github.com/qwibitai/nanoclaw) | Stockade |
-|---|---|---|---|
-| **Security model** | Application-level allowlists | Container isolation (all-or-nothing) | Layered: containers + RBAC + tool permissions + network policy |
-| **Credential handling** | In-process, shared memory | OneCLI gateway injects at request time | MITM proxy injects per-route — agents never see secrets |
-| **Network control** | None | Container isolation only | Deny-by-default allowlist per host/path/method |
-| **Permission granularity** | Global allowlists | Per-group filesystem isolation | Per-agent, per-tool, per-path rules (`allow:Bash(git *)`) |
-| **Multi-agent** | Single agent | Single agent per group | Hierarchical: orchestrator delegates to typed sub-agents |
-| **Agent-to-agent** | N/A | N/A | Built-in `ask_agent` MCP tool with RBAC enforcement |
-| **Channels** | WhatsApp | WhatsApp, Telegram, Discord, Slack, Gmail | Terminal, Discord (extensible) |
-| **Codebase** | ~500k lines, 70+ deps | ~2k lines, minimal deps | ~8k lines, 3 packages, 491 tests |
+| | [OpenClaw](https://github.com/openclaw/openclaw) | [NanoClaw](https://github.com/qwibitai/nanoclaw) | [NemoClaw](https://github.com/NVIDIA/NemoClaw) | Stockade |
+|---|---|---|---|---|
+| **Security model** | App-level allowlists | Container isolation (all-or-nothing) | Landlock + seccomp + netns (wraps OpenClaw) | Layered: containers + RBAC + tool permissions + network policy |
+| **Credential handling** | In-process, shared memory | OneCLI gateway injection | Host-only, routed via OpenShell gateway | MITM proxy injects per-route — agents never see secrets |
+| **Network control** | None | Container isolation only | YAML egress policy with operator approval | Deny-by-default allowlist per host/path/method |
+| **Permission granularity** | Global allowlists | Per-group filesystem | Filesystem + process + network policy | Per-agent, per-tool, per-path rules (`allow:Bash(git *)`) |
+| **Multi-agent** | Single agent | Single agent per group | Single (inherits OpenClaw) | Hierarchical: orchestrator delegates to typed sub-agents |
+| **Agent-to-agent** | N/A | N/A | N/A | Built-in `ask_agent` MCP tool with RBAC enforcement |
+| **Channels** | 20+ built-in | WhatsApp, Telegram, Discord, Slack, Gmail | Inherits OpenClaw | Terminal, Discord (extensible) |
+| **Codebase** | ~500k lines, 70+ deps | ~2k lines, minimal deps | Small CLI (wraps OpenClaw + OpenShell) | ~8k lines, 3 packages, 749 tests |
+| **Status** | Production | Production | Alpha | Production |
 
 ## Architecture
 
@@ -148,7 +149,7 @@ pnpm -F @stockade/orchestrator test   # orchestrator only
 pnpm -F @stockade/proxy test          # proxy only
 ```
 
-491 tests across 3 packages: orchestrator (386), proxy (87), worker (18).
+749 tests across 3 packages: orchestrator (614), proxy (117), worker (18).
 
 ## Requirements
 
