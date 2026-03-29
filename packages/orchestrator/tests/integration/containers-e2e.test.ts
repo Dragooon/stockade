@@ -69,7 +69,6 @@ const containersConfig: ContainersConfig = {
   session_idle_minutes: 30,
   max_concurrent: 5,
   proxy_ca_cert: "./data/proxy/ca.crt",
-  apw_path: "./packages/proxy/src/cli/apw",
 };
 
 const PROXY_GATEWAY_URL = "http://localhost:10256";
@@ -793,8 +792,7 @@ describe("Provisioning integration", () => {
     // CA cert is mounted
     expect(volumes.some((v) => v.includes("ca.crt") && v.includes("/certs/proxy-ca.crt:ro"))).toBe(true);
 
-    // apw script is mounted
-    expect(volumes.some((v) => v.includes("apw") && v.includes("/usr/local/bin/apw:ro"))).toBe(true);
+    // apw is baked into the Docker image, no mount needed
   });
 
   it("test 17: provision cleanup revokes gateway token", async () => {
@@ -1198,8 +1196,7 @@ describe("Resource limits and custom config", () => {
     // Agent-specific volume from agentWithDockerfile config
     expect(volumes).toContain("/data/shared:/workspace/data:ro");
 
-    // System volumes (CA cert + apw) should also be present
+    // System volumes (CA cert) should also be present
     expect(volumes.some((v) => v.includes("ca.crt"))).toBe(true);
-    expect(volumes.some((v) => v.includes("apw"))).toBe(true);
   });
 });

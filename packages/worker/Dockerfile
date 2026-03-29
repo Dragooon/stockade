@@ -20,16 +20,10 @@ FROM node:22-slim
 
 RUN corepack enable
 
-# Install openssh-client, curl, and ca-certificates for proxy + gogcli
+# Install openssh-client, curl, and ca-certificates for proxy
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-# Install gogcli (Google services CLI) — Linux amd64
-ARG GOGCLI_VERSION=0.12.0
-RUN curl -fsSL "https://github.com/steipete/gogcli/releases/download/v${GOGCLI_VERSION}/gogcli_${GOGCLI_VERSION}_linux_amd64.tar.gz" \
-    | tar xz -C /usr/local/bin gog \
-    && chmod +x /usr/local/bin/gog
 
 WORKDIR /app
 
@@ -45,13 +39,13 @@ COPY --from=builder /app/packages/worker/dist packages/worker/dist
 
 WORKDIR /app/packages/worker
 
-# Create SSH directory for cert injection + gogcli config directory
-RUN mkdir -p /home/node/.ssh /home/node/.config/gogcli \
-    && chown -R node:node /home/node/.ssh /home/node/.config
+# Create directories for SSH cert injection and Claude Code credentials
+RUN mkdir -p /home/node/.ssh /home/node/.claude \
+    && chown -R node:node /home/node/.ssh /home/node/.claude
 
-# Copy entrypoint script (before switching to non-root user)
-COPY packages/worker/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+# Install apw CLI (credential proxy ref token tool)
+COPY packages/proxy/src/cli/apw /usr/local/bin/apw
+RUN chmod +x /usr/local/bin/apw
 
 # Run as non-root
 USER node

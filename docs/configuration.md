@@ -152,7 +152,6 @@ containers:
   max_age_hours: 0
   max_concurrent: 5
   proxy_ca_cert: ./data/proxy/ca.crt
-  apw_path: ./packages/proxy/src/cli/apw
 ```
 
 Per-agent overrides:

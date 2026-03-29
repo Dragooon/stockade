@@ -1,6 +1,5 @@
-import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { homedir } from "node:os";
 import type { ContainersConfig } from "./types.js";
 import type { AgentConfig } from "../types.js";
 
@@ -83,49 +82,28 @@ export async function provisionContainer(
   // 3. Build volume mounts
   const volumes: string[] = [];
 
-  // The Agent SDK requires Claude Code authentication credentials.
-  // Copy the host's OAuth credentials into the container so the SDK can
-  // initialize. The proxy still handles credential injection for outbound
-  // API calls — these credentials just satisfy the SDK's auth check.
-  const hostCredsPath = resolve(homedir(), ".claude", ".credentials.json");
-  if (existsSync(hostCredsPath)) {
-    const credsContent = readFileSync(hostCredsPath, "utf-8");
-    const containerCredsPath = resolve(containerDir, "credentials.json");
-    writeFileSync(containerCredsPath, credsContent);
-    volumes.push(`${containerCredsPath}:/home/node/.claude/.credentials.json:ro`);
-  }
+  // The Agent SDK requires ~/.claude/.credentials.json to initialize.
+  // Write a mock credential file that satisfies the SDK's startup check
+  // without leaking real tokens. The proxy handles actual API auth.
+  const mockCredsPath = resolve(containerDir, "credentials.json");
+  writeFileSync(mockCredsPath, JSON.stringify({
+    claudeAiOauth: {
+      accessToken: "sk-ant-stub-container-proxy-handles-auth",
+      refreshToken: "stub",
+      expiresAt: new Date(Date.now() + 86400_000).toISOString(),
+      scopes: "user:inference",
+      subscriptionType: "pro",
+      rateLimitTier: "tier4",
+    },
+  }));
+  volumes.push(`${mockCredsPath}:/home/node/.claude/.credentials.json:ro`);
 
   if (proxyAvailable) {
-    // Proxy CA cert
+    // Proxy CA cert — required for TLS through the MITM proxy
     const caCertPath = resolve(containersConfig.proxy_ca_cert);
     if (existsSync(caCertPath)) {
       volumes.push(`${caCertPath}:/certs/proxy-ca.crt:ro`);
     }
-
-    // apw CLI script
-    const apwPath = resolve(containersConfig.apw_path);
-    if (existsSync(apwPath)) {
-      volumes.push(`${apwPath}:/usr/local/bin/apw:ro`);
-    }
-  }
-
-  // gogcli (Google services CLI) — mount credentials + token if available.
-  // The host exports tokens via `gog auth tokens export` to data/gogcli/.
-  // Container uses file-based keyring backend (no Credential Manager).
-  const gogcliDataDir = resolve(dataDir, "gogcli");
-  if (existsSync(gogcliDataDir)) {
-    const gogCredsPath = resolve(gogcliDataDir, "credentials.json");
-    const gogTokenPath = resolve(gogcliDataDir, "token-export.json");
-    if (existsSync(gogCredsPath)) {
-      volumes.push(`${gogCredsPath}:/home/node/.config/gogcli/credentials.json:ro`);
-    }
-    if (existsSync(gogTokenPath)) {
-      // Import the token into the container's file-based keyring at startup.
-      // We mount the export file; the container entrypoint imports it.
-      volumes.push(`${gogTokenPath}:/home/node/.config/gogcli/token-import.json:ro`);
-    }
-    env.GOG_ACCOUNT = "botmadge@gmail.com";
-    env.GOG_KEYRING_PASSWORD = "stockade";
   }
 
   // Agent-specific volumes from config

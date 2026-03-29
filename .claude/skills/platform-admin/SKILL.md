@@ -182,7 +182,6 @@ containers:
   max_age_hours: 0                   # 0 = no auto-cleanup
   max_concurrent: 5
   proxy_ca_cert: ~/.stockade/proxy/ca.crt
-  apw_path: ./packages/proxy/src/cli/apw
 ```
 
 ## Proxy Configuration (separate file)

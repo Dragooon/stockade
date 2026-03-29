@@ -189,7 +189,6 @@ containers:
   max_age_hours: 0
   max_concurrent: 5
   proxy_ca_cert: ~/.stockade/proxy/ca.crt
-  apw_path: ./packages/proxy/src/cli/apw
 
 # Gatekeeper — AI risk review for tool invocations that hit `ask` rules.
 # When enabled, tools matching `ask:` permissions are reviewed before prompting

@@ -27,7 +27,6 @@ const containersConfig: ContainersConfig = {
   max_age_hours: 0,
   session_idle_minutes: 30,
   proxy_ca_cert: "./data/proxy/ca.crt",
-  apw_path: "./packages/proxy/src/cli/apw",
 };
 
 const agentConfig: AgentConfig = {
@@ -103,11 +102,42 @@ describe("provisionContainer", () => {
     expect(result.env.APW_TOKEN).toBe("apw-main-abc123");
     expect(result.env.NODE_EXTRA_CA_CERTS).toBe("/certs/proxy-ca.crt");
 
-    // Volumes: proxy files only included if they exist on disk
-    // (in test env they don't exist, so no ca.crt/apw mounts)
+    // Mock credentials are always mounted
+    const credsVolume = result.volumes.find((v: string) => v.includes(".credentials.json"));
+    expect(credsVolume).toBeDefined();
+    expect(credsVolume).toContain(":ro");
 
     // Gateway token is returned
     expect(result.gatewayToken).toBe("apw-main-abc123");
+  });
+
+  it("writes mock credentials, not real ones", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        token: "apw-main-mock",
+        expiresAt: Date.now() + 86400000,
+      }),
+    });
+
+    const result = await provisionContainer(
+      "main",
+      agentConfig,
+      containersConfig,
+      "http://localhost:10256",
+      tmpBase,
+      3001
+    );
+
+    // Find the mock credentials file on disk
+    const credsVolume = result.volumes.find((v: string) => v.includes(".credentials.json"))!;
+    // On Windows the host path contains "C:" so split on ":/home" or ":/certs" boundary
+    const hostPath = credsVolume.slice(0, credsVolume.indexOf(":/home"));
+    const { readFileSync } = await import("node:fs");
+    const content = JSON.parse(readFileSync(hostPath, "utf-8"));
+
+    // Should be a stub, not a real token
+    expect(content.claudeAiOauth.accessToken).toBe("sk-ant-stub-container-proxy-handles-auth");
   });
 
   it("includes agent-specific volumes", async () => {
@@ -154,10 +184,9 @@ describe("provisionContainer", () => {
     expect(result.env.HTTP_PROXY).toBeUndefined();
     expect(result.env.APW_TOKEN).toBeUndefined();
     expect(result.gatewayToken).toBe("");
-    // Credentials volume is always mounted (regardless of proxy availability)
-    // but proxy-specific volumes (ca.crt, apw) are not
-    const credsVolumes = result.volumes.filter((v: string) => v.includes(".credentials.json"));
-    expect(credsVolumes.length).toBeLessThanOrEqual(1);
+    // Mock credentials are always mounted regardless of proxy availability
+    const credsVolume = result.volumes.find((v: string) => v.includes(".credentials.json"));
+    expect(credsVolume).toBeDefined();
   });
 
   it("degrades gracefully when proxy is unreachable", async () => {

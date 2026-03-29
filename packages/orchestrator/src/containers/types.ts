@@ -46,7 +46,6 @@ export const containersConfigSchema = z.object({
   session_idle_minutes: z.number().default(30),
   max_concurrent: z.number().default(5),
   proxy_ca_cert: z.string().default("./data/proxy/ca.crt"),
-  apw_path: z.string().default("./packages/proxy/src/cli/apw"),
 });
 
 export type ContainersConfig = z.infer<typeof containersConfigSchema>;

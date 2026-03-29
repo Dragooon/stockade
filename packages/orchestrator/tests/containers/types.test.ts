@@ -62,7 +62,6 @@ describe("containersConfigSchema", () => {
       max_age_hours: 24,
       session_idle_minutes: 60,
       proxy_ca_cert: "./certs/ca.crt",
-      apw_path: "./bin/apw",
     });
 
     expect(result.network).toBe("my-net");
@@ -89,7 +88,6 @@ describe("containersConfigSchema", () => {
     expect(result.max_age_hours).toBe(0);
     expect(result.session_idle_minutes).toBe(30);
     expect(result.proxy_ca_cert).toBe("./data/proxy/ca.crt");
-    expect(result.apw_path).toBe("./packages/proxy/src/cli/apw");
   });
 
   it("partially overrides defaults", () => {

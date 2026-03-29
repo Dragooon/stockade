@@ -30,7 +30,6 @@ const containersConfig: ContainersConfig = {
   max_age_hours: 0,
   session_idle_minutes: 30,
   proxy_ca_cert: "./data/proxy/ca.crt",
-  apw_path: "./packages/proxy/src/cli/apw",
 };
 
 describe("resolveDockerfile", () => {
