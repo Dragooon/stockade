@@ -21,5 +21,8 @@
       "esbuild",
       "ssh2"
     ]
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
   }
 }
