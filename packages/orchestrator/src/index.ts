@@ -180,6 +180,13 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
     askApproval,
   );
 
+  // Build proxy config for credential injection (both local and sandboxed agents)
+  const proxyConfig = config.platform.containers ? {
+    gatewayUrl: `http://${config.platform.containers.proxy_host}:10256`,
+    host: config.platform.containers.proxy_host,
+    caCertPath: resolve(projectRoot, config.platform.containers.proxy_ca_cert),
+  } : undefined;
+
   const context: DispatchContext = {
     allAgents: config.agents,
     platform: config.platform,
@@ -189,6 +196,7 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
     platformRoot: paths.data_dir,
     askApproval,
     containerManager,
+    proxy: proxyConfig,
   };
 
   const attachments = (pending.meta?.attachments as import("./types.js").ChannelAttachment[] | undefined);

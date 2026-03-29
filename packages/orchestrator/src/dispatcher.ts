@@ -34,6 +34,13 @@ export interface DispatchContext {
   askApproval?: AskApprovalFn;
   /** Container manager — threaded so sub-agent dispatch can start containers */
   containerManager?: ContainerManager;
+  /** Credential proxy config — when set, both local and sandboxed agents
+   *  can route through the proxy for credential injection. */
+  proxy?: {
+    gatewayUrl: string;
+    host: string;
+    caCertPath: string;
+  };
 }
 
 /**
@@ -293,6 +300,41 @@ async function dispatchLocal(
     options.systemPrompt = systemPrompt;
   }
 
+  // ── Credential proxy: route local agents through proxy when available ──
+  // If the agent has credentials configured and the proxy is reachable,
+  // issue a gateway token and pass proxy env vars to the SDK subprocess.
+  // This gives local agents the same credential isolation as sandboxed ones.
+  let proxyToken: string | undefined;
+  if (context?.proxy && agentConfig.credentials?.length) {
+    try {
+      const tokenRes = await fetch(`${context.proxy.gatewayUrl}/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(3000),
+        body: JSON.stringify({
+          agentId,
+          credentials: agentConfig.credentials,
+          storeKeys: agentConfig.store_keys,
+        }),
+      });
+      if (tokenRes.ok) {
+        const data = (await tokenRes.json()) as { token: string; expiresAt: number };
+        proxyToken = data.token;
+        options.env = {
+          ...process.env,
+          HTTP_PROXY: `http://${context.proxy.host}:10255`,
+          HTTPS_PROXY: `http://${context.proxy.host}:10255`,
+          NO_PROXY: "localhost,127.0.0.1",
+          NODE_EXTRA_CA_CERTS: context.proxy.caCertPath,
+          APW_GATEWAY: context.proxy.gatewayUrl,
+          APW_TOKEN: data.token,
+        };
+      }
+    } catch {
+      // Proxy not running — continue without credential injection
+    }
+  }
+
   // ── PreToolUse hook: our RBAC runs at step 1 in the SDK permission chain ──
   // Unlike canUseTool (step 5, skipped when built-in logic auto-approves),
   // PreToolUse hooks run FIRST — every tool invocation passes through our RBAC.
@@ -336,10 +378,17 @@ async function dispatchLocal(
     options: options as any,
   });
 
-  for await (const msg of stream) {
-    const m = msg as Record<string, unknown>;
-    if (m.session_id) resultSessionId = String(m.session_id);
-    if ("result" in m) resultText = String(m.result);
+  try {
+    for await (const msg of stream) {
+      const m = msg as Record<string, unknown>;
+      if (m.session_id) resultSessionId = String(m.session_id);
+      if ("result" in m) resultText = String(m.result);
+    }
+  } finally {
+    // Revoke proxy gateway token (best-effort)
+    if (proxyToken && context?.proxy) {
+      fetch(`${context.proxy.gatewayUrl}/token/${proxyToken}`, { method: "DELETE" }).catch(() => {});
+    }
   }
 
   return { result: resultText, sessionId: resultSessionId };

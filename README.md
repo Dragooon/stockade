@@ -11,6 +11,10 @@ Multi-agent orchestrator for Claude with layered security. Agents run in contain
 - [Built on Claude Code](#built-on-claude-code)
 - [Quick Start](#quick-start)
 - [How It Works](#how-it-works)
+  - [Tool Permissions](#tool-permissions)
+  - [Credential Management](#credential-management)
+  - [Container Isolation](#container-isolation)
+  - [RBAC](#rbac)
 - [Configuration](#configuration)
 - [Comparison](#comparison)
 - [Tests](#tests)
@@ -54,7 +58,71 @@ You define agents, permissions, and channels in a single YAML file. Agents can d
 | **RBAC** | User roles control access, identity flows through sub-agent chains |
 | **Network policy** | Deny-by-default allowlist per host/path/method |
 
-See the [architecture docs](https://dragooon.github.io/stockade/architecture) for message flow, container lifecycle, and how the credential proxy works.
+### Tool Permissions
+
+Every tool invocation hits a first-match-wins rule engine before it executes:
+
+```mermaid
+flowchart LR
+    A[Tool Call] --> B{Match Rules}
+    B -->|allow| C[Execute]
+    B -->|deny| D[Block]
+    B -->|ask| E{Gatekeeper}
+    B -->|no match| E
+    E -->|low risk| C
+    E -->|high risk| F[Prompt User]
+```
+
+Rules are per-agent with path and command globs — `allow:Bash(git *)` lets an agent run git but nothing else in Bash. `deny:Write(/config/**)` blocks config writes regardless of other rules.
+
+### Credential Management
+
+Any agent with `credentials` configured routes through the credential proxy — sandboxed or local. The proxy strips auth headers and injects real credentials per route. Agents never see API keys.
+
+```mermaid
+flowchart LR
+    A[Agent] -->|HTTPS via HTTP_PROXY| B[Credential Proxy]
+    B --> C{Network Policy}
+    C -->|denied| D[403 Blocked]
+    C -->|allowed| E[Strip Auth Headers]
+    E --> F[Inject Credentials]
+    F --> G[Upstream API]
+```
+
+Sandboxed agents are forced through the proxy (it's their only route out). Local agents route through it automatically when the proxy is running and the agent has credentials configured. If the proxy is down, local agents fall back to host credentials.
+
+### Container Isolation
+
+```mermaid
+flowchart TB
+    O[Orchestrator] --> L[Local Agent<br/>in-process]
+    O --> C[Container<br/>Docker, internal network]
+    L -->|HTTP_PROXY| P[Credential Proxy]
+    C -->|HTTP_PROXY| P
+    P --> N{Network Policy}
+    N -->|allow| I[Internet]
+    N -->|deny| X[Blocked]
+```
+
+Containers have no direct internet access — the proxy is the only way out. Local agents route through the proxy when credentials are configured, falling back to host credentials if the proxy is down. Both paths enforce the same deny-by-default network policy.
+
+### RBAC
+
+User identity flows through the entire sub-agent delegation chain. If a Discord user's role denies `Bash`, that applies to every agent acting on their behalf — even three levels deep.
+
+```mermaid
+flowchart LR
+    U[Discord User] --> M[Main Agent]
+    M -->|ask_agent| E[Engineer Agent]
+    E -->|ask_agent| R[Researcher Agent]
+    style U fill:#f9f,stroke:#333
+    linkStyle 0 stroke:#f66
+    linkStyle 1 stroke:#f66
+```
+
+User permissions are checked at every delegation boundary — not just the first agent.
+
+See the [architecture docs](https://dragooon.github.io/stockade/architecture) for full details on message flow, container lifecycle, and credential proxy internals.
 
 ## Configuration
 

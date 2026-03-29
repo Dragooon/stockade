@@ -74,7 +74,7 @@ On first request to a sandboxed agent:
 
 ## Credential Proxy
 
-Containers set `HTTP_PROXY` pointing to the proxy. All HTTPS is intercepted via MITM with a local CA cert:
+Any agent with `credentials` configured routes through the proxy — sandboxed or local. Sandboxed agents are forced through it (only route out of the container). Local agents route through it automatically via the SDK's `env` option when the proxy is running. All HTTPS is intercepted via MITM with a local CA cert:
 
 1. Network policy check (host + path + method allowlist)
 2. Strip outgoing auth headers
