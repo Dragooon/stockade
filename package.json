@@ -9,8 +9,8 @@
     "start": "bash bin/stockade",
     "start:orchestrator": "node --import tsx packages/orchestrator/src/index.ts",
     "start:worker": "node --import tsx packages/worker/src/index.ts",
-    "start:proxy": "node --import tsx packages/proxy/src/index.ts",
-    "start:validate": "bash bin/stockade --validate",
+    "start:proxy": "bash bin/stockade proxy",
+    "start:validate": "bash bin/stockade validate",
     "setup": "bash bin/setup.sh",
     "setup:no-docker": "bash bin/setup.sh --no-docker"
   },

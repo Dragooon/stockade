@@ -1,28 +1,40 @@
 #!/usr/bin/env bash
-# Launch the Stockade platform (proxy + orchestrator).
-# Usage: stockade [--validate]
+# Stockade platform launcher.
+#
+# Usage:
+#   stockade              Start proxy + orchestrator (full platform)
+#   stockade proxy        Start proxy only
+#   stockade validate     Validate config without starting
 
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 
-# ── Validate-only mode ──
-if [[ "${1:-}" == "--validate" ]]; then
-  exec node --import tsx packages/orchestrator/src/validate.ts
-fi
-
-# ── Preflight checks ──
-if ! command -v docker &>/dev/null; then
-  echo "[stockade] warning: docker not found — container isolation disabled"
-fi
-
+# ── Preflight ──
 if ! command -v node &>/dev/null; then
   echo "[stockade] error: node is required" >&2
   exit 1
 fi
 
-# ── Cleanup handler ──
+CMD="${1:-}"
+
+# ── stockade validate ──
+if [[ "$CMD" == "validate" ]]; then
+  exec node --import tsx packages/orchestrator/src/validate.ts
+fi
+
+# ── stockade proxy ──
+if [[ "$CMD" == "proxy" ]]; then
+  echo "[stockade] starting proxy..."
+  exec node --import tsx packages/proxy/src/index.ts
+fi
+
+# ── stockade (full platform) ──
+if ! command -v docker &>/dev/null; then
+  echo "[stockade] warning: docker not found — container isolation disabled"
+fi
+
 PROXY_PID=""
 cleanup() {
   echo ""
@@ -34,14 +46,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ── Start proxy (background) ──
 echo "[stockade] starting proxy..."
 node --import tsx packages/proxy/src/index.ts &
 PROXY_PID=$!
-
-# Give proxy a moment to bind ports before orchestrator tries to connect
 sleep 1
 
-# ── Start orchestrator (foreground — owns terminal I/O) ──
 echo "[stockade] starting orchestrator..."
 node --import tsx packages/orchestrator/src/index.ts
