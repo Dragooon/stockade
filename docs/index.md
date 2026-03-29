@@ -3,9 +3,9 @@ layout: default
 title: Stockade
 ---
 
-# Stockade
+# Stockade <small style="color:#888;font-size:0.5em;">v0.1-alpha</small>
 
-> **Alpha software.** Architecture is stable and tested (749 tests), but APIs and config format may change.
+> **Alpha Software:** Still in development and being tested, not recommended in production. Always default to sandboxed agents if you are not sure what you're doing. Never give Agents access to credentials or files that you cannot afford to lose.
 
 Multi-agent orchestrator for Claude with layered security. Agents run in containers with no secrets, no direct internet, and per-tool permission rules — but you can poke precise holes when you need to.
 

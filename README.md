@@ -1,5 +1,7 @@
 # Stockade
 
+![version](https://img.shields.io/badge/version-0.1--alpha-orange) ![tests](https://img.shields.io/badge/tests-749%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
+
 [**dragooon.github.io/stockade**](https://dragooon.github.io/stockade/)
 
 > **Alpha Software:** Still in development and being tested, not recommended in production. Always default to sandboxed agents if you are not sure what you're doing. Never give Agents access to credentials or files that you cannot afford to lose.
