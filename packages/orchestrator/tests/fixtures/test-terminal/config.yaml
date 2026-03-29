@@ -1,0 +1,27 @@
+agents:
+  main:
+    model: sonnet
+    system: |
+      You are a helpful assistant. Keep responses concise.
+    tools:
+      - Bash
+      - Read
+      - Write
+    sandboxed: false
+
+channels:
+  terminal:
+    enabled: true
+    agent: main
+
+rbac:
+  roles:
+    owner:
+      permissions:
+        - "agent:*"
+  users:
+    mail:
+      roles:
+        - owner
+      identities:
+        terminal: "mail"

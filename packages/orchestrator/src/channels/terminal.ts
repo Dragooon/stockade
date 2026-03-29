@@ -2,17 +2,19 @@ import { createInterface, type Interface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
 import { terminalScope } from "./scope.js";
-import type { ChannelMessage } from "../types.js";
+import type { ChannelMessage, ApprovalChannel } from "../types.js";
+import { formatToolApproval } from "../permissions.js";
+import type { GatekeeperReview } from "../gatekeeper.js";
 
 export class TerminalAdapter {
   private agentName: string;
-  private onMessage: (msg: ChannelMessage) => Promise<string>;
+  private onMessage: (msg: ChannelMessage, approvalChannel?: ApprovalChannel) => Promise<string>;
   private rl: Interface | null = null;
   private scope: string;
 
   constructor(
     config: { agent: string },
-    onMessage: (msg: ChannelMessage) => Promise<string>
+    onMessage: (msg: ChannelMessage, approvalChannel?: ApprovalChannel) => Promise<string>,
   ) {
     this.agentName = config.agent;
     this.onMessage = onMessage;
@@ -47,7 +49,8 @@ export class TerminalAdapter {
       process.stdout.write("Thinking...\n");
 
       try {
-        const response = await this.onMessage(msg);
+        const approvalChannel = this.createApprovalChannel();
+        const response = await this.onMessage(msg, approvalChannel);
         process.stdout.write(`\n${response}\n\n`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -66,4 +69,51 @@ export class TerminalAdapter {
     this.rl?.close();
     this.rl = null;
   }
+
+  /**
+   * Create an ApprovalChannel for the terminal.
+   *
+   * Provides two rendering callbacks:
+   *   - askUser: prompts via readline with optional risk review
+   *   - notifyAutoApproved: prints informational line to stdout
+   *
+   * No gatekeeper logic — the orchestrator decides when to call which.
+   */
+  private createApprovalChannel(): ApprovalChannel {
+    return {
+      askUser: async (tool, input, review?) => {
+        if (!this.rl) return false;
+
+        return new Promise<boolean>((resolve) => {
+          const desc = formatToolApproval(tool, input);
+          let prompt = `\n--- Tool approval required ---\n${desc}\n`;
+          if (review) {
+            prompt += formatTerminalReview(review);
+          }
+          prompt += "Allow? [y/N] ";
+
+          this.rl!.question(prompt, (answer) => {
+            const normalized = answer.trim().toLowerCase();
+            resolve(normalized === "y" || normalized === "yes");
+          });
+        });
+      },
+
+      notifyAutoApproved: async (tool, input, review) => {
+        const desc = formatToolApproval(tool, input);
+        process.stdout.write(
+          `\n--- Auto-approved (${review.risk} risk) ---\n${desc}\n` +
+          formatTerminalReview(review),
+        );
+      },
+    };
+  }
+}
+
+function formatTerminalReview(review: GatekeeperReview): string {
+  return (
+    `  Risk: ${review.risk.toUpperCase()}\n` +
+    `  Review: ${review.summary}\n` +
+    `  Reason: ${review.reasoning}\n`
+  );
 }

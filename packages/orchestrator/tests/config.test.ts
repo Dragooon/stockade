@@ -3,7 +3,8 @@ import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { loadConfig, substituteEnvVars } from "../src/config.js";
+import { homedir } from "node:os";
+import { loadConfig, substituteEnvVars, resolvePaths, PLATFORM_HOME } from "../src/config.js";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `config-test-${randomUUID()}`);
@@ -15,25 +16,20 @@ function writeYaml(dir: string, name: string, content: string): void {
   writeFileSync(join(dir, name), content, "utf-8");
 }
 
-const VALID_AGENTS = `
+const VALID_CONFIG = `
 agents:
   main:
     model: claude-sonnet-4-20250514
     system: "You are helpful."
     tools: ["Bash", "Read"]
-    lifecycle: persistent
-    remote: false
+    sandboxed: false
   researcher:
     model: claude-haiku-4-5-20251001
     system: "You research."
     tools: ["WebSearch"]
-    lifecycle: persistent
-    remote: true
+    sandboxed: true
     port: 3001
     url: http://localhost:3001
-`;
-
-const VALID_PLATFORM = `
 channels:
   terminal:
     enabled: true
@@ -75,15 +71,14 @@ describe("config", () => {
   });
 
   it("loads valid agents and platform config", () => {
-    writeYaml(tmpDir, "agents.yaml", VALID_AGENTS);
-    writeYaml(tmpDir, "platform.yaml", VALID_PLATFORM);
+    writeYaml(tmpDir, "config.yaml", VALID_CONFIG);
 
     const config = loadConfig(tmpDir);
 
     expect(config.agents.agents.main.model).toBe("claude-sonnet-4-20250514");
     expect(config.agents.agents.main.tools).toEqual(["Bash", "Read"]);
-    expect(config.agents.agents.main.remote).toBe(false);
-    expect(config.agents.agents.researcher.remote).toBe(true);
+    expect(config.agents.agents.main.sandboxed).toBe(false);
+    expect(config.agents.agents.researcher.sandboxed).toBe(true);
     expect(config.agents.agents.researcher.port).toBe(3001);
 
     expect(config.platform.channels.terminal?.enabled).toBe(true);
@@ -94,25 +89,39 @@ describe("config", () => {
   it("rejects invalid agents config (missing required field)", () => {
     writeYaml(
       tmpDir,
-      "agents.yaml",
+      "config.yaml",
       `
 agents:
   broken:
     model: sonnet
-    # missing system, tools, lifecycle
+    # missing system, tools
+channels:
+  terminal:
+    enabled: true
+    agent: main
+rbac:
+  roles:
+    owner:
+      permissions:
+        - "agent:*"
+  users: {}
 `
     );
-    writeYaml(tmpDir, "platform.yaml", VALID_PLATFORM);
 
     expect(() => loadConfig(tmpDir)).toThrow();
   });
 
   it("rejects invalid platform config (bad rbac)", () => {
-    writeYaml(tmpDir, "agents.yaml", VALID_AGENTS);
     writeYaml(
       tmpDir,
-      "platform.yaml",
+      "config.yaml",
       `
+agents:
+  main:
+    model: claude-sonnet-4-20250514
+    system: "You are helpful."
+    tools: ["Bash", "Read"]
+    sandboxed: false
 channels:
   terminal:
     enabled: true
@@ -129,11 +138,16 @@ rbac:
   it("substitutes environment variables", () => {
     process.env.__TEST_TOKEN = "secret-discord-token";
 
-    writeYaml(tmpDir, "agents.yaml", VALID_AGENTS);
     writeYaml(
       tmpDir,
-      "platform.yaml",
+      "config.yaml",
       `
+agents:
+  main:
+    model: claude-sonnet-4-20250514
+    system: "You are helpful."
+    tools: ["Bash", "Read"]
+    sandboxed: false
 channels:
   discord:
     enabled: true
@@ -165,11 +179,16 @@ rbac:
   it("substitutes missing env var as empty string", () => {
     delete process.env.__NONEXISTENT_VAR;
 
-    writeYaml(tmpDir, "agents.yaml", VALID_AGENTS);
     writeYaml(
       tmpDir,
-      "platform.yaml",
+      "config.yaml",
       `
+agents:
+  main:
+    model: claude-sonnet-4-20250514
+    system: "You are helpful."
+    tools: ["Bash", "Read"]
+    sandboxed: false
 channels:
   discord:
     enabled: true
@@ -186,23 +205,291 @@ rbac:
     expect(config.platform.channels.discord?.token).toBe("");
   });
 
-  it("defaults remote to false when not specified", () => {
+  it("resolves paths with defaults to ~/.stockade when paths section omitted", () => {
+    writeYaml(tmpDir, "config.yaml", VALID_CONFIG);
+
+    const config = loadConfig(tmpDir);
+    const paths = config.platform.paths!;
+
+    expect(paths).toBeDefined();
+    expect(paths.config_dir).toBe(join(tmpDir)); // normalized
+    // Default data_dir is ~/.stockade (decoupled from project)
+    expect(paths.data_dir).toBe(PLATFORM_HOME);
+    expect(paths.agents_dir).toBe(join(PLATFORM_HOME, "agents"));
+    expect(paths.sessions_db).toBe(join(PLATFORM_HOME, "sessions.db"));
+    expect(paths.containers_dir).toBe(join(PLATFORM_HOME, "containers"));
+  });
+
+  it("PLATFORM_HOME points to ~/.stockade", () => {
+    expect(PLATFORM_HOME).toBe(join(homedir(), ".stockade"));
+  });
+
+  it("resolves custom paths relative to project root", () => {
     writeYaml(
       tmpDir,
-      "agents.yaml",
+      "config.yaml",
+      VALID_CONFIG +
+        `paths:\n  data_dir: ./my-data\n  agents_dir: ./my-data/my-agents\n`
+    );
+
+    const projectRoot = join(tmpDir, "..");
+    const config = loadConfig(tmpDir, projectRoot);
+    const paths = config.platform.paths!;
+
+    expect(paths.data_dir).toBe(join(projectRoot, "my-data"));
+    expect(paths.agents_dir).toBe(join(projectRoot, "my-data", "my-agents"));
+    // sessions_db falls back to <data_dir>/sessions.db
+    expect(paths.sessions_db).toBe(join(projectRoot, "my-data", "sessions.db"));
+  });
+
+  it("resolves absolute paths as-is", () => {
+    const absPath = join(tmpDir, "absolute-data");
+    writeYaml(
+      tmpDir,
+      "config.yaml",
+      VALID_CONFIG + `paths:\n  data_dir: ${absPath}\n`
+    );
+
+    const config = loadConfig(tmpDir);
+    const paths = config.platform.paths!;
+
+    expect(paths.data_dir).toBe(absPath);
+    expect(paths.agents_dir).toBe(join(absPath, "agents"));
+  });
+
+  it("defaults sandboxed to false when not specified", () => {
+    writeYaml(
+      tmpDir,
+      "config.yaml",
       `
 agents:
   simple:
     model: sonnet
     system: "Hello"
     tools: ["Bash"]
-    lifecycle: ephemeral
+channels:
+  terminal:
+    enabled: true
+    agent: main
+rbac:
+  roles: {}
+  users: {}
 `
     );
-    writeYaml(tmpDir, "platform.yaml", VALID_PLATFORM);
 
     const config = loadConfig(tmpDir);
-    expect(config.agents.agents.simple.remote).toBe(false);
+    expect(config.agents.agents.simple.sandboxed).toBe(false);
+  });
+
+  it("defaults system_mode to replace when not specified", () => {
+    writeYaml(
+      tmpDir,
+      "config.yaml",
+      `
+agents:
+  main:
+    model: sonnet
+    system: "Hello"
+    tools: ["Bash"]
+channels:
+  terminal:
+    enabled: true
+    agent: main
+rbac:
+  roles: {}
+  users: {}
+`
+    );
+
+    const config = loadConfig(tmpDir);
+    expect(config.agents.agents.main.system_mode).toBe("replace");
+  });
+
+  it("accepts system_mode: append", () => {
+    writeYaml(
+      tmpDir,
+      "config.yaml",
+      `
+agents:
+  main:
+    model: sonnet
+    system: "Hello"
+    system_mode: append
+    tools: ["Bash"]
+channels:
+  terminal:
+    enabled: true
+    agent: main
+rbac:
+  roles: {}
+  users: {}
+`
+    );
+
+    const config = loadConfig(tmpDir);
+    expect(config.agents.agents.main.system_mode).toBe("append");
+  });
+
+  it("defaults effort to undefined when not specified", () => {
+    writeYaml(
+      tmpDir,
+      "config.yaml",
+      `
+agents:
+  main:
+    model: sonnet
+    system: "Hello"
+    tools: ["Bash"]
+channels:
+  terminal:
+    enabled: true
+    agent: main
+rbac:
+  roles: {}
+  users: {}
+`
+    );
+
+    const config = loadConfig(tmpDir);
+    expect(config.agents.agents.main.effort).toBeUndefined();
+  });
+
+  it("accepts effort: high", () => {
+    writeYaml(
+      tmpDir,
+      "config.yaml",
+      `
+agents:
+  main:
+    model: sonnet
+    system: "Hello"
+    effort: high
+    tools: ["Bash"]
+channels:
+  terminal:
+    enabled: true
+    agent: main
+rbac:
+  roles: {}
+  users: {}
+`
+    );
+
+    const config = loadConfig(tmpDir);
+    expect(config.agents.agents.main.effort).toBe("high");
+  });
+
+  it("rejects invalid effort value", () => {
+    writeYaml(
+      tmpDir,
+      "config.yaml",
+      `
+agents:
+  main:
+    model: sonnet
+    system: "Hello"
+    effort: turbo
+    tools: ["Bash"]
+channels:
+  terminal:
+    enabled: true
+    agent: main
+rbac:
+  roles: {}
+  users: {}
+`
+    );
+
+    expect(() => loadConfig(tmpDir)).toThrow();
+  });
+
+  it("defaults memory to enabled with no autoDream when not specified", () => {
+    writeYaml(
+      tmpDir,
+      "config.yaml",
+      `
+agents:
+  main:
+    model: sonnet
+    system: "Hello"
+channels:
+  terminal:
+    enabled: true
+    agent: main
+rbac:
+  roles: {}
+  users: {}
+`
+    );
+
+    const config = loadConfig(tmpDir);
+    // Zod fills in the default: memory is always present with sensible defaults
+    expect(config.agents.agents.main.memory).toEqual({
+      enabled: true,
+      autoDream: false,
+    });
+  });
+
+  it("parses memory config with defaults", () => {
+    writeYaml(
+      tmpDir,
+      "config.yaml",
+      `
+agents:
+  main:
+    model: sonnet
+    system: "Hello"
+    memory:
+      enabled: true
+channels:
+  terminal:
+    enabled: true
+    agent: main
+rbac:
+  roles: {}
+  users: {}
+`
+    );
+
+    const config = loadConfig(tmpDir);
+    expect(config.agents.agents.main.memory).toEqual({
+      enabled: true,
+      autoDream: false,
+    });
+  });
+
+  it("parses memory config with autoDream", () => {
+    writeYaml(
+      tmpDir,
+      "config.yaml",
+      `
+agents:
+  main:
+    model: sonnet
+    system: "Hello"
+    memory:
+      enabled: true
+      autoDream: true
+channels:
+  terminal:
+    enabled: true
+    agent: main
+rbac:
+  roles: {}
+  users: {}
+`
+    );
+
+    const config = loadConfig(tmpDir);
+    expect(config.agents.agents.main.memory).toEqual({
+      enabled: true,
+      autoDream: true,
+    });
+  });
+
+  it("throws when config.yaml is missing", () => {
+    // tmpDir exists but contains no config.yaml
+    expect(() => loadConfig(tmpDir)).toThrow();
   });
 });
 

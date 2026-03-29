@@ -1,0 +1,139 @@
+# Stockade — Example Configuration (sandboxed by default)
+# Copy to config.yaml and customize for your setup.
+# All agents run in containers by default. No secrets in this file.
+
+agents:
+  main:
+    model: claude-sonnet-4-6
+    effort: high
+    system_mode: append
+    system: |
+      You are the orchestrator agent. You handle conversation with the user
+      and delegate work to sub-agents. You synthesise results and make decisions.
+
+      Sub-agents available via ask_agent:
+      - researcher: research, lookups, fact-checking (sandboxed)
+      - engineer: coding, testing, debugging (sandboxed)
+
+      Delegation rules:
+      - Research, docs, lookups → researcher
+      - Code changes, tests, debugging → engineer
+      - Direct conversation, orchestration, final synthesis → you
+    tools:
+      - Bash
+      - Read
+      - Write
+      - Edit
+      - Glob
+      - Grep
+    subagents:
+      - researcher
+      - engineer
+    sandboxed: true
+    container:
+      memory: 1g
+      cpus: 2.0
+    permissions:
+      - "deny:Write(/config/**)"
+      - "deny:Edit(/config/**)"
+      - "allow:*"
+
+  researcher:
+    model: claude-haiku-4-5-20251001
+    effort: low
+    system_mode: append
+    system: |
+      You are a research agent. Quick lookups to deep investigations.
+      Always include source URLs. Verify claims through multiple sources.
+    tools:
+      - Bash
+      - Read
+      - WebSearch
+      - WebFetch
+    sandboxed: true
+    container:
+      memory: 512m
+      cpus: 1.0
+    permissions:
+      - "allow:Read"
+      - "allow:WebSearch"
+      - "allow:WebFetch"
+      - "allow:Bash(curl *)"
+      - "allow:Bash(git log *)"
+
+  engineer:
+    model: claude-sonnet-4-6
+    effort: high
+    system_mode: append
+    system: |
+      You are a software engineering agent. Read spec, plan, implement, test,
+      iterate until green. Never submit untested code.
+    tools:
+      - Bash
+      - Read
+      - Write
+      - Edit
+      - Glob
+      - Grep
+    sandboxed: true
+    container:
+      memory: 2g
+      cpus: 2.0
+    permissions:
+      - "deny:Write(/config/**)"
+      - "deny:Edit(/config/**)"
+      - "allow:*"
+
+channels:
+  terminal:
+    enabled: true
+    agent: main
+
+  # Uncomment to enable Discord:
+  # discord:
+  #   enabled: true
+  #   token: ${DISCORD_TOKEN}
+  #   bindings:
+  #     - server: "YOUR_SERVER_ID"
+  #       agent: main
+  #       channels: "*"
+
+rbac:
+  roles:
+    owner:
+      permissions:
+        - "agent:*"
+        - "tool:*"
+    user:
+      permissions:
+        - "agent:main"
+      deny:
+        - "tool:Bash"
+        - "tool:Write"
+        - "tool:Edit"
+  users:
+    # Add your user here:
+    # your-name:
+    #   roles:
+    #     - owner
+    #   identities:
+    #     terminal: "your-os-username"
+    #     discord: "your-discord-user-id"
+
+containers:
+  network: stockade-net
+  proxy_host: host.docker.internal
+  port_range: [3001, 3099]
+  base_dockerfile: ./packages/worker/Dockerfile
+  build_context: .
+  health_check:
+    interval_ms: 500
+    timeout_ms: 30000
+    retries: 3
+  defaults:
+    memory: 1g
+    cpus: 1.0
+  max_age_hours: 0
+  max_concurrent: 5
+  proxy_ca_cert: ./data/proxy/ca.crt
+  apw_path: ./packages/proxy/src/cli/apw

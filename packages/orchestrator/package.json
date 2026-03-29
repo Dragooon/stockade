@@ -1,5 +1,5 @@
 {
-  "name": "@agent-platform/orchestrator",
+  "name": "@stockade/orchestrator",
   "version": "2.0.0",
   "type": "module",
   "scripts": {
@@ -11,8 +11,10 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.83",
     "better-sqlite3": "^11.10.0",
+    "cron-parser": "^5.5.0",
     "discord.js": "^14.18.0",
     "dotenv": "^17.3.1",
+    "execa": "^9.6.1",
     "js-yaml": "^4.1.0",
     "zod": "^4.3.6"
   },

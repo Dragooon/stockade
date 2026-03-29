@@ -1,0 +1,53 @@
+# Stockade — Proxy Configuration (credential injection + network policy)
+# Copy to proxy.yaml and customize.
+
+proxy:
+  host: "0.0.0.0"
+
+  # Credential provider — CLI command templates.
+  # Supports any secret manager: 1Password, Bitwarden, AWS SM, files, etc.
+  # {key} is replaced with the credential name, {value} with the secret.
+  provider:
+    read:  "cat config/secrets/{key}"
+    write: "mkdir -p $(dirname config/secrets/{key}) && printf '%s' '{value}' > config/secrets/{key}"
+    update: "printf '%s' '{value}' > config/secrets/{key}"
+    cache_ttl: 60
+
+  # Network policy — deny by default, allowlist specific hosts.
+  # Applies to all container traffic (HTTP and SSH).
+  policy:
+    default: deny
+    rules:
+      - host: "api.anthropic.com"
+        action: allow
+      - host: "127.0.0.1"
+        action: allow
+      - host: "localhost"
+        action: allow
+      # Add more hosts as needed:
+      # - host: "api.github.com"
+      #   action: allow
+
+  http:
+    port: 10255
+    tls:
+      ca_cert: data/proxy/ca.crt
+      ca_key:  data/proxy/ca.key
+    strip_headers:
+      - authorization
+      - x-api-key
+      - proxy-authorization
+    routes:
+      - host: "api.anthropic.com"
+        credential: anthropic-api-key
+        inject:
+          header: x-api-key
+
+  ssh:
+    port: 10022
+    ca_key: data/proxy/ssh-ca
+    routes: []
+
+  gateway:
+    port: 10256
+    token_ttl: 86400

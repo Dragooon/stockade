@@ -110,4 +110,25 @@ describe("POST /run", () => {
     const body = await res.json();
     expect(body).toHaveProperty("error");
   });
+
+  it("returns 400 or 500 gracefully for malformed JSON body", async () => {
+    const res = await app.request("/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not json",
+    });
+
+    // Hono's c.req.json() throws on invalid JSON — should not crash the server
+    expect([400, 500]).toContain(res.status);
+  });
+
+  it("returns 400 or 500 gracefully for empty body", async () => {
+    const res = await app.request("/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "",
+    });
+
+    expect([400, 500]).toContain(res.status);
+  });
 });

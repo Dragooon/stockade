@@ -1,7 +1,44 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+
+# Runtime data (sessions, containers, proxy certs)
 data/
-.next/
+
+# Secrets — NEVER commit
+config/secrets/
+*.key
+*.pem
 .env
+.env.*
+
+# Databases
 *.db
 *.db-journal
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+
+# Next.js (if used)
+.next/
+
+# Internal development docs (not for public repo)
+reference/
+DEVELOPMENT.md
+QA-AUDIT-REPORT.md
+
+# User-specific config (example configs are committed instead)
+config/config.yaml
+config/proxy.yaml
+config/resolve-credential.sh

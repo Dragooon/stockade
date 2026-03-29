@@ -1,12 +1,17 @@
+import { join } from "node:path";
 import type {
   AgentConfig,
   AgentsConfig,
+  AskApprovalFn,
+  ChannelAttachment,
   ChannelMessage,
   DispatchResult,
   PlatformConfig,
 } from "./types.js";
-import type { CanUseToolResult } from "./rbac.js";
-import { checkAccess, buildPermissionHook } from "./rbac.js";
+import type { CanUseToolResult, PreToolUseHookOutput } from "./rbac.js";
+import { checkAccess, buildPermissionHook, buildPreToolUseHook } from "./rbac.js";
+import { resolveEffectivePermissions } from "./gatekeeper.js";
+import type { ContainerManager } from "./containers/manager.js";
 
 /**
  * Context needed for sub-agent dispatch — carries the full agent registry,
@@ -20,11 +25,23 @@ export interface DispatchContext {
   userId: string;
   /** Original caller's platform (for RBAC on sub-agents) */
   userPlatform: string;
+  /** Root directory for per-agent workspaces (data/agents/) */
+  agentsDir?: string;
+  /** Platform root directory (~/.stockade) — for `/` prefix in permission rules */
+  platformRoot?: string;
+  /** HITL approval callback — threaded from the originating channel so
+   *  approval requests reach the user who sent the message. */
+  askApproval?: AskApprovalFn;
+  /** Container manager — threaded so sub-agent dispatch can start containers */
+  containerManager?: ContainerManager;
 }
 
 /**
  * Dispatch a message to an agent — either in-process via Agent SDK query(),
- * or via HTTP POST to a remote worker.
+ * or via HTTP POST to a sandboxed worker container.
+ *
+ * If a containerManager is provided and the agent is sandboxed, the manager
+ * ensures a container is running before dispatching.
  */
 export async function dispatch(
   agentId: string,
@@ -35,18 +52,168 @@ export async function dispatch(
     tool: string,
     input: Record<string, unknown>
   ) => Promise<CanUseToolResult>,
-  context?: DispatchContext
+  context?: DispatchContext,
+  containerManager?: ContainerManager
 ): Promise<DispatchResult> {
-  if (agentConfig.remote) {
-    return dispatchRemote(agentConfig, message, sessionId);
+  if (agentConfig.sandboxed) {
+    // If container manager is available, ensure a container is running
+    if (containerManager) {
+      const url = await containerManager.ensure(
+        agentId,
+        agentConfig,
+        message.scope
+      );
+      return dispatchRemote({ ...agentConfig, url }, agentId, message, sessionId, context?.agentsDir);
+    }
+    return dispatchRemote(agentConfig, agentId, message, sessionId, context?.agentsDir);
   }
-  return dispatchLocal(agentConfig, message, sessionId, permissionHook, context);
+  return dispatchLocal(agentId, agentConfig, message, sessionId, permissionHook, context);
+}
+
+/**
+ * Build the system prompt based on agent config and system_mode.
+ *
+ * - "replace": returns the agent's system prompt as a plain string (SDK replaces its default)
+ * - "append": returns a preset object that keeps the SDK's Claude Code prompt and appends
+ *
+ * Detailed agent instructions live in CLAUDE.md in the agent's workspace directory,
+ * loaded automatically by Claude Code via settingSources: ["project"].
+ */
+export function buildSystemPrompt(
+  agentConfig: AgentConfig,
+): string | { type: "preset"; preset: "claude_code"; append: string } | undefined {
+  if (!agentConfig.system) return undefined;
+
+  const mode = agentConfig.system_mode ?? "replace";
+
+  if (mode === "append") {
+    return { type: "preset" as const, preset: "claude_code" as const, append: agentConfig.system };
+  }
+
+  // replace mode — plain string
+  return agentConfig.system;
+}
+
+/**
+ * Tools that must never be available to agents — they bypass our orchestration.
+ * The Agent tool spawns Claude Code subagents outside our RBAC, session,
+ * and dispatch queue. Delegation must go through mcp__orchestrator__ask_agent.
+ */
+export const PLATFORM_DISALLOWED_TOOLS = ["Agent"];
+
+/**
+ * Deny rules that prevent agents from modifying their own configuration.
+ *
+ * Since we set `settingSources: ["project"]`, Claude Code loads settings and
+ * CLAUDE.md from the agent's cwd. If the agent writes to `.claude/` or
+ * CLAUDE.md, those changes take effect on the next query() call — effectively
+ * allowing the agent to rewrite its own permissions, hooks, instructions,
+ * or MCP servers.
+ *
+ * These deny rules are injected at the highest-priority settings layer
+ * and override even bypassPermissions mode.
+ */
+export const SELF_MODIFICATION_DENY_RULES = [
+  // Block all writes to .claude/ — settings, MCP config, skills, agents, rules
+  "Write(.claude/**)",
+  "Edit(.claude/**)",
+];
+
+/**
+ * Build the SDK `settings` object for an agent.
+ * Controls memory, permissions, and prevents agents from modifying their
+ * own configuration or instructions.
+ */
+export function buildSdkSettings(
+  agentConfig: AgentConfig,
+  agentId: string,
+  agentsDir?: string
+): Record<string, unknown> {
+  const memoryDir = agentsDir
+    ? join(agentsDir, agentId, "memory")
+    : undefined;
+
+  const memoryEnabled = agentConfig.memory?.enabled ?? true;
+
+  return {
+    autoMemoryEnabled: memoryEnabled,
+    ...(memoryDir ? { autoMemoryDirectory: memoryDir } : {}),
+    autoDreamEnabled: agentConfig.memory?.autoDream ?? false,
+    permissions: {
+      deny: [
+        // Prevent Agent tool (bypasses our orchestration)
+        "Agent",
+        // Prevent self-modification of settings, instructions, MCP config
+        ...SELF_MODIFICATION_DENY_RULES,
+      ],
+    },
+  };
+}
+
+/** Image MIME types the Anthropic API accepts as multimodal content blocks. */
+const IMAGE_MIME_TYPES = new Set([
+  "image/png", "image/jpeg", "image/gif", "image/webp",
+]);
+
+/**
+ * Build a prompt from text + attachments for Agent SDK query().
+ *
+ * - Image attachments → base64 image content blocks via AsyncIterable<SDKUserMessage>
+ * - Text attachments → inlined into the text content
+ * - Returns plain string when there are no image attachments (fast path)
+ */
+function buildPromptWithAttachments(
+  text: string,
+  attachments: ChannelAttachment[],
+  sessionId: string | null,
+): string | AsyncIterable<{ type: "user"; message: unknown; parent_tool_use_id: null; session_id: string }> {
+  const imageBlocks: unknown[] = [];
+  const textParts: string[] = [];
+
+  for (const att of attachments) {
+    if (IMAGE_MIME_TYPES.has(att.contentType)) {
+      imageBlocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: att.contentType,
+          data: att.data,
+        },
+      });
+    } else {
+      // Text file — inline content
+      textParts.push(`\n--- ${att.filename} ---\n${att.data}\n---`);
+    }
+  }
+
+  // No images → just extend the string prompt (avoids AsyncIterable path)
+  if (imageBlocks.length === 0) {
+    return text + textParts.join("");
+  }
+
+  // Images present → wrap in AsyncIterable<SDKUserMessage>
+  const content: unknown[] = [
+    ...imageBlocks,
+    { type: "text", text: text + textParts.join("") },
+  ];
+
+  const userMessage = {
+    type: "user" as const,
+    message: { role: "user" as const, content },
+    parent_tool_use_id: null,
+    session_id: sessionId ?? "",
+  };
+
+  return (async function* () {
+    yield userMessage;
+  })();
 }
 
 /**
  * In-process dispatch using Agent SDK query().
  */
 async function dispatchLocal(
+  agentId: string,
   agentConfig: AgentConfig,
   message: ChannelMessage,
   sessionId: string | null,
@@ -62,37 +229,110 @@ async function dispatchLocal(
   let resultText = "";
   let resultSessionId = "";
 
-  const allowedTools = [...agentConfig.tools];
+  // Use `tools` to restrict which built-in tools are available to the agent.
+  // NOTE: `allowedTools` auto-approves tools WITHOUT calling canUseTool — never use it.
+  // Always strip Agent from explicit tool lists — delegation goes through ask_agent.
+  const agentTools = agentConfig.tools
+    ? agentConfig.tools.filter((t) => t !== "Agent")
+    : undefined;
 
   const options: Record<string, unknown> = {
     model: agentConfig.model,
     maxTurns: 20,
+
+    // ── Isolation: only load project-level settings/CLAUDE.md from agent cwd ──
+    // Skips 'user' (no global settings bleed) and 'local' (no local overrides).
+    settingSources: ["project"],
+
+    // ── Permissions: PreToolUse hook is our sole gatekeeper ──
+    // "acceptEdits" auto-approves file operations at the SDK level, but our
+    // PreToolUse hook runs FIRST (step 1 in the permission chain) and handles
+    // all allow/deny/ask decisions before the SDK's built-in logic.
+    // This avoids interactive prompts that would hang in headless mode.
     permissionMode: "acceptEdits" as const,
+
+    // ── Hard deny: Agent tool removed from model context entirely ──
+    disallowedTools: PLATFORM_DISALLOWED_TOOLS,
+
+    // ── Settings: inject memory config + deny Agent at settings level ──
+    settings: buildSdkSettings(agentConfig, agentId, context?.agentsDir),
   };
+
+  // Effort level
+  if (agentConfig.effort) {
+    options.effort = agentConfig.effort;
+  }
+
+  // Set agent's working directory
+  if (context?.agentsDir) {
+    options.cwd = join(context.agentsDir, agentId);
+  }
 
   // If agent has subagents and we have context, build the MCP server
   if (agentConfig.subagents?.length && context) {
     const mcpServer = await buildSubagentMcpServer(context);
     options.mcpServers = { orchestrator: mcpServer };
-    allowedTools.push("mcp__orchestrator__ask_agent");
+    if (agentTools) {
+      agentTools.push("mcp__orchestrator__ask_agent");
+    }
   }
 
-  options.allowedTools = allowedTools;
+  // Use `tools` (not `allowedTools`) to restrict available tools.
+  // `tools` controls availability; `canUseTool` controls permissions.
+  if (agentTools) {
+    options.tools = agentTools;
+  }
 
   if (sessionId) {
     options.resume = sessionId;
   }
 
-  if (agentConfig.system) {
-    options.systemPrompt = agentConfig.system;
+  // Build system prompt with system_mode support
+  const systemPrompt = buildSystemPrompt(agentConfig);
+  if (systemPrompt) {
+    options.systemPrompt = systemPrompt;
   }
 
+  // ── PreToolUse hook: our RBAC runs at step 1 in the SDK permission chain ──
+  // Unlike canUseTool (step 5, skipped when built-in logic auto-approves),
+  // PreToolUse hooks run FIRST — every tool invocation passes through our RBAC.
   if (permissionHook) {
-    options.canUseTool = permissionHook;
+    options.hooks = {
+      PreToolUse: [{
+        hooks: [async (hookInput: Record<string, unknown>) => {
+          const result = await permissionHook(
+            String(hookInput.tool_name),
+            (hookInput.tool_input ?? {}) as Record<string, unknown>,
+          );
+          // Translate canUseTool result → PreToolUse hook output
+          if (result.behavior === "deny") {
+            return {
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                permissionDecision: "deny",
+                permissionDecisionReason: result.message ?? "Denied by RBAC",
+              },
+            };
+          }
+          return {
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "allow",
+              updatedInput: result.updatedInput,
+            },
+          };
+        }],
+      }],
+    };
   }
+
+  // Build prompt — multimodal when image attachments are present
+  const prompt = message.attachments?.length
+    ? buildPromptWithAttachments(message.content, message.attachments, sessionId)
+    : message.content;
 
   const stream = query({
-    prompt: message.content,
+    prompt: prompt as any,
     options: options as any,
   });
 
@@ -155,11 +395,22 @@ async function buildSubagentMcpServer(context: DispatchContext) {
         };
       }
 
-      // Build permission hook for the sub-agent (same user identity)
+      // Build permission hook for the sub-agent (same user identity + target agent's rules)
+      const subAgentCwd = context.agentsDir
+        ? join(context.agentsDir, args.agentId)
+        : undefined;
+      const subEffectivePermissions = resolveEffectivePermissions(
+        targetConfig.permissions,
+        context.platform.gatekeeper,
+      );
       const subPermissionHook = buildPermissionHook(
         context.userId,
         context.userPlatform,
-        context.platform
+        context.platform,
+        subEffectivePermissions,
+        subAgentCwd,
+        context.platformRoot,
+        context.askApproval,
       );
 
       // Build an ephemeral message for the sub-agent
@@ -170,14 +421,15 @@ async function buildSubagentMcpServer(context: DispatchContext) {
         platform: context.userPlatform,
       };
 
-      // Reuse dispatch() — handles local vs remote routing
+      // Reuse dispatch() — handles local vs sandboxed routing
       const result = await dispatch(
         args.agentId,
         subMessage,
         targetConfig,
         null, // ephemeral — no session resume
         subPermissionHook,
-        context // pass context through for nested sub-agents
+        context, // pass context through for nested sub-agents
+        context.containerManager // thread container manager for sandboxed sub-agents
       );
 
       return {
@@ -195,26 +447,37 @@ async function buildSubagentMcpServer(context: DispatchContext) {
 
 /**
  * Remote dispatch via HTTP POST to a worker.
+ * Uses buildSystemPrompt() to honour system_mode.
  */
 async function dispatchRemote(
   agentConfig: AgentConfig,
+  _agentId: string,
   message: ChannelMessage,
-  sessionId: string | null
+  sessionId: string | null,
+  _agentsDir?: string
 ): Promise<DispatchResult> {
   const baseUrl =
     agentConfig.url ?? `http://localhost:${agentConfig.port}`;
   const url = `${baseUrl}/run`;
+
+  // Remote workers only accept string system prompts — flatten preset objects.
+  // The worker's query() doesn't support the preset format, so always send raw text.
+  const builtPrompt = buildSystemPrompt(agentConfig);
+  const systemPrompt = typeof builtPrompt === "object" && builtPrompt !== null && builtPrompt !== undefined
+    ? (builtPrompt as { append: string }).append
+    : builtPrompt;
 
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       prompt: message.content,
-      systemPrompt: agentConfig.system,
-      tools: agentConfig.tools,
+      systemPrompt: systemPrompt ?? agentConfig.system,
+      tools: agentConfig.tools?.filter((t) => t !== "Agent"),
       model: agentConfig.model,
       sessionId: sessionId ?? undefined,
       maxTurns: 20,
+      ...(agentConfig.effort ? { effort: agentConfig.effort } : {}),
     }),
   });
 

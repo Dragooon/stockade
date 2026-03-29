@@ -75,13 +75,9 @@ describe("runAgent", () => {
 
     await runAgent({ prompt: "test" });
 
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.objectContaining({
-        options: expect.objectContaining({
-          allowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
-        }),
-      })
-    );
+    // When no tools specified, allowedTools should be omitted (enables all tools)
+    const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.options).not.toHaveProperty("allowedTools");
   });
 
   it("uses custom tools when provided", async () => {

@@ -1,0 +1,90 @@
+#!/bin/sh
+# apw — Agent Platform credential store CLI
+# Reads value from stdin, stores via the gateway API.
+#
+# Usage:
+#   echo "secret_value" | apw store <key> [--host H --header H --format F]
+#
+# Env vars:
+#   APW_GATEWAY  — Gateway URL (e.g., http://localhost:10256)
+#   APW_TOKEN    — Bearer token for gateway auth
+
+set -e
+
+if [ -z "$APW_GATEWAY" ] || [ -z "$APW_TOKEN" ]; then
+  echo "Error: APW_GATEWAY and APW_TOKEN must be set" >&2
+  exit 1
+fi
+
+COMMAND="${1:-}"
+shift 2>/dev/null || true
+
+case "$COMMAND" in
+  store)
+    KEY="${1:-}"
+    shift 2>/dev/null || true
+
+    if [ -z "$KEY" ]; then
+      echo "Usage: apw store <key> [--host H --header H --format F]" >&2
+      exit 1
+    fi
+
+    # Parse optional route metadata flags
+    HOST=""
+    HEADER=""
+    FORMAT=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --host)   HOST="$2"; shift 2 ;;
+        --header) HEADER="$2"; shift 2 ;;
+        --format) FORMAT="$2"; shift 2 ;;
+        *)        echo "Unknown option: $1" >&2; exit 1 ;;
+      esac
+    done
+
+    # Read value from stdin
+    VALUE="$(cat)"
+    if [ -z "$VALUE" ]; then
+      echo "Error: no value provided on stdin" >&2
+      exit 1
+    fi
+
+    # Build JSON body
+    if [ -n "$HOST" ] && [ -n "$HEADER" ]; then
+      if [ -n "$FORMAT" ]; then
+        BODY=$(printf '{"value":"%s","route":{"host":"%s","header":"%s","format":"%s"}}' \
+          "$VALUE" "$HOST" "$HEADER" "$FORMAT")
+      else
+        BODY=$(printf '{"value":"%s","route":{"host":"%s","header":"%s"}}' \
+          "$VALUE" "$HOST" "$HEADER")
+      fi
+    else
+      BODY=$(printf '{"value":"%s"}' "$VALUE")
+    fi
+
+    # POST to gateway
+    RESPONSE=$(curl -s -w "\n%{http_code}" \
+      -X POST \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $APW_TOKEN" \
+      -d "$BODY" \
+      "${APW_GATEWAY}/gateway/store/${KEY}")
+
+    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+    BODY_RESP=$(echo "$RESPONSE" | sed '$d')
+
+    if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+      echo "Stored: $KEY"
+    else
+      echo "Error ($HTTP_CODE): $BODY_RESP" >&2
+      exit 1
+    fi
+    ;;
+
+  *)
+    echo "Usage: apw store <key> [--host H --header H --format F]" >&2
+    echo "" >&2
+    echo "Reads secret value from stdin and stores it via the gateway." >&2
+    exit 1
+    ;;
+esac

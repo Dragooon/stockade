@@ -1,0 +1,29 @@
+{
+  "name": "@stockade/proxy",
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.1",
+    "execa": "^9.5.2",
+    "hono": "^4.7.10",
+    "js-yaml": "^4.1.0",
+    "node-forge": "^1.3.1",
+    "ssh2": "^1.16.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.15.0",
+    "@types/node-forge": "^1.3.11",
+    "@types/ssh2": "^1.15.5",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.1"
+  }
+}

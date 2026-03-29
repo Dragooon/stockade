@@ -58,12 +58,18 @@ describe("TerminalAdapter", () => {
 
     await lineHandler("Hello agent");
 
-    expect(onMessage).toHaveBeenCalledWith({
-      scope: "terminal:test-uuid-1234:testuser",
-      content: "Hello agent",
-      userId: "testuser",
-      platform: "terminal",
-    } satisfies ChannelMessage);
+    expect(onMessage).toHaveBeenCalledWith(
+      {
+        scope: "terminal:test-uuid-1234:testuser",
+        content: "Hello agent",
+        userId: "testuser",
+        platform: "terminal",
+      } satisfies ChannelMessage,
+      expect.objectContaining({
+        askUser: expect.any(Function),
+        notifyAutoApproved: expect.any(Function),
+      }),
+    );
 
     writeSpy.mockRestore();
   });

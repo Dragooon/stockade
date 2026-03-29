@@ -54,6 +54,14 @@ describe("resolveAgent", () => {
     ).toThrow("No binding found");
   });
 
+  it("routes 5-segment discord thread scope via parent channel", () => {
+    // Thread scope: discord:<server>:<parentChannel>:<threadId>:<userId>
+    // Router uses parts[2] (parent channel) for binding lookup
+    expect(
+      resolveAgent("discord:server-2:channel-a:thread-99:user-1", config)
+    ).toBe("researcher");
+  });
+
   it("throws for unknown server", () => {
     expect(() =>
       resolveAgent("discord:unknown-server:ch:user", config)

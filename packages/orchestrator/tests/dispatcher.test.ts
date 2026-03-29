@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { join } from "node:path";
 import type {
   AgentConfig,
   AgentsConfig,
@@ -17,11 +18,11 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   createSdkMcpServer: mockCreateSdkMcpServer,
 }));
 
-// Mock global fetch for remote dispatch
+// Mock global fetch for sandboxed dispatch
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
-const { dispatch } = await import("../src/dispatcher.js");
+const { dispatch, buildSystemPrompt, buildSdkSettings, PLATFORM_DISALLOWED_TOOLS, SELF_MODIFICATION_DENY_RULES } = await import("../src/dispatcher.js");
 
 /** Helper: create an async iterable from an array of messages */
 function fakeStream(messages: Record<string, unknown>[]) {
@@ -45,16 +46,14 @@ const localAgent: AgentConfig = {
   model: "claude-sonnet-4-20250514",
   system: "You are helpful.",
   tools: ["Bash", "Read"],
-  lifecycle: "persistent",
-  remote: false,
+  sandboxed: false,
 };
 
-const remoteAgent: AgentConfig = {
+const sandboxedAgent: AgentConfig = {
   model: "claude-haiku-4-5-20251001",
   system: "You research.",
   tools: ["WebSearch"],
-  lifecycle: "persistent",
-  remote: true,
+  sandboxed: true,
   port: 3001,
   url: "http://localhost:3001",
 };
@@ -63,15 +62,14 @@ const agentWithSubagents: AgentConfig = {
   model: "claude-sonnet-4-20250514",
   system: "You can delegate to sub-agents.",
   tools: ["Bash", "Read"],
-  lifecycle: "persistent",
-  remote: false,
+  sandboxed: false,
   subagents: ["researcher"],
 };
 
 const allAgents: AgentsConfig = {
   agents: {
     main: agentWithSubagents,
-    researcher: remoteAgent,
+    researcher: sandboxedAgent,
   },
 };
 
@@ -135,7 +133,7 @@ describe("dispatch — in-process (local)", () => {
         options: expect.objectContaining({
           model: "claude-sonnet-4-20250514",
           systemPrompt: "You are helpful.",
-          allowedTools: ["Bash", "Read"],
+          tools: ["Bash", "Read"],
           maxTurns: 20,
         }),
       })
@@ -143,6 +141,18 @@ describe("dispatch — in-process (local)", () => {
     // No resume when sessionId is null
     const opts = mockQuery.mock.calls[0][0].options;
     expect(opts.resume).toBeUndefined();
+
+    // Platform isolation options
+    expect(opts.settingSources).toEqual(["project"]);
+    expect(opts.permissionMode).toBe("acceptEdits");
+    expect(opts.disallowedTools).toEqual(["Agent"]);
+    expect(opts.settings).toBeDefined();
+    expect(opts.settings.permissions.deny).toContain("Agent");
+    // Self-modification deny rules
+    expect(opts.settings.permissions.deny).toContain("Write(.claude/**)");
+    expect(opts.settings.permissions.deny).toContain("Edit(.claude/**)");
+    expect(opts.settings.permissions.deny).not.toContain("Write(CLAUDE.md)");
+    expect(opts.settings.permissions.deny).not.toContain("Edit(CLAUDE.md)");
   });
 
   it("passes existing sessionId for resume", async () => {
@@ -164,7 +174,103 @@ describe("dispatch — in-process (local)", () => {
     );
   });
 
-  it("passes permission hook as canUseTool", async () => {
+  it("passes effort level when configured", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "sess-effort" },
+        { type: "result", result: "Done" },
+      ])
+    );
+
+    const agentWithEffort: AgentConfig = { ...localAgent, effort: "max" };
+    await dispatch("main", baseMessage, agentWithEffort, null);
+
+    const opts = mockQuery.mock.calls[0][0].options;
+    expect(opts.effort).toBe("max");
+  });
+
+  it("omits effort when not configured", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "sess-no-effort" },
+        { type: "result", result: "Done" },
+      ])
+    );
+
+    await dispatch("main", baseMessage, localAgent, null);
+
+    const opts = mockQuery.mock.calls[0][0].options;
+    expect(opts.effort).toBeUndefined();
+  });
+
+  it("injects memory settings into SDK settings", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "sess-mem" },
+        { type: "result", result: "Done" },
+      ])
+    );
+
+    const agentWithMemory: AgentConfig = {
+      ...localAgent,
+      memory: { enabled: true, autoDream: true },
+    };
+    const context: DispatchContext = {
+      allAgents,
+      platform: platformConfig,
+      userId: "alice",
+      userPlatform: "terminal",
+      agentsDir: "/data/agents",
+    };
+
+    await dispatch("main", baseMessage, agentWithMemory, null, undefined, context);
+
+    const opts = mockQuery.mock.calls[0][0].options;
+    expect(opts.settings.autoMemoryEnabled).toBe(true);
+    expect(opts.settings.autoDreamEnabled).toBe(true);
+    expect(opts.settings.autoMemoryDirectory).toBe(join("/data/agents", "main", "memory"));
+  });
+
+  it("disables memory when memory.enabled is false", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "sess-nomem" },
+        { type: "result", result: "Done" },
+      ])
+    );
+
+    const agentNoMem: AgentConfig = {
+      ...localAgent,
+      memory: { enabled: false },
+    };
+    await dispatch("main", baseMessage, agentNoMem, null);
+
+    const opts = mockQuery.mock.calls[0][0].options;
+    expect(opts.settings.autoMemoryEnabled).toBe(false);
+    expect(opts.settings.autoDreamEnabled).toBe(false);
+  });
+
+  it("strips Agent from tools list", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "sess-strip" },
+        { type: "result", result: "Done" },
+      ])
+    );
+
+    const agentWithAgentTool: AgentConfig = {
+      ...localAgent,
+      tools: ["Bash", "Agent", "Read"],
+    };
+    await dispatch("main", baseMessage, agentWithAgentTool, null);
+
+    const opts = mockQuery.mock.calls[0][0].options;
+    expect(opts.tools).toEqual(["Bash", "Read"]);
+    // Also hard-denied at SDK level
+    expect(opts.disallowedTools).toEqual(["Agent"]);
+  });
+
+  it("passes permission hook as PreToolUse hook", async () => {
     mockQuery.mockReturnValue(
       fakeStream([
         { type: "system", session_id: "sess-perm" },
@@ -175,13 +281,11 @@ describe("dispatch — in-process (local)", () => {
     const hook = vi.fn().mockResolvedValue({ behavior: "allow", updatedInput: {} });
     await dispatch("main", baseMessage, localAgent, null, hook);
 
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.objectContaining({
-        options: expect.objectContaining({
-          canUseTool: hook,
-        }),
-      })
-    );
+    const opts = mockQuery.mock.calls[0][0].options;
+    // Permission hook is wired as a PreToolUse hook (not canUseTool)
+    expect(opts.hooks).toBeDefined();
+    expect(opts.hooks.PreToolUse).toHaveLength(1);
+    expect(opts.hooks.PreToolUse[0].hooks).toHaveLength(1);
   });
 });
 
@@ -229,8 +333,8 @@ describe("dispatch — sub-agent MCP integration", () => {
       orchestrator: { __mockMcpServer: true },
     });
 
-    // Verify ask_agent tool was added to allowedTools
-    expect(opts.allowedTools).toEqual([
+    // Verify ask_agent tool was added to tools list
+    expect(opts.tools).toEqual([
       "Bash",
       "Read",
       "mcp__orchestrator__ask_agent",
@@ -250,7 +354,7 @@ describe("dispatch — sub-agent MCP integration", () => {
     expect(mockCreateSdkMcpServer).not.toHaveBeenCalled();
     const opts = mockQuery.mock.calls[0][0].options;
     expect(opts.mcpServers).toBeUndefined();
-    expect(opts.allowedTools).toEqual(["Bash", "Read"]);
+    expect(opts.tools).toEqual(["Bash", "Read"]);
   });
 
   it("does NOT create MCP server when context is missing", async () => {
@@ -266,7 +370,7 @@ describe("dispatch — sub-agent MCP integration", () => {
     expect(mockCreateSdkMcpServer).not.toHaveBeenCalled();
   });
 
-  it("ask_agent handler dispatches to remote sub-agent via fetch", async () => {
+  it("ask_agent handler dispatches to sandboxed sub-agent via fetch", async () => {
     mockQuery.mockReturnValue(
       fakeStream([
         { type: "system", session_id: "sess-1" },
@@ -274,7 +378,7 @@ describe("dispatch — sub-agent MCP integration", () => {
       ])
     );
 
-    // Set up fetch mock for the remote sub-agent
+    // Set up fetch mock for the sandboxed sub-agent
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -299,13 +403,13 @@ describe("dispatch — sub-agent MCP integration", () => {
     // Invoke the handler as if the agent called ask_agent
     const result = await handler({ agentId: "researcher", task: "Find info on X" });
 
-    // Should have dispatched to the remote researcher via fetch
+    // Should have dispatched to the sandboxed researcher via fetch
     expect(mockFetch).toHaveBeenCalledWith(
       "http://localhost:3001/run",
       expect.objectContaining({ method: "POST" })
     );
 
-    // Result should contain the remote agent's response
+    // Result should contain the sandboxed agent's response
     expect(result).toEqual({
       content: [{ type: "text", text: "Research findings here" }],
     });
@@ -367,7 +471,7 @@ describe("dispatch — sub-agent MCP integration", () => {
   });
 });
 
-describe("dispatch — remote (HTTP)", () => {
+describe("dispatch — sandboxed (HTTP)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -377,19 +481,19 @@ describe("dispatch — remote (HTTP)", () => {
       ok: true,
       json: async () => ({
         result: "Remote result",
-        sessionId: "sess-remote-1",
+        sessionId: "sess-sandboxed-1",
       }),
     });
 
     const result = await dispatch(
       "researcher",
       baseMessage,
-      remoteAgent,
+      sandboxedAgent,
       null
     );
 
     expect(result.result).toBe("Remote result");
-    expect(result.sessionId).toBe("sess-remote-1");
+    expect(result.sessionId).toBe("sess-sandboxed-1");
     expect(mockFetch).toHaveBeenCalledWith(
       "http://localhost:3001/run",
       expect.objectContaining({
@@ -405,29 +509,29 @@ describe("dispatch — remote (HTTP)", () => {
     expect(callBody.tools).toEqual(["WebSearch"]);
   });
 
-  it("passes sessionId for remote resume", async () => {
+  it("passes sessionId for sandboxed resume", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({
-        result: "Resumed remotely",
-        sessionId: "sess-remote-2",
+        result: "Resumed in sandbox",
+        sessionId: "sess-sandboxed-2",
       }),
     });
 
     await dispatch(
       "researcher",
       baseMessage,
-      remoteAgent,
-      "sess-existing-remote"
+      sandboxedAgent,
+      "sess-existing-sandboxed"
     );
 
     const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(callBody.sessionId).toBe("sess-existing-remote");
+    expect(callBody.sessionId).toBe("sess-existing-sandboxed");
   });
 
   it("falls back to port-based URL when url is not set", async () => {
     const agentNoUrl: AgentConfig = {
-      ...remoteAgent,
+      ...sandboxedAgent,
       url: undefined,
       port: 4000,
     };
@@ -453,7 +557,292 @@ describe("dispatch — remote (HTTP)", () => {
     });
 
     await expect(
-      dispatch("researcher", baseMessage, remoteAgent, null)
+      dispatch("researcher", baseMessage, sandboxedAgent, null)
     ).rejects.toThrow("Worker responded with 500");
+  });
+
+  it("propagates fetch network errors (ECONNREFUSED)", async () => {
+    mockFetch.mockRejectedValue(new Error("ECONNREFUSED"));
+
+    await expect(
+      dispatch("researcher", baseMessage, sandboxedAgent, null)
+    ).rejects.toThrow("ECONNREFUSED");
+  });
+
+  it("uses buildSystemPrompt for remote dispatch (flattens append mode to string)", async () => {
+    const appendAgent: AgentConfig = {
+      ...sandboxedAgent,
+      system_mode: "append",
+    };
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ result: "ok", sessionId: "s-1" }),
+    });
+
+    await dispatch("researcher", baseMessage, appendAgent, null);
+
+    const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    // Remote workers only accept string — append mode is flattened to the raw text
+    expect(callBody.systemPrompt).toBe("You research.");
+  });
+
+});
+
+describe("dispatch — container manager integration", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("calls containerManager.ensure() and dispatches to returned URL", async () => {
+    const mockEnsure = vi.fn().mockResolvedValue("http://localhost:4444");
+    const containerManager = { ensure: mockEnsure } as any;
+
+    const sandboxedNoUrl: AgentConfig = {
+      model: "claude-haiku-4-5-20251001",
+      system: "You research.",
+      tools: ["WebSearch"],
+      sandboxed: true,
+    };
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ result: "Container result", sessionId: "s-1" }),
+    });
+
+    const result = await dispatch(
+      "researcher",
+      baseMessage,
+      sandboxedNoUrl,
+      null,
+      undefined,
+      undefined,
+      containerManager
+    );
+
+    expect(mockEnsure).toHaveBeenCalledWith(
+      "researcher",
+      sandboxedNoUrl,
+      baseMessage.scope
+    );
+    expect(result.result).toBe("Container result");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:4444/run",
+      expect.anything()
+    );
+  });
+
+  it("falls back to standard sandboxed dispatch without containerManager", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ result: "Standard", sessionId: "s-2" }),
+    });
+
+    const result = await dispatch(
+      "researcher",
+      baseMessage,
+      sandboxedAgent,
+      null
+    );
+
+    expect(result.result).toBe("Standard");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:3001/run",
+      expect.anything()
+    );
+  });
+
+  it("does not call containerManager for local agents", async () => {
+    const mockEnsure = vi.fn();
+    const containerManager = { ensure: mockEnsure } as any;
+
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { type: "system", session_id: "s-local" },
+        { type: "result", result: "Local result" },
+      ])
+    );
+
+    const result = await dispatch(
+      "main",
+      baseMessage,
+      localAgent,
+      null,
+      undefined,
+      undefined,
+      containerManager
+    );
+
+    expect(mockEnsure).not.toHaveBeenCalled();
+    expect(result.result).toBe("Local result");
+  });
+});
+
+describe("dispatch — streaming error propagation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("propagates error thrown mid-stream instead of swallowing it", async () => {
+    // Create a stream that yields a system message then throws mid-iteration
+    const errorStream = {
+      async *[Symbol.asyncIterator]() {
+        yield { type: "system", session_id: "sess-err" };
+        throw new Error("stream connection lost");
+      },
+    };
+
+    mockQuery.mockReturnValue(errorStream);
+
+    await expect(
+      dispatch("main", baseMessage, localAgent, null)
+    ).rejects.toThrow("stream connection lost");
+  });
+});
+
+// ── buildSystemPrompt ────────────────────────────────────────────────────────
+
+describe("buildSystemPrompt", () => {
+  it("returns plain string in replace mode (default)", () => {
+    const agent: AgentConfig = { model: "sonnet", system: "You are helpful." };
+    const result = buildSystemPrompt(agent);
+    expect(result).toBe("You are helpful.");
+  });
+
+  it("returns preset object in append mode", () => {
+    const agent: AgentConfig = { model: "sonnet", system: "Custom instructions.", system_mode: "append" };
+    const result = buildSystemPrompt(agent);
+    expect(result).toEqual({
+      type: "preset",
+      preset: "claude_code",
+      append: "Custom instructions.",
+    });
+  });
+
+  it("returns undefined when no system prompt", () => {
+    const agent: AgentConfig = { model: "sonnet", system: "" };
+    const result = buildSystemPrompt(agent);
+    expect(result).toBeUndefined();
+  });
+});
+
+// ── buildSdkSettings ─────────────────────────────────────────────────────────
+
+describe("buildSdkSettings", () => {
+  it("returns default memory settings when no memory config", () => {
+    const agent: AgentConfig = { model: "sonnet", system: "test" };
+    const settings = buildSdkSettings(agent, "main");
+
+    expect(settings.autoMemoryEnabled).toBe(true);
+    expect(settings.autoDreamEnabled).toBe(false);
+    expect(settings.autoMemoryDirectory).toBeUndefined();
+  });
+
+  it("computes memory directory from agentsDir", () => {
+    const agent: AgentConfig = { model: "sonnet", system: "test" };
+    const settings = buildSdkSettings(agent, "main", "/data/agents");
+
+    expect(settings.autoMemoryDirectory).toBe(join("/data/agents", "main", "memory"));
+  });
+
+  it("respects memory.enabled = false", () => {
+    const agent: AgentConfig = {
+      model: "sonnet",
+      system: "test",
+      memory: { enabled: false },
+    };
+    const settings = buildSdkSettings(agent, "main");
+
+    expect(settings.autoMemoryEnabled).toBe(false);
+  });
+
+  it("respects memory.autoDream = true", () => {
+    const agent: AgentConfig = {
+      model: "sonnet",
+      system: "test",
+      memory: { enabled: true, autoDream: true },
+    };
+    const settings = buildSdkSettings(agent, "main");
+
+    expect(settings.autoDreamEnabled).toBe(true);
+  });
+
+  it("denies Agent tool in settings permissions", () => {
+    const agent: AgentConfig = { model: "sonnet", system: "test" };
+    const settings = buildSdkSettings(agent, "main");
+
+    expect((settings.permissions as any).deny).toContain("Agent");
+  });
+
+  it("denies self-modification of .claude/", () => {
+    const agent: AgentConfig = { model: "sonnet", system: "test" };
+    const settings = buildSdkSettings(agent, "main");
+    const deny = (settings.permissions as any).deny as string[];
+
+    for (const rule of SELF_MODIFICATION_DENY_RULES) {
+      expect(deny).toContain(rule);
+    }
+  });
+});
+
+// ── PLATFORM_DISALLOWED_TOOLS ────────────────────────────────────────────────
+
+describe("PLATFORM_DISALLOWED_TOOLS", () => {
+  it("includes Agent tool", () => {
+    expect(PLATFORM_DISALLOWED_TOOLS).toContain("Agent");
+  });
+});
+
+// ── remote dispatch — effort passthrough ─────────────────────────────────────
+
+describe("dispatch — remote effort passthrough", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("includes effort in remote dispatch body", async () => {
+    const agentWithEffort: AgentConfig = {
+      ...sandboxedAgent,
+      effort: "low",
+    };
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ result: "ok", sessionId: "s-1" }),
+    });
+
+    await dispatch("researcher", baseMessage, agentWithEffort, null);
+
+    const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(callBody.effort).toBe("low");
+  });
+
+  it("omits effort from remote dispatch body when not configured", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ result: "ok", sessionId: "s-1" }),
+    });
+
+    await dispatch("researcher", baseMessage, sandboxedAgent, null);
+
+    const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(callBody.effort).toBeUndefined();
+  });
+
+  it("strips Agent from tools in remote dispatch body", async () => {
+    const agentWithAgentTool: AgentConfig = {
+      ...sandboxedAgent,
+      tools: ["WebSearch", "Agent"],
+    };
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ result: "ok", sessionId: "s-1" }),
+    });
+
+    await dispatch("researcher", baseMessage, agentWithAgentTool, null);
+
+    const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(callBody.tools).toEqual(["WebSearch"]);
   });
 });
