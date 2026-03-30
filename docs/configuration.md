@@ -189,6 +189,11 @@ policy:
   rules:
     - host: "api.anthropic.com"
       action: allow
+    # Required for Claude Code OAuth token refresh
+    - host: "platform.claude.com"
+      action: allow
+    - host: "claude.ai"
+      action: allow
     - host: "api.github.com"
       method: "GET"
       action: allow

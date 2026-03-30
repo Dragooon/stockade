@@ -35,6 +35,11 @@ proxy:
     rules:
       - host: "api.anthropic.com"
         action: allow
+      # Claude Code OAuth token refresh and auth metadata
+      - host: "platform.claude.com"
+        action: allow
+      - host: "claude.ai"
+        action: allow
       - host: "127.0.0.1"
         action: allow
       - host: "localhost"
