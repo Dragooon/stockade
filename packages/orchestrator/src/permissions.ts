@@ -35,6 +35,20 @@
 import { resolve, normalize, dirname, basename, isAbsolute } from "node:path";
 import { realpath } from "node:fs/promises";
 
+// ── Core Platform Tools (always allowed, bypass all permission checks) ────
+
+/**
+ * Tools that are fundamental to the platform's operation and must never
+ * be blocked by permission rules. These bypass both user-level RBAC
+ * and agent-level permission checks.
+ *
+ * - `mcp__orchestrator__ask_agent`: Sub-agent delegation — core to how
+ *   agents collaborate. Blocking this would break multi-agent workflows.
+ */
+export const CORE_PLATFORM_TOOLS = new Set([
+  "mcp__orchestrator__ask_agent",
+]);
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface AgentPermissionRule {

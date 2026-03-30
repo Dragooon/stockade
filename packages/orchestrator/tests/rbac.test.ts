@@ -235,13 +235,19 @@ describe("buildPermissionHook", () => {
   it("deny tool:* blocks MCP-style tool names too", async () => {
     const hook = buildPermissionHook("dave", "terminal", config);
 
-    expect((await hook("mcp__orchestrator__ask_agent", {})).behavior).toBe("deny");
+    expect((await hook("mcp__some_server__some_tool", {})).behavior).toBe("deny");
   });
 
   it("no deny rules allows MCP-style tool names", async () => {
     const hook = buildPermissionHook("alice-discord-id", "discord", config);
 
-    expect(await hook("mcp__orchestrator__ask_agent", {})).toMatchObject({ behavior: "allow" });
+    expect(await hook("mcp__some_server__some_tool", {})).toMatchObject({ behavior: "allow" });
+  });
+
+  it("core platform tools (ask_agent) always allowed even with deny:*", async () => {
+    const hook = buildPermissionHook("dave", "terminal", config);
+
+    expect((await hook("mcp__orchestrator__ask_agent", {})).behavior).toBe("allow");
   });
 });
 

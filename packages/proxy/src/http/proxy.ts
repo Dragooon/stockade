@@ -32,6 +32,13 @@ export function startHttpProxy(getConfig: () => ProxyConfig): ReturnType<typeof 
 
   // Handle CONNECT for HTTPS tunneling
   server.on("connect", (req, clientSocket: net.Socket, head) => {
+    // Catch connection resets from client disconnects (keep-alive timeouts, aborted requests)
+    clientSocket.on("error", (err) => {
+      if ((err as NodeJS.ErrnoException).code !== "ECONNRESET") {
+        console.error("[http-proxy] client socket error:", err);
+      }
+    });
+
     handleConnect(req, clientSocket, head, getConfig(), ca).catch((err) => {
       console.error("[http-proxy] CONNECT error:", err);
       clientSocket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");

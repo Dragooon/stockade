@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { PlatformConfig, ResolvedUser, AskApprovalFn } from "./types.js";
-import { evaluateAgentPermissions, formatToolApproval, type PermissionContext } from "./permissions.js";
+import { evaluateAgentPermissions, formatToolApproval, CORE_PLATFORM_TOOLS, type PermissionContext } from "./permissions.js";
 
 /**
  * Resolve a platform userId to a config user, their roles, and flattened permissions.
@@ -150,6 +150,11 @@ export function buildPermissionHook(
       : undefined;
 
   return async (tool: string, input: Record<string, unknown>): Promise<CanUseToolResult> => {
+    // Core platform tools bypass all permission checks
+    if (CORE_PLATFORM_TOOLS.has(tool)) {
+      return { behavior: "allow", updatedInput: input };
+    }
+
     // ── Layer 1: User-level RBAC ──
     const denied = deny.some((rule) => matchesToolRule(rule, tool, input));
 
@@ -252,6 +257,16 @@ export function buildPreToolUseHook(
     const tool = hookInput.tool_name;
     const input = (hookInput.tool_input ?? {}) as Record<string, unknown>;
 
+    // Core platform tools bypass all permission checks
+    if (CORE_PLATFORM_TOOLS.has(tool)) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse" as const,
+          permissionDecision: "allow" as const,
+          updatedInput: input,
+        },
+      };
+    }
 
     // ── Layer 1: User-level RBAC ──
     const denied = deny.some((rule) => matchesToolRule(rule, tool, input));
