@@ -64,6 +64,8 @@ const ProviderOverrideSchema = z.object({
   /** Glob pattern matched against the credential key. First match wins. */
   match: z.string(),
   read: z.string(),
+  /** Per-key cache TTL override (seconds). Use 0 to disable caching for volatile credentials like OAuth tokens. */
+  cache_ttl: z.number().nonnegative().optional(),
 });
 
 export const ProviderSchema = z.object({

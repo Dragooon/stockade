@@ -18,10 +18,12 @@ export async function resolveCredential(
 
   // Check overrides first (first match wins)
   let readCmd = provider.read;
+  let cacheTtl = provider.cache_ttl;
   if (provider.overrides) {
     for (const override of provider.overrides) {
       if (globMatch(override.match, key)) {
         readCmd = override.read;
+        if (override.cache_ttl !== undefined) cacheTtl = override.cache_ttl;
         break;
       }
     }
@@ -30,10 +32,12 @@ export async function resolveCredential(
   const cmd = readCmd.replace(/\{key\}/g, key);
   const value = await execProviderCommand(cmd);
 
-  cache.set(key, {
-    value,
-    expiresAt: Date.now() + provider.cache_ttl * 1000,
-  });
+  if (cacheTtl > 0) {
+    cache.set(key, {
+      value,
+      expiresAt: Date.now() + cacheTtl * 1000,
+    });
+  }
 
   return value;
 }

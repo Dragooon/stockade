@@ -23,6 +23,7 @@ proxy:
       # This override reads it directly so agents can call the Anthropic API.
       - match: "claude-oauth-token"
         read: "python3 -c \"import json,os; d=json.load(open(os.path.expanduser('~/.claude/.credentials.json'))); print(d['claudeAiOauth']['accessToken'],end='')\""
+        cache_ttl: 0  # OAuth tokens are refreshed by CLI — never cache
 
       # 1Password example:
       # - match: "op:*"
@@ -61,7 +62,8 @@ proxy:
       - host: "api.anthropic.com"
         credential: claude-oauth-token
         inject:
-          header: x-api-key
+          header: authorization
+          format: "Bearer {value}"
 
   ssh:
     port: 10022

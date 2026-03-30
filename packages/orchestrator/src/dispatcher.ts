@@ -300,13 +300,12 @@ async function dispatchLocal(
     options.systemPrompt = systemPrompt;
   }
 
-  // ── Credential proxy: only for sandboxed agents dispatched locally ──
-  // Local (non-sandboxed) agents inherit the user's native auth and don't
-  // need proxy-based credential injection. Routing them through the proxy
-  // breaks OAuth token refresh because the proxy strips and re-injects
-  // credentials, overriding the CLI's own refresh flow.
+  // ── Credential proxy: route all agents with credentials through proxy ──
+  // The proxy handles credential injection (Anthropic, Tavily, GitHub, etc.)
+  // for both local and sandboxed agents. OAuth tokens use cache_ttl: 0 in
+  // the proxy config to avoid serving stale tokens after CLI refresh.
   let proxyToken: string | undefined;
-  if (context?.proxy && agentConfig.credentials?.length && agentConfig.sandboxed) {
+  if (context?.proxy && agentConfig.credentials?.length) {
     try {
       const tokenRes = await fetch(`${context.proxy.gatewayUrl}/token`, {
         method: "POST",
