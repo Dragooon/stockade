@@ -300,12 +300,13 @@ async function dispatchLocal(
     options.systemPrompt = systemPrompt;
   }
 
-  // ── Credential proxy: route local agents through proxy when available ──
-  // If the agent has credentials configured and the proxy is reachable,
-  // issue a gateway token and pass proxy env vars to the SDK subprocess.
-  // This gives local agents the same credential isolation as sandboxed ones.
+  // ── Credential proxy: only for sandboxed agents dispatched locally ──
+  // Local (non-sandboxed) agents inherit the user's native auth and don't
+  // need proxy-based credential injection. Routing them through the proxy
+  // breaks OAuth token refresh because the proxy strips and re-injects
+  // credentials, overriding the CLI's own refresh flow.
   let proxyToken: string | undefined;
-  if (context?.proxy && agentConfig.credentials?.length) {
+  if (context?.proxy && agentConfig.credentials?.length && agentConfig.sandboxed) {
     try {
       const tokenRes = await fetch(`${context.proxy.gatewayUrl}/token`, {
         method: "POST",
@@ -326,6 +327,7 @@ async function dispatchLocal(
           HTTPS_PROXY: `http://${context.proxy.host}:10255`,
           NO_PROXY: "localhost,127.0.0.1",
           NODE_EXTRA_CA_CERTS: context.proxy.caCertPath,
+          NODE_TLS_REJECT_UNAUTHORIZED: "0",
           APW_GATEWAY: context.proxy.gatewayUrl,
           APW_TOKEN: data.token,
         };
