@@ -27,8 +27,8 @@ export interface GatekeeperReview {
   risk: RiskLevel;
   /** One-line summary of what the tool invocation does */
   summary: string;
-  /** Explanation of why this risk level was assigned */
-  reasoning: string;
+  /** Optional explanation of why this risk level was assigned */
+  reasoning?: string;
 }
 
 export interface GatekeeperConfig {
@@ -143,11 +143,9 @@ const DEFAULT_GATEKEEPER_SYSTEM = `You are a security gatekeeper for an AI agent
 
 You will be given a tool name and its arguments. Evaluate the risk and respond with ONLY a JSON object (no markdown, no code fences):
 
-{
-  "risk": "low" | "medium" | "high" | "critical",
-  "summary": "One-line description of what this tool invocation does",
-  "reasoning": "Brief explanation of why you assigned this risk level"
-}
+{"risk": "low|medium|high|critical", "summary": "one short sentence max"}
+
+Keep the summary under 15 words. No reasoning field needed.
 
 Risk level guidelines:
 - **low**: Read-only operations, safe searches, reading files, listing directories, non-destructive commands (git status, ls, cat, grep, echo)

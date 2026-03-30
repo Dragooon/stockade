@@ -1,0 +1,45 @@
+#!/bin/sh
+# op-read — Read a 1Password secret using password-based auth.
+#
+# Usage:
+#   op-read "op://vault/item/field"
+#
+# Env vars:
+#   OP_PASSWORD — 1Password master password
+#   OP_ACCOUNT  — 1Password account shorthand (default: my)
+#
+# Signs in with OP_PASSWORD, reads the secret reference, prints the value.
+# Session tokens are cached in OP_SESSION_<account> for the process lifetime.
+
+set -e
+
+REF="${1:-}"
+if [ -z "$REF" ]; then
+  echo "Usage: op-read <op://vault/item/field>" >&2
+  exit 1
+fi
+
+if [ -z "$OP_PASSWORD" ]; then
+  echo "Error: OP_PASSWORD must be set" >&2
+  exit 1
+fi
+
+ACCOUNT="${OP_ACCOUNT:-my}"
+SESSION_VAR="OP_SESSION_${ACCOUNT}"
+
+# Get or reuse session token
+eval "EXISTING_SESSION=\${$SESSION_VAR:-}"
+if [ -z "$EXISTING_SESSION" ]; then
+  SESSION=$(echo "$OP_PASSWORD" | op signin --account "$ACCOUNT" --raw 2>/dev/null)
+  if [ -z "$SESSION" ]; then
+    echo "Error: op signin failed" >&2
+    exit 1
+  fi
+  export "$SESSION_VAR=$SESSION"
+else
+  SESSION="$EXISTING_SESSION"
+fi
+
+# Read the secret
+export "$SESSION_VAR=$SESSION"
+op read "$REF" --account "$ACCOUNT" 2>/dev/null

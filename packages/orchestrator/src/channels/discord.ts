@@ -615,10 +615,11 @@ const RISK_EMOJI: Record<RiskLevel, string> = {
 };
 
 
-/** Format a tool invocation as a compact description block. */
+/** Format a tool invocation as a compact description block with full arguments. */
 function formatToolDescription(tool: string, input: Record<string, unknown>): string {
   const lines: string[] = [];
 
+  // Primary display — tool-specific formatting for the main argument
   if (tool === "Bash" && input.command) {
     lines.push(`\`\`\`bash\n${String(input.command).slice(0, 500)}\n\`\`\``);
   } else if (tool === "Write" || tool === "Edit" || tool === "Read") {
@@ -639,6 +640,22 @@ function formatToolDescription(tool: string, input: Record<string, unknown>): st
 
   if (input.description && typeof input.description === "string") {
     lines.push(input.description.slice(0, 200));
+  }
+
+  // Full arguments — show remaining keys not already displayed above
+  const shownKeys = new Set(["command", "description"]);
+  if (tool === "Write" || tool === "Edit" || tool === "Read") shownKeys.add("file_path").add("path");
+  if (tool === "Glob" || tool === "Grep") shownKeys.add("pattern").add("path");
+
+  const remaining = Object.entries(input).filter(
+    ([k, v]) => !shownKeys.has(k) && v !== undefined && v !== null
+  );
+  if (remaining.length > 0) {
+    const argLines = remaining.map(([k, v]) => {
+      const val = typeof v === "string" ? v : JSON.stringify(v);
+      return `${k}: ${val.length > 300 ? val.slice(0, 300) + "…" : val}`;
+    });
+    lines.push(`\`\`\`yaml\n${argLines.join("\n")}\n\`\`\``);
   }
 
   return lines.join("\n") || "*No details*";
@@ -701,11 +718,9 @@ function buildApprovalResultEmbed(
 
 /** Format a risk review as a compact embed field value. */
 function formatRiskReview(review: GatekeeperReview): string {
-  return [
-    `${RISK_EMOJI[review.risk]} **Risk: ${review.risk.toUpperCase()}**`,
-    review.summary,
-    `> ${review.reasoning}`,
-  ].join("\n");
+  const parts = [`${RISK_EMOJI[review.risk]} **${review.risk.toUpperCase()}** — ${review.summary}`];
+  if (review.reasoning) parts.push(`> ${review.reasoning}`);
+  return parts.join("\n");
 }
 
 /**

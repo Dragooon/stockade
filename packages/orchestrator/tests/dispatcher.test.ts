@@ -147,7 +147,7 @@ describe("dispatch — in-process (local)", () => {
     // Platform isolation options
     expect(opts.settingSources).toEqual(["project"]);
     expect(opts.permissionMode).toBe("acceptEdits");
-    expect(opts.disallowedTools).toEqual(["Agent"]);
+    expect(opts.disallowedTools).toEqual(["Agent", "WebSearch"]);
     expect(opts.settings).toBeDefined();
     expect(opts.settings.permissions.deny).toContain("Agent");
     // Self-modification deny rules
@@ -269,7 +269,7 @@ describe("dispatch — in-process (local)", () => {
     const opts = mockQuery.mock.calls[0][0].options;
     expect(opts.tools).toEqual(["Bash", "Read"]);
     // Also hard-denied at SDK level
-    expect(opts.disallowedTools).toEqual(["Agent"]);
+    expect(opts.disallowedTools).toEqual(["Agent", "WebSearch"]);
   });
 
   it("passes permission hook as PreToolUse hook", async () => {
@@ -585,8 +585,10 @@ describe("dispatch — sandboxed (HTTP)", () => {
     await dispatch("researcher", baseMessage, appendAgent, null);
 
     const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
-    // Remote workers only accept string — append mode is flattened to the raw text
-    expect(callBody.systemPrompt).toBe("You research.");
+    // Remote workers only accept string — append mode is flattened to the raw text.
+    // Platform instructions (network policy for sandboxed agents) are appended.
+    expect(callBody.systemPrompt).toContain("You research.");
+    expect(callBody.systemPrompt).toContain("Network Policy");
   });
 
 });

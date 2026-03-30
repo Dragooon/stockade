@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import type { ProxyConfig, GatewayToken } from "../shared/types.js";
-import { storeCredential, invalidateCache } from "../shared/credentials.js";
+import { resolveCredential, storeCredential, invalidateCache } from "../shared/credentials.js";
 import {
   issueToken,
   validateToken,
@@ -61,6 +61,29 @@ export function startGateway(getConfig: () => ProxyConfig) {
     const ref = issueRef(rawToken, key, ttlMs);
     console.log(`[gateway] issued ref for key="${key}"`);
     return c.json({ ref: ref.ref, expiresAt: ref.expiresAt });
+  });
+
+  // ── GET /gateway/reveal/* — Reveal a credential's raw value ──
+  // Returns the plaintext credential. Intended for scenarios where the agent
+  // needs the actual value (e.g. filling a browser form). This command should
+  // be gated by "ask" permission in the agent's permission rules.
+  app.get("/gateway/reveal/*", async (c) => {
+    const key = new URL(c.req.url).pathname.replace(/^\/gateway\/reveal\//, "");
+    const rawToken = c.get("rawToken") as string;
+
+    if (!checkCredentialScope(rawToken, key)) {
+      console.log(`[gateway] reveal denied: key="${key}"`);
+      return c.json({ error: "Credential scope denied for this key" }, 403);
+    }
+
+    try {
+      const value = await resolveCredential(getConfig().provider, key);
+      console.log(`[gateway] revealed credential: key="${key}"`);
+      return c.json({ key, value });
+    } catch (err: any) {
+      console.error(`[gateway] reveal failed: key="${key}"`, err.message);
+      return c.json({ error: `Failed to resolve credential: ${err.message}` }, 500);
+    }
   });
 
   // ── POST /gateway/store/* — Store a credential ──────────

@@ -78,35 +78,92 @@ export async function dispatch(
 }
 
 /**
+ * Build platform-injected instructions based on the agent's runtime context.
+ * These are operational docs the agent needs to function on the platform —
+ * credential proxy usage, available env vars, etc. Kept separate from
+ * user-authored system prompts and CLAUDE.md identity.
+ */
+function buildPlatformInstructions(
+  agentConfig: AgentConfig,
+  hasProxy: boolean,
+): string {
+  const sections: string[] = [];
+
+  if (hasProxy && agentConfig.credentials?.length) {
+    sections.push(`## Credential Proxy (platform-injected)
+
+Your traffic is routed through the Stockade credential proxy. It handles API
+key injection automatically — you never see raw credentials.
+
+- **Header injection (automatic):** Outbound HTTPS requests to configured hosts
+  have auth headers stripped and re-injected with the correct credential. API calls
+  to Anthropic, Tavily, GitHub, etc. just work.
+
+- **Body injection (ref tokens):** When a credential must appear in a request body,
+  use the \`apw\` CLI:
+  \`\`\`bash
+  apw read <credential-key>
+  # Returns: apw-ref:<key>:<nonce>
+  \`\`\`
+  Embed the ref string in your request body. The proxy substitutes it with the real
+  value before forwarding. Ref tokens are one-time-use and expire after 5 minutes.
+
+- **Your credential keys:** ${agentConfig.credentials.map(k => `\`${k}\``).join(", ")}
+
+- **Available env vars:** HTTP_PROXY, HTTPS_PROXY, NO_PROXY, NODE_EXTRA_CA_CERTS,
+  APW_GATEWAY, APW_TOKEN`);
+  }
+
+  if (agentConfig.sandboxed) {
+    sections.push(`## Network Policy (platform-injected)
+
+You run in a sandboxed container. Only hosts in the proxy's network policy allowlist
+are reachable. If a request is blocked, ask the parent agent if access is needed.`);
+  }
+
+  return sections.join("\n\n");
+}
+
+/**
  * Build the system prompt based on agent config and system_mode.
  *
- * - "replace": returns the agent's system prompt as a plain string (SDK replaces its default)
+ * Combines the user-authored system prompt (from config.yaml) with
+ * platform-injected instructions (credential proxy, network policy, etc.).
+ *
+ * - "replace": returns combined prompt as a plain string (SDK replaces its default)
  * - "append": returns a preset object that keeps the SDK's Claude Code prompt and appends
  *
- * Detailed agent instructions live in CLAUDE.md in the agent's workspace directory,
+ * User identity and preferences live in CLAUDE.md in the agent's workspace directory,
  * loaded automatically by Claude Code via settingSources: ["project"].
  */
 export function buildSystemPrompt(
   agentConfig: AgentConfig,
+  hasProxy = false,
 ): string | { type: "preset"; preset: "claude_code"; append: string } | undefined {
-  if (!agentConfig.system) return undefined;
+  const platformInstructions = buildPlatformInstructions(agentConfig, hasProxy);
+  const userSystem = agentConfig.system;
+
+  // Combine user system prompt + platform instructions
+  const combined = [userSystem, platformInstructions].filter(Boolean).join("\n\n");
+  if (!combined) return undefined;
 
   const mode = agentConfig.system_mode ?? "replace";
 
   if (mode === "append") {
-    return { type: "preset" as const, preset: "claude_code" as const, append: agentConfig.system };
+    return { type: "preset" as const, preset: "claude_code" as const, append: combined };
   }
 
   // replace mode — plain string
-  return agentConfig.system;
+  return combined;
 }
 
 /**
- * Tools that must never be available to agents — they bypass our orchestration.
- * The Agent tool spawns Claude Code subagents outside our RBAC, session,
- * and dispatch queue. Delegation must go through mcp__orchestrator__ask_agent.
+ * Tools that must never be available to agents.
+ * - Agent: bypasses our orchestration (RBAC, session, dispatch queue).
+ *   Delegation must go through mcp__orchestrator__ask_agent.
+ * - WebSearch: disabled platform-wide. Agents use Tavily via proxy instead.
  */
-export const PLATFORM_DISALLOWED_TOOLS = ["Agent"];
+export const PLATFORM_DISALLOWED_TOOLS = ["Agent", "WebSearch"];
 
 /**
  * Deny rules that prevent agents from modifying their own configuration.
@@ -294,12 +351,6 @@ async function dispatchLocal(
     options.resume = sessionId;
   }
 
-  // Build system prompt with system_mode support
-  const systemPrompt = buildSystemPrompt(agentConfig);
-  if (systemPrompt) {
-    options.systemPrompt = systemPrompt;
-  }
-
   // ── Credential proxy: route all agents with credentials through proxy ──
   // The proxy handles credential injection (Anthropic, Tavily, GitHub, etc.)
   // for both local and sandboxed agents. OAuth tokens use cache_ttl: 0 in
@@ -334,6 +385,12 @@ async function dispatchLocal(
     } catch {
       // Proxy not running — continue without credential injection
     }
+  }
+
+  // Build system prompt with platform instructions (credential proxy docs, etc.)
+  const systemPrompt = buildSystemPrompt(agentConfig, !!proxyToken);
+  if (systemPrompt) {
+    options.systemPrompt = systemPrompt;
   }
 
   // ── PreToolUse hook: our RBAC runs at step 1 in the SDK permission chain ──
@@ -512,7 +569,8 @@ async function dispatchRemote(
 
   // Remote workers only accept string system prompts — flatten preset objects.
   // The worker's query() doesn't support the preset format, so always send raw text.
-  const builtPrompt = buildSystemPrompt(agentConfig);
+  // Sandboxed agents always go through proxy, so inject platform instructions.
+  const builtPrompt = buildSystemPrompt(agentConfig, !!agentConfig.credentials?.length);
   const systemPrompt = typeof builtPrompt === "object" && builtPrompt !== null && builtPrompt !== undefined
     ? (builtPrompt as { append: string }).append
     : builtPrompt;

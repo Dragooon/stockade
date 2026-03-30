@@ -1,13 +1,15 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { config as loadEnv } from "dotenv";
 import { loadProxyConfig } from "./shared/config.js";
 import { watchProxyConfig } from "./shared/watch.js";
 import { startHttpProxy } from "./http/proxy.js";
 import { startSshTunnel } from "./ssh/tunnel.js";
 import { startGateway } from "./gateway/api.js";
 
-// Load config from platform home (~/.stockade/)
+// Load .env from platform home (~/.stockade/.env)
 const PLATFORM_HOME = join(homedir(), ".stockade");
+loadEnv({ path: join(PLATFORM_HOME, ".env") });
 let config = loadProxyConfig(PLATFORM_HOME);
 const getConfig = () => config;
 
