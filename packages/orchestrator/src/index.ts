@@ -147,6 +147,7 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
   let messageText = pending.text;
   let agentId = resolveAgent(scope, config.platform);
   let effectiveScope = scope;
+  const dispatchStart = Date.now();
 
   const agentPrefixMatch = messageText.match(/^\/agent:(\S+)\s+([\s\S]*)$/);
   if (agentPrefixMatch) {
@@ -203,6 +204,9 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
   };
 
   const attachments = (pending.meta?.attachments as import("./types.js").ChannelAttachment[] | undefined);
+  const preview = messageText.slice(0, 80).replace(/\n/g, " ");
+  console.log(`[dispatch] → ${agentId} | user=${userId} scope=${effectiveScope.slice(0, 40)} | "${preview}${messageText.length > 80 ? "…" : ""}"`);
+
   const result = await dispatch(
     agentId,
     { scope, content: messageText, userId, platform: userPlatform, attachments },
@@ -212,6 +216,10 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
     context,
     containerManager
   );
+
+  const elapsed = ((Date.now() - dispatchStart) / 1000).toFixed(1);
+  const resultPreview = result.result.slice(0, 100).replace(/\n/g, " ");
+  console.log(`[dispatch] ← ${agentId} | ${elapsed}s | session=${result.sessionId.slice(0, 12)} | "${resultPreview}${result.result.length > 100 ? "…" : ""}"`);
 
   setSessionId(db, effectiveScope, result.sessionId);
   return result.result;

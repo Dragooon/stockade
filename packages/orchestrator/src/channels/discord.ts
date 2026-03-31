@@ -463,27 +463,28 @@ export class DiscordAdapter {
       message.author.id,
     );
 
-    try {
-      if ("sendTyping" in message.channel) {
-        await (message.channel as any).sendTyping();
-      }
-    } catch {
-      // ignore typing errors
-    }
+    // Keep typing indicator alive throughout dispatch (refreshes every 8s)
+    let typingInterval: ReturnType<typeof setInterval> | undefined;
+    const ch = message.channel as any;
+    const startTyping = () => {
+      try { ch.sendTyping?.(); } catch { /* ignore */ }
+    };
+    startTyping();
+    typingInterval = setInterval(startTyping, 8_000);
 
     try {
       const response = await this.opts.onMessage(channelMessage, askApproval);
       // Empty/whitespace-only response = agent chose to stay silent (shared channel filtering)
       if (!response || !response.trim()) return;
       const chunks = splitMessage(response, 2000);
-      const ch = message.channel as any;
       for (const chunk of chunks) {
         await ch.send(chunk);
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      await (message.channel as any).send(`Error: ${errMsg}`);
+      await ch.send(`Error: ${errMsg}`);
     } finally {
+      clearInterval(typingInterval);
       this.inFlightMessages.delete(contentKey);
     }
   }
