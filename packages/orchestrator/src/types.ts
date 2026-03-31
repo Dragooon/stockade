@@ -13,7 +13,7 @@ export interface MemoryConfig {
 /** Agent configuration from agents.yaml */
 export interface AgentConfig {
   model: string;
-  system: string;
+  system?: string;
   /** "append" uses SDK's Claude Code preset + appends system. "replace" uses system as-is. */
   system_mode?: "append" | "replace";
   /** Effort level for reasoning depth: low, medium, high, max. */

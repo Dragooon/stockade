@@ -391,9 +391,10 @@ async function dispatchLocal(
         const credentialEnvMap: Record<string, string> = {
           "tavily-api-key": "TAVILY_API_KEY",
         };
+        const envMap = options.env as Record<string, string>;
         for (const credKey of agentConfig.credentials ?? []) {
           const envVar = credentialEnvMap[credKey];
-          if (envVar && !options.env[envVar]) {
+          if (envVar && !envMap[envVar]) {
             try {
               const refRes = await fetch(
                 `${context.proxy.gatewayUrl}/gateway/reveal/${credKey}`,
@@ -404,7 +405,7 @@ async function dispatchLocal(
               );
               if (refRes.ok) {
                 const refData = (await refRes.json()) as { value: string };
-                options.env[envVar] = refData.value;
+                envMap[envVar] = refData.value;
               }
             } catch {
               // Non-fatal — CLI tool will fail but proxy injection still works
