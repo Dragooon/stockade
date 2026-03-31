@@ -76,8 +76,37 @@ export async function provisionContainer(
     env.HTTPS_PROXY = `http://${proxyHost}:10255`;
     env.NO_PROXY = "localhost,127.0.0.1";
     env.NODE_EXTRA_CA_CERTS = "/certs/proxy-ca.crt";
+    env.CURL_CA_BUNDLE = "/certs/proxy-ca.crt";
+    env.REQUESTS_CA_BUNDLE = "/certs/proxy-ca.crt";
+    env.SSL_CERT_FILE = "/certs/proxy-ca.crt";
     env.APW_GATEWAY = `http://${proxyHost}:10256`;
     env.APW_TOKEN = gatewayToken;
+    env.PYTHONIOENCODING = "utf-8";
+
+    // Resolve credential env vars for CLI tools (e.g. tavily CLI)
+    const credentialEnvMap: Record<string, string> = {
+      "tavily-api-key": "TAVILY_API_KEY",
+    };
+    for (const credKey of agentConfig.credentials ?? []) {
+      const envVar = credentialEnvMap[credKey];
+      if (envVar && !env[envVar]) {
+        try {
+          const res = await fetch(
+            `http://${proxyHost}:10256/gateway/reveal/${credKey}`,
+            {
+              headers: { Authorization: `Bearer ${gatewayToken}` },
+              signal: AbortSignal.timeout(5000),
+            },
+          );
+          if (res.ok) {
+            const data = (await res.json()) as { value: string };
+            env[envVar] = data.value;
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
+    }
   }
 
   // 3. Build volume mounts

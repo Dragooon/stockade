@@ -22,8 +22,11 @@ RUN corepack enable
 
 # Install openssh-client, curl, and ca-certificates for proxy
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssh-client curl ca-certificates \
+    openssh-client curl ca-certificates python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
+
+# Install tavily-cli for search capabilities
+RUN pip3 install --break-system-packages tavily-cli
 
 WORKDIR /app
 

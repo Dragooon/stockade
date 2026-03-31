@@ -377,10 +377,40 @@ async function dispatchLocal(
           HTTPS_PROXY: `http://${context.proxy.host}:10255`,
           NO_PROXY: "localhost,127.0.0.1",
           NODE_EXTRA_CA_CERTS: context.proxy.caCertPath,
+          CURL_CA_BUNDLE: context.proxy.caCertPath,
+          REQUESTS_CA_BUNDLE: context.proxy.caCertPath,
+          SSL_CERT_FILE: context.proxy.caCertPath,
           NODE_TLS_REJECT_UNAUTHORIZED: "0",
           APW_GATEWAY: context.proxy.gatewayUrl,
           APW_TOKEN: data.token,
+          PYTHONIOENCODING: "utf-8",
         };
+
+        // Resolve credential env vars for CLI tools (e.g. tavily CLI)
+        // These map credential keys to the env vars that CLI tools expect.
+        const credentialEnvMap: Record<string, string> = {
+          "tavily-api-key": "TAVILY_API_KEY",
+        };
+        for (const credKey of agentConfig.credentials ?? []) {
+          const envVar = credentialEnvMap[credKey];
+          if (envVar && !options.env[envVar]) {
+            try {
+              const refRes = await fetch(
+                `${context.proxy.gatewayUrl}/gateway/reveal/${credKey}`,
+                {
+                  headers: { Authorization: `Bearer ${data.token}` },
+                  signal: AbortSignal.timeout(5000),
+                },
+              );
+              if (refRes.ok) {
+                const refData = (await refRes.json()) as { value: string };
+                options.env[envVar] = refData.value;
+              }
+            } catch {
+              // Non-fatal — CLI tool will fail but proxy injection still works
+            }
+          }
+        }
       }
     } catch {
       // Proxy not running — continue without credential injection
