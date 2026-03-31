@@ -31,7 +31,7 @@ const memoryConfigSchema = z.object({
 
 const agentConfigSchema = z.object({
   model: z.string(),
-  system: z.string(),
+  system: z.string().optional(),
   system_mode: z.enum(["append", "replace"]).default("replace"),
   effort: z.enum(["low", "medium", "high", "max"]).optional(),
   tools: z.array(z.string()).optional(),

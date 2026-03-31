@@ -93,8 +93,8 @@ describe("config", () => {
       `
 agents:
   broken:
-    model: sonnet
-    # missing system, tools
+    # missing model (required)
+    system: "hello"
 channels:
   terminal:
     enabled: true

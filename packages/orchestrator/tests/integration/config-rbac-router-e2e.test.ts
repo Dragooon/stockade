@@ -346,7 +346,7 @@ rbac:
     expect(() => loadConfig(tmpDir)).toThrow();
   });
 
-  // Test 8 — Missing required agent fields (model, system, tools) fail Zod validation
+  // Test 8 — Missing required agent fields (model) fail Zod validation
   it("throws Zod validation error when required agent fields are missing", () => {
     writeYaml(
       tmpDir,
@@ -354,9 +354,8 @@ rbac:
       `
 agents:
   broken:
-    model: claude-sonnet-4-20250514
-    # system is missing
-    # tools is missing
+    # model is missing (required)
+    system: "ok"
 channels:
   terminal:
     enabled: true
