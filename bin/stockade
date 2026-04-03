@@ -26,8 +26,8 @@ fi
 
 # ── stockade proxy ──
 if [[ "$CMD" == "proxy" ]]; then
-  echo "[stockade] starting proxy..."
-  exec node --import tsx packages/proxy/src/index.ts
+  echo "[stockade] starting proxy (watching for changes)..."
+  exec npx tsx watch packages/proxy/src/index.ts
 fi
 
 # ── stockade (full platform) ──
@@ -46,10 +46,20 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "[stockade] starting proxy..."
-node --import tsx packages/proxy/src/index.ts &
+echo "[stockade] starting proxy (watching for changes)..."
+npx tsx watch packages/proxy/src/index.ts &
 PROXY_PID=$!
 sleep 1
 
-echo "[stockade] starting orchestrator..."
-node --import tsx packages/orchestrator/src/index.ts
+# Orchestrator with restart loop
+EXIT_CODE=75
+while [ "$EXIT_CODE" -eq 75 ]; do
+  echo "[stockade] starting orchestrator..."
+  node --import tsx packages/orchestrator/src/index.ts
+  EXIT_CODE=$?
+  if [ "$EXIT_CODE" -eq 75 ]; then
+    echo "[stockade] orchestrator requested restart, restarting..."
+    sleep 1
+  fi
+done
+echo "[stockade] orchestrator exited with code $EXIT_CODE"

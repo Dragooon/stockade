@@ -17,6 +17,7 @@ import { startSchedulerLoop, stopSchedulerLoop } from "./scheduler/index.js";
 import type { ChannelMessage, AskApprovalFn, ApprovalChannel } from "./types.js";
 import { buildGatedAskApproval, resolveEffectivePermissions } from "./gatekeeper.js";
 import { watchConfigFiles } from "./watch.js";
+import { syncAgentSkills } from "./skills.js";
 
 import { PLATFORM_HOME } from "./config.js";
 
@@ -77,10 +78,11 @@ function releaseLock() {
 mkdirSync(paths.agents_dir, { recursive: true });
 mkdirSync(paths.containers_dir, { recursive: true });
 
-// Create per-agent directories
+// Create per-agent directories and sync skills
 for (const agentId of Object.keys(config.agents.agents)) {
   mkdirSync(resolve(paths.agents_dir, agentId), { recursive: true });
 }
+syncAgentSkills(config.agents, paths.agents_dir);
 
 console.log(`[paths] data_dir=${paths.data_dir}`);
 console.log(`[paths] agents_dir=${paths.agents_dir}`);
@@ -88,6 +90,18 @@ console.log(`[paths] agents_dir=${paths.agents_dir}`);
 // 2. Set up sessions DB
 const db = new Database(paths.sessions_db);
 initSessionsTable(db);
+
+// D. Load cached scopes from previous restart (if any)
+const activeScopesFile = resolve(paths.data_dir, "active-scopes.json");
+if (existsSync(activeScopesFile)) {
+  try {
+    const cachedScopes = JSON.parse(readFileSync(activeScopesFile, "utf-8")) as string[];
+    console.log(`[restart] Resuming ${cachedScopes.length} active scope(s)`);
+    unlinkSync(activeScopesFile);
+  } catch {
+    // Best-effort — ignore malformed cache file
+  }
+}
 
 // 3. Set up container manager (if containers config is present)
 let containerManager: ContainerManager | undefined;
@@ -324,7 +338,14 @@ const stopWatch = watchConfigFiles(PLATFORM_HOME, envPath, projectRoot, (next) =
   for (const agentId of Object.keys(config.agents.agents)) {
     mkdirSync(resolve(paths.agents_dir, agentId), { recursive: true });
   }
+
+  // Re-sync skills (adds/removes junctions based on new config)
+  syncAgentSkills(config.agents, paths.agents_dir);
 });
+
+// ── Restart support ─────────────────────────────────────────────
+let restartRequested = false;
+let restartWatcher: FSWatcher | undefined;
 
 // 7. Graceful shutdown
 async function shutdown() {
@@ -333,14 +354,58 @@ async function shutdown() {
   dispatchQueue.shutdown();
   stopSchedulerLoop();
 
+  // Clean up restart signal watcher
+  if (restartWatcher) {
+    restartWatcher.close();
+    restartWatcher = undefined;
+  }
+
   if (containerManager) {
     console.log("[containers] Shutting down all containers...");
     await containerManager.shutdownAll();
   }
+
+  // Cache active scopes before closing DB (only on restart)
+  if (restartRequested) {
+    try {
+      const rows = db.prepare("SELECT scope FROM sessions").all() as { scope: string }[];
+      const scopes = rows.map((r) => r.scope);
+      writeFileSync(resolve(paths.data_dir, "active-scopes.json"), JSON.stringify(scopes), "utf-8");
+      console.log(`[restart] Cached ${scopes.length} active scope(s) for resume`);
+    } catch {
+      // Best-effort
+    }
+  }
+
   db.close();
   releaseLock();
+  if (restartRequested) {
+    process.exit(75);
+  }
   process.exit(0);
 }
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+// 8. Restart signal file watcher
+// Watch the data_dir directory (not the signal file itself, which may not exist yet)
+const signalFileName = "restart.signal";
+restartWatcher = fsWatch(paths.data_dir, (eventType, filename) => {
+  if (filename === signalFileName) {
+    console.log("[restart] Restart signal received");
+    restartRequested = true;
+    const signalPath = resolve(paths.data_dir, signalFileName);
+    try {
+      if (existsSync(signalPath)) {
+        unlinkSync(signalPath);
+      }
+    } catch {
+      // Best-effort cleanup
+    }
+    shutdown().catch((err) => {
+      console.error("[restart] Error during shutdown:", err);
+      process.exit(75);
+    });
+  }
+});

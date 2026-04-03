@@ -29,26 +29,30 @@ export function parseScope(scope: string): {
 }
 
 /**
- * Build a Discord channel scope: discord:<serverId>:<channelId>:<userId>
+ * Build a Discord channel scope: discord:<serverId>:<channelId>
+ *
+ * Sessions are channel-scoped (shared across all users in the channel).
+ * The userId is carried separately in ChannelMessage for RBAC but is not
+ * part of the session scope.
  */
 export function discordScope(
   serverId: string,
-  channelId: string,
-  userId: string
+  channelId: string
 ): string {
-  return buildScope(["discord", serverId, channelId, userId]);
+  return buildScope(["discord", serverId, channelId]);
 }
 
 /**
- * Build a Discord thread scope: discord:<serverId>:<channelId>:<threadId>:<userId>
+ * Build a Discord thread scope: discord:<serverId>:<channelId>:<threadId>
+ *
+ * Sessions are thread-scoped (shared across all users in the thread).
  */
 export function discordThreadScope(
   serverId: string,
   channelId: string,
-  threadId: string,
-  userId: string
+  threadId: string
 ): string {
-  return buildScope(["discord", serverId, channelId, threadId, userId]);
+  return buildScope(["discord", serverId, channelId, threadId]);
 }
 
 /**

@@ -22,34 +22,14 @@ type DiscordConfig = NonNullable<PlatformConfig["channels"]["discord"]>;
 /** Timeout for HITL approval buttons (10 minutes). */
 const ASK_TIMEOUT_MS = 10 * 60_000;
 
-/** Image MIME types the Anthropic API accepts as multimodal content. */
-const IMAGE_MIME_TYPES = new Set([
-  "image/png", "image/jpeg", "image/gif", "image/webp",
-]);
-
-/** Max sizes for attachment downloads. */
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;   // 5 MB (Anthropic API limit)
-const MAX_TEXT_BYTES = 50 * 1024;           // 50 KB
-
-/** File extensions treated as text regardless of MIME type. */
-const TEXT_EXTENSIONS = new Set([
-  ".txt", ".md", ".json", ".yaml", ".yml", ".csv", ".tsv",
-  ".ts", ".js", ".jsx", ".tsx", ".py", ".rs", ".go", ".java",
-  ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".sh", ".bash",
-  ".html", ".css", ".xml", ".toml", ".ini", ".cfg", ".env",
-  ".sql", ".graphql", ".proto", ".dockerfile", ".makefile",
-  ".gitignore", ".editorconfig",
-]);
-
-function isTextFile(filename: string): boolean {
-  const lower = filename.toLowerCase();
-  return TEXT_EXTENSIONS.has(lower.slice(lower.lastIndexOf(".")));
-}
+/** Max attachment size — matches Discord's file upload limit. */
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25 MB
 
 /**
- * Download a Discord attachment and convert to a ChannelAttachment.
- * Images are stored as base64, text files as plain text.
- * Returns null if the attachment should be skipped.
+ * Download a Discord attachment as base64.
+ * All file types are accepted — the dispatcher saves them to the agent's
+ * workspace so it can analyze any format with its tools.
+ * Returns null if the file exceeds the size limit or download fails.
  */
 async function downloadAttachment(
   url: string,
@@ -57,35 +37,21 @@ async function downloadAttachment(
   contentType: string | null,
   size: number,
 ): Promise<ChannelAttachment | null> {
+  if (size > MAX_ATTACHMENT_BYTES) return null;
   const mime = contentType ?? "application/octet-stream";
 
   try {
-    if (IMAGE_MIME_TYPES.has(mime) && size <= MAX_IMAGE_BYTES) {
-      const res = await fetch(url);
-      const buf = await res.arrayBuffer();
-      return {
-        filename,
-        contentType: mime,
-        data: Buffer.from(buf).toString("base64"),
-        size,
-      };
-    }
-
-    if (mime.startsWith("text/") || isTextFile(filename)) {
-      if (size > MAX_TEXT_BYTES) return null;
-      const res = await fetch(url);
-      return {
-        filename,
-        contentType: mime,
-        data: await res.text(),
-        size,
-      };
-    }
+    const res = await fetch(url);
+    const buf = await res.arrayBuffer();
+    return {
+      filename,
+      contentType: mime,
+      data: Buffer.from(buf).toString("base64"),
+      size,
+    };
   } catch {
-    // Download failed — skip this attachment
+    return null;
   }
-
-  return null;
 }
 
 export interface DiscordAdapterOptions {
@@ -281,8 +247,8 @@ export class DiscordAdapter {
     }
 
     const scope = isThread
-      ? discordThreadScope(serverId, parentChannelId, channelId, userId)
-      : discordScope(serverId, channelId, userId);
+      ? discordThreadScope(serverId, parentChannelId, channelId)
+      : discordScope(serverId, channelId);
 
     const commandName = interaction.commandName;
 
@@ -325,8 +291,8 @@ export class DiscordAdapter {
       const content = interaction.options.getString("message", true);
       // Override scope to include agent routing hint
       const agentScope = isThread
-        ? discordThreadScope(serverId, parentChannelId, channelId, userId)
-        : discordScope(serverId, channelId, userId);
+        ? discordThreadScope(serverId, parentChannelId, channelId)
+        : discordScope(serverId, channelId);
 
       const channelMessage: ChannelMessage = {
         scope: agentScope,
@@ -428,8 +394,8 @@ export class DiscordAdapter {
     if (!effectiveBinding) return;
 
     const scope = isThread
-      ? discordThreadScope(serverId, parentChannelId, channelId, message.author.id)
-      : discordScope(serverId, channelId, message.author.id);
+      ? discordThreadScope(serverId, parentChannelId, channelId)
+      : discordScope(serverId, channelId);
 
     // Strip bot mention if present (user may still @mention even though it's not required)
     const content = message.content
@@ -623,7 +589,16 @@ function formatToolDescription(tool: string, input: Record<string, unknown>): st
   // Primary display — tool-specific formatting for the main argument
   if (tool === "Bash" && input.command) {
     lines.push(`\`\`\`bash\n${String(input.command).slice(0, 500)}\n\`\`\``);
-  } else if (tool === "Write" || tool === "Edit" || tool === "Read") {
+  } else if (tool === "Edit") {
+    const path = input.file_path ?? input.path;
+    if (path) lines.push(`**Path:** \`${path}\``);
+    if (input.old_string && input.new_string) {
+      const oldLines = String(input.old_string).slice(0, 400).split("\n").map(l => `- ${l}`);
+      const newLines = String(input.new_string).slice(0, 400).split("\n").map(l => `+ ${l}`);
+      lines.push(`\`\`\`diff\n${oldLines.join("\n")}\n${newLines.join("\n")}\n\`\`\``);
+      if (input.replace_all) lines.push("*(replace all occurrences)*");
+    }
+  } else if (tool === "Write" || tool === "Read") {
     const path = input.file_path ?? input.path;
     if (path) lines.push(`**Path:** \`${path}\``);
   } else if (tool === "Glob" || tool === "Grep") {
@@ -645,7 +620,8 @@ function formatToolDescription(tool: string, input: Record<string, unknown>): st
 
   // Full arguments — show remaining keys not already displayed above
   const shownKeys = new Set(["command", "description"]);
-  if (tool === "Write" || tool === "Edit" || tool === "Read") shownKeys.add("file_path").add("path");
+  if (tool === "Edit") shownKeys.add("file_path").add("path").add("old_string").add("new_string").add("replace_all");
+  else if (tool === "Write" || tool === "Read") shownKeys.add("file_path").add("path");
   if (tool === "Glob" || tool === "Grep") shownKeys.add("pattern").add("path");
 
   const remaining = Object.entries(input).filter(
@@ -719,9 +695,7 @@ function buildApprovalResultEmbed(
 
 /** Format a risk review as a compact embed field value. */
 function formatRiskReview(review: GatekeeperReview): string {
-  const parts = [`${RISK_EMOJI[review.risk]} **${review.risk.toUpperCase()}** — ${review.summary}`];
-  if (review.reasoning) parts.push(`> ${review.reasoning}`);
-  return parts.join("\n");
+  return `${RISK_EMOJI[review.risk]} **${review.risk.toUpperCase()}** — ${review.summary}`;
 }
 
 /**
