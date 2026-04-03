@@ -50,6 +50,18 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 $childPids = [System.Collections.Generic.List[int]]::new()
 
 try {
+    # Stop stale containers that may hold file locks on node_modules
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+        $running = docker ps -q 2>$null
+        if ($running) {
+            Write-Host 'stockade: stopping stale containers...'
+            docker stop $running 2>$null | Out-Null
+        }
+    }
+
+    # Kill stale node processes from previous runs
+    Get-Process -Name node -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
     # Install + build before starting anything
     Write-Host 'stockade: installing dependencies...'
     pnpm install --frozen-lockfile 2>&1 | Select-Object -Last 1
