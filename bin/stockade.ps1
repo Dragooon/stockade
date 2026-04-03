@@ -11,7 +11,15 @@ $ErrorActionPreference = "Stop"
 $RepoDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $RepoDir
 
-$tsxCli = Join-Path $RepoDir "node_modules\.pnpm\tsx@4.21.0\node_modules\tsx\dist\cli.mjs"
+# Resolve tsx CLI path dynamically (survives pnpm install recreating node_modules)
+function Get-TsxCli {
+    $tsxPath = node -e "console.log(require.resolve('tsx/cli'))" 2>$null
+    if (-not $tsxPath) {
+        Write-Host "[stockade] error: tsx not found — run 'pnpm install'" -ForegroundColor Red
+        exit 1
+    }
+    return $tsxPath
+}
 
 # Preflight
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
@@ -28,6 +36,7 @@ if ($Command -eq "validate") {
 # stockade proxy
 if ($Command -eq "proxy") {
     Write-Host "[stockade] starting proxy (watching for changes)..."
+    $tsxCli = Get-TsxCli
     node $tsxCli watch packages/proxy/src/index.ts
     exit $LASTEXITCODE
 }
@@ -40,16 +49,15 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 # Track all child processes for cleanup
 $childPids = [System.Collections.Generic.List[int]]::new()
 
-# Ctrl+C handler — kill all children and exit
-[Console]::TreatControlCAsInput = $false
-$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
-    foreach ($cpid in $childPids) {
-        Stop-Process -Id $cpid -Force -ErrorAction SilentlyContinue
-    }
-}
-
 try {
+    # Install + build before starting anything
+    Write-Host "[stockade] installing dependencies..."
+    pnpm install --frozen-lockfile 2>&1 | Select-Object -Last 1
+    Write-Host "[stockade] building..."
+    pnpm build 2>&1 | Select-Object -Last 1
+
     Write-Host "[stockade] starting proxy (watching for changes)..."
+    $tsxCli = Get-TsxCli
     $proxyProc = Start-Process -NoNewWindow -PassThru -FilePath "node" -ArgumentList "$tsxCli watch packages/proxy/src/index.ts"
     $childPids.Add($proxyProc.Id)
     Start-Sleep -Seconds 1
@@ -57,16 +65,14 @@ try {
     # Orchestrator with restart loop (only exit code 75 triggers restart)
     $keepRunning = $true
     while ($keepRunning) {
-        Write-Host "[stockade] installing dependencies..."
-        pnpm install --frozen-lockfile 2>&1 | Select-Object -Last 1
-        Write-Host "[stockade] building..."
-        pnpm build 2>&1 | Select-Object -Last 1
         Write-Host "[stockade] starting orchestrator..."
         $orchProc = Start-Process -NoNewWindow -PassThru -Wait -FilePath "node" -ArgumentList "packages/orchestrator/dist/index.js"
         $exitCode = $orchProc.ExitCode
 
         if ($exitCode -eq 75) {
-            Write-Host "[stockade] orchestrator requested restart, restarting..."
+            Write-Host "[stockade] orchestrator requested restart — rebuilding..."
+            pnpm install --frozen-lockfile 2>&1 | Select-Object -Last 1
+            pnpm build 2>&1 | Select-Object -Last 1
             Start-Sleep -Seconds 1
         } else {
             $keepRunning = $false
@@ -78,7 +84,6 @@ finally {
     Write-Host ""
     Write-Host "[stockade] shutting down..."
     foreach ($cpid in $childPids) {
-        # Kill the process and its children
         Get-CimInstance Win32_Process -Filter "ParentProcessId=$cpid" -ErrorAction SilentlyContinue |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         Stop-Process -Id $cpid -Force -ErrorAction SilentlyContinue
