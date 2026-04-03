@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # Trigger an orchestrator restart by writing the signal file.
 SIGNAL_FILE="${HOME}/.stockade/data/restart.signal"
+
+# Optional: merge a branch before restart
+if [ -n "$1" ]; then
+  echo "[restart] Merging $1..."
+  cd ~/.stockade/repo && git merge "$1" --no-edit
+fi
+
 echo "restart" > "$SIGNAL_FILE"
 echo "[restart] Signal sent to orchestrator"
