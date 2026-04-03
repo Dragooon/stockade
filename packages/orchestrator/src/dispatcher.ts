@@ -676,34 +676,55 @@ async function dispatchRemote(
   const remoteStart = Date.now();
   console.log(`[dispatch] → remote ${agentId} | POST ${url}`);
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      prompt: promptText,
-      systemPrompt: systemPrompt ?? agentConfig.system,
-      tools: agentConfig.tools?.filter((t) => t !== "Agent"),
-      model: agentConfig.model,
-      sessionId: sessionId ?? undefined,
-      maxTurns: 20,
-      ...(agentConfig.effort ? { effort: agentConfig.effort } : {}),
-    }),
-  });
+  const maxAttempts = 3;
+  let lastError: Error | undefined;
 
-  if (!response.ok) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(300_000),
+        body: JSON.stringify({
+          prompt: promptText,
+          systemPrompt: systemPrompt ?? agentConfig.system,
+          tools: agentConfig.tools?.filter((t) => t !== "Agent"),
+          model: agentConfig.model,
+          sessionId: sessionId ?? undefined,
+          maxTurns: 20,
+          ...(agentConfig.effort ? { effort: agentConfig.effort } : {}),
+        }),
+      });
+    } catch (err) {
+      // Network-level failure (connection refused, fetch failed, timeout, etc.)
+      // Retry on these — do NOT retry on HTTP 4xx/5xx.
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < maxAttempts) {
+        console.log(`[dispatch] Remote dispatch to ${url} failed (attempt ${attempt}/${maxAttempts}): ${lastError.message}, retrying...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+      break;
+    }
+
+    if (!response.ok) {
+      const remoteElapsed = ((Date.now() - remoteStart) / 1000).toFixed(1);
+      console.log(`[dispatch] ← remote ${agentId} | ${remoteElapsed}s | FAILED ${response.status}`);
+      throw new Error(
+        `Worker responded with ${response.status}: ${await response.text()}`
+      );
+    }
+
+    const data = (await response.json()) as {
+      result: string;
+      sessionId: string;
+    };
     const remoteElapsed = ((Date.now() - remoteStart) / 1000).toFixed(1);
-    console.log(`[dispatch] ← remote ${agentId} | ${remoteElapsed}s | FAILED ${response.status}`);
-    throw new Error(
-      `Worker responded with ${response.status}: ${await response.text()}`
-    );
+    const resultPreview = data.result.slice(0, 100).replace(/\n/g, " ");
+    console.log(`[dispatch] ← remote ${agentId} | ${remoteElapsed}s | "${resultPreview}${data.result.length > 100 ? "…" : ""}"`);
+    return { result: data.result, sessionId: data.sessionId };
   }
 
-  const data = (await response.json()) as {
-    result: string;
-    sessionId: string;
-  };
-  const remoteElapsed = ((Date.now() - remoteStart) / 1000).toFixed(1);
-  const resultPreview = data.result.slice(0, 100).replace(/\n/g, " ");
-  console.log(`[dispatch] ← remote ${agentId} | ${remoteElapsed}s | "${resultPreview}${data.result.length > 100 ? "…" : ""}"`);
-  return { result: data.result, sessionId: data.sessionId };
+  throw new Error(`Remote dispatch to worker failed after ${maxAttempts} attempts: ${lastError!.message}`);
 }
