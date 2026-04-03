@@ -54,8 +54,6 @@ sleep 1
 # Orchestrator with restart loop
 EXIT_CODE=75
 while [ "$EXIT_CODE" -eq 75 ]; do
-  echo "[stockade] installing dependencies..."
-  pnpm install --frozen-lockfile 2>&1 | tail -1
   echo "[stockade] building..."
   pnpm build 2>&1 | tail -1
   echo "[stockade] starting orchestrator..."

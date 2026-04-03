@@ -50,32 +50,9 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 $childPids = [System.Collections.Generic.List[int]]::new()
 
 try {
-    # Stop stale containers that may hold file locks on node_modules
-    if (Get-Command docker -ErrorAction SilentlyContinue) {
-        $running = docker ps -q 2>$null
-        if ($running) {
-            Write-Host 'stockade: stopping stale containers...'
-            docker stop $running 2>$null | Out-Null
-        }
-    }
-
-    # Kill stale node processes from previous runs
-    Get-Process -Name node -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-    # Clean dangling symlinks left by Docker containers (e.g. sharp-linux-x64)
-    Get-ChildItem -Path "$RepoDir\node_modules\.pnpm" -Recurse -Filter 'sharp-linux*' -ErrorAction SilentlyContinue |
-        Where-Object { $_.LinkType -and -not (Test-Path $_.Target -ErrorAction SilentlyContinue) } |
-        ForEach-Object { Remove-Item $_.FullName -Force; Write-Host "stockade: removed dangling symlink $($_.Name)" }
-
-    # Install + build before starting anything
-    Write-Host 'stockade: installing dependencies...'
-    $installOutput = pnpm install --frozen-lockfile 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host 'stockade: frozen install failed, retrying...' -ForegroundColor Yellow
-        pnpm install 2>&1 | Select-Object -Last 1
-    }
     Write-Host 'stockade: building...'
-    pnpm build 2>&1 | Select-Object -Last 1
+    pnpm build
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     Write-Host 'stockade: starting proxy...'
     $tsxCli = Get-TsxCli
@@ -92,8 +69,8 @@ try {
 
         if ($exitCode -eq 75) {
             Write-Host 'stockade: orchestrator requested restart, rebuilding...'
-            pnpm install --frozen-lockfile 2>&1 | Select-Object -Last 1
-            pnpm build 2>&1 | Select-Object -Last 1
+            pnpm build
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             Start-Sleep -Seconds 1
         } else {
             $keepRunning = $false
