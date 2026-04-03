@@ -139,8 +139,11 @@ export async function provisionContainer(
   // Agent workspace — mount the agent's host workspace as /workspace in the container.
   // The SDK uses this as cwd, so CLAUDE.md, skills, and memory are available.
   if (agentsDir) {
-    const workspaceDir = resolve(agentsDir, agentId);
-    mkdirSync(workspaceDir, { recursive: true });
+    const customPath = agentConfig.container?.workspace_path;
+    const workspaceDir = customPath ?? resolve(agentsDir, agentId);
+    if (!customPath) {
+      mkdirSync(workspaceDir, { recursive: true });
+    }
     volumes.push(`${workspaceDir}:/workspace`);
     env.AGENT_WORKSPACE = "/workspace";
   }

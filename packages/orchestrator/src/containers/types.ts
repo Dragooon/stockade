@@ -8,6 +8,7 @@ export const containerConfigSchema = z.object({
   memory: z.string().optional(),
   cpus: z.number().optional(),
   volumes: z.array(z.string()).optional(),
+  workspace_path: z.string().optional(),
 });
 
 export type ContainerConfig = z.infer<typeof containerConfigSchema>;
