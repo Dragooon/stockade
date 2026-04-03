@@ -13,6 +13,7 @@ import type { CanUseToolResult, PreToolUseHookOutput } from "./rbac.js";
 import { checkAccess, buildPermissionHook, buildPreToolUseHook } from "./rbac.js";
 import { resolveEffectivePermissions } from "./gatekeeper.js";
 import type { ContainerManager } from "./containers/manager.js";
+import { getSessionId, setSessionId } from "./sessions.js";
 
 /**
  * Context needed for sub-agent dispatch — carries the full agent registry,
@@ -42,6 +43,8 @@ export interface DispatchContext {
     host: string;
     caCertPath: string;
   };
+  /** SQLite database for session storage */
+  db?: import("better-sqlite3").Database;
 }
 
 /**
@@ -593,9 +596,12 @@ async function buildSubagentMcpServer(context: DispatchContext) {
         context.askApproval,
       );
 
-      // Build an ephemeral message for the sub-agent
+      // Build a stable message scope for session resumption
+      const subScope = `subagent:${args.agentId}:${context.userId}`;
+      const subSessionId = context.db ? getSessionId(context.db, subScope) : null;
+
       const subMessage: ChannelMessage = {
-        scope: `subagent:${args.agentId}:${Date.now()}`,
+        scope: subScope,
         content: args.task,
         userId: context.userId,
         platform: context.userPlatform,
@@ -610,11 +616,15 @@ async function buildSubagentMcpServer(context: DispatchContext) {
         args.agentId,
         subMessage,
         targetConfig,
-        null, // ephemeral — no session resume
+        subSessionId,
         subPermissionHook,
         context, // pass context through for nested sub-agents
         context.containerManager // thread container manager for sandboxed sub-agents
       );
+
+      if (context.db && result.sessionId) {
+        setSessionId(context.db, subScope, result.sessionId);
+      }
 
       const subElapsed = ((Date.now() - subStart) / 1000).toFixed(1);
       const resultPreview = result.result.slice(0, 100).replace(/\n/g, " ");
