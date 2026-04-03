@@ -8,6 +8,10 @@ export const containerConfigSchema = z.object({
   memory: z.string().optional(),
   cpus: z.number().optional(),
   volumes: z.array(z.string()).optional(),
+  /** Absolute path to the agent's workspace root (e.g. WSL2 UNC path on Windows).
+   *  When set, skills and other workspace files are written here instead of the
+   *  default agentsDir/<agentId> location. */
+  workspace_path: z.string().optional(),
 });
 
 export type ContainerConfig = z.infer<typeof containerConfigSchema>;
