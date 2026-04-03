@@ -62,9 +62,18 @@ try {
     # Kill stale node processes from previous runs
     Get-Process -Name node -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
+    # Clean dangling symlinks left by Docker containers (e.g. sharp-linux-x64)
+    Get-ChildItem -Path "$RepoDir\node_modules\.pnpm" -Recurse -Filter 'sharp-linux*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.LinkType -and -not (Test-Path $_.Target -ErrorAction SilentlyContinue) } |
+        ForEach-Object { Remove-Item $_.FullName -Force; Write-Host "stockade: removed dangling symlink $($_.Name)" }
+
     # Install + build before starting anything
     Write-Host 'stockade: installing dependencies...'
-    pnpm install --frozen-lockfile 2>&1 | Select-Object -Last 1
+    $installOutput = pnpm install --frozen-lockfile 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'stockade: frozen install failed, retrying...' -ForegroundColor Yellow
+        pnpm install 2>&1 | Select-Object -Last 1
+    }
     Write-Host 'stockade: building...'
     pnpm build 2>&1 | Select-Object -Last 1
 
