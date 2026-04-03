@@ -70,10 +70,8 @@ const ProviderOverrideSchema = z.object({
 
 export const ProviderSchema = z.object({
   read: z.string(),
-  /** Shell command to create a new credential. Only needed for gateway/store. */
-  write: z.string().optional(),
-  /** Shell command to update an existing credential. Only needed for gateway/store. */
-  update: z.string().optional(),
+  write: z.string(),
+  update: z.string(),
   cache_ttl: z.number().nonnegative().default(300),
   /** Per-key overrides — checked before the default `read` command. */
   overrides: z.array(ProviderOverrideSchema).default([]),

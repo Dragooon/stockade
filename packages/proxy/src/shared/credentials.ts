@@ -60,26 +60,14 @@ export async function storeCredential(
   key: string,
   value: string
 ): Promise<void> {
-  if (!provider.update && !provider.write) {
-    throw new Error("Provider has no write or update command configured");
-  }
+  const updateCmd = provider.update
+    .replace(/\{key\}/g, key)
+    .replace(/\{value\}/g, value);
 
-  if (provider.update) {
-    const updateCmd = provider.update
-      .replace(/\{key\}/g, key)
-      .replace(/\{value\}/g, value);
-
-    try {
-      await execProviderCommand(updateCmd);
-    } catch {
-      if (!provider.write) throw new Error("Provider update failed and no write command configured");
-      const writeCmd = provider.write
-        .replace(/\{key\}/g, key)
-        .replace(/\{value\}/g, value);
-      await execProviderCommand(writeCmd);
-    }
-  } else {
-    const writeCmd = provider.write!
+  try {
+    await execProviderCommand(updateCmd);
+  } catch {
+    const writeCmd = provider.write
       .replace(/\{key\}/g, key)
       .replace(/\{value\}/g, value);
     await execProviderCommand(writeCmd);
@@ -110,12 +98,7 @@ export function getCacheSize(): number {
  * Throws on non-zero exit.
  */
 async function execProviderCommand(cmd: string): Promise<string> {
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
-  const execFileAsync = promisify(execFile);
-  const bash = process.platform === "win32"
-    ? "C:\\Program Files\\Git\\usr\\bin\\bash.exe"
-    : "bash";
-  const { stdout } = await execFileAsync(bash, ["-c", cmd]);
-  return stdout.trim();
+  const { execaCommand } = await import("execa");
+  const result = await execaCommand(cmd, { shell: true });
+  return result.stdout.trim();
 }

@@ -104,7 +104,6 @@ async function handleHttpRequest(
     }
   }
 
-  const upstreamStart = Date.now();
   const response = await fetch(targetUrl, {
     method,
     headers: { ...headers, host: url.host },
@@ -113,7 +112,6 @@ async function handleHttpRequest(
       : undefined,
     redirect: "manual",
   });
-  console.log(`[http-proxy] ${method} ${host}${path} → ${response.status} (${((Date.now() - upstreamStart) / 1000).toFixed(1)}s)`);
 
   // Relay response
   const responseHeaders: Record<string, string> = {};
@@ -255,7 +253,6 @@ async function handleMitmRequest(
   const scheme = port === 443 ? "https" : "http";
   const url = `${scheme}://${host}${path}`;
 
-  const upstreamStart = Date.now();
   const response = await fetch(url, {
     method,
     headers: { ...headers, host },
@@ -264,7 +261,6 @@ async function handleMitmRequest(
       : undefined,
     redirect: "manual",
   });
-  console.log(`[http-proxy] ${method} ${host}${path} → ${response.status} (${((Date.now() - upstreamStart) / 1000).toFixed(1)}s)`);
 
   // Relay response headers — strip encoding headers since fetch() already decoded them.
   // Node's ServerResponse will handle transfer-encoding/content-length for the client.
