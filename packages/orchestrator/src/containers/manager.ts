@@ -196,7 +196,6 @@ export class ContainerManager {
 
   /**
    * Graceful shutdown: tear down all managed containers.
-   * Stops AND removes each container. Used for clean exit.
    */
   async shutdownAll(): Promise<void> {
     const keys = [...this.containers.keys()];
@@ -204,37 +203,27 @@ export class ContainerManager {
   }
 
   /**
-   * Restart-safe shutdown: stop containers without removing them.
-   *
-   * Preserves the container filesystem so Claude Code session state in
-   * ~/.claude/ inside each container is not destroyed. Agent SDK session
-   * data stored in /workspace/.claude/ (volume-mounted) already survives
-   * container removal, but this avoids any edge cases with home-dir state.
-   *
-   * Provisioning cleanup still runs (gateway tokens revoked, temp files
-   * removed). Stopped containers will be cleaned up as orphans on the
-   * next startup via cleanupOrphans().
+   * Restart a container by key (agentId for shared, agentId:scopeHash for session).
+   * Tears down the running container; the next ensure() call will re-provision it.
    */
-  async stopAll(): Promise<void> {
-    await Promise.all(
-      [...this.containers.entries()].map(async ([key, state]) => {
-        try {
-          await this.docker.stopContainer(state.containerId, 10);
-        } catch {
-          // Container may already be stopped
-        }
+  async restartContainer(key: string): Promise<void> {
+    console.log(`[containers] Restarting ${key}...`);
+    await this.teardown(key);
+    console.log(`[containers] ${key} stopped — will re-provision on next request`);
+  }
 
-        this.portAllocator.release(state.port);
-
-        // Revoke gateway tokens and remove temp files
-        const cleanup = this.cleanups.get(key);
-        if (cleanup) {
-          await cleanup();
-          this.cleanups.delete(key);
-        }
-      })
-    );
-    this.containers.clear();
+  /**
+   * Rebuild the Docker image for an agent, then restart the container.
+   * Forces a fresh image build regardless of Dockerfile mtime.
+   */
+  async rebuildContainer(key: string, agentConfig: AgentConfig): Promise<void> {
+    console.log(`[containers] Rebuilding ${key}...`);
+    // Tear down the running container first
+    await this.teardown(key);
+    // Force rebuild the Docker image
+    const dockerfilePath = resolveDockerfile(agentConfig, this.config);
+    const tag = await ensureImage(this.docker, dockerfilePath, this.config);
+    console.log(`[containers] ${key} image rebuilt as ${tag} — will re-provision on next request`);
   }
 
   /**
