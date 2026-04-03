@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type {
   AgentConfig,
   AgentsConfig,
@@ -220,20 +221,51 @@ const IMAGE_MIME_TYPES = new Set([
 ]);
 
 /**
+ * Save attachments to the agent's workspace and return the saved paths.
+ * Files are written to `<agentCwd>/tmp/attachments/<timestamp>/`.
+ * Returns both host paths and container paths (for sandboxed agents).
+ */
+function saveAttachmentsToDisk(
+  attachments: ChannelAttachment[],
+  agentCwd: string,
+): string[] {
+  const ts = Date.now();
+  const dir = join(agentCwd, "tmp", "attachments", String(ts));
+  mkdirSync(dir, { recursive: true });
+
+  const paths: string[] = [];
+  for (const att of attachments) {
+    // Sanitize filename — strip path separators to prevent traversal
+    const safeName = att.filename.replace(/[/\\]/g, "_");
+    const filePath = join(dir, safeName);
+    writeFileSync(filePath, Buffer.from(att.data, "base64"));
+    paths.push(filePath);
+  }
+  return paths;
+}
+
+/**
  * Build a prompt from text + attachments for Agent SDK query().
  *
- * - Image attachments → base64 image content blocks via AsyncIterable<SDKUserMessage>
- * - Text attachments → inlined into the text content
+ * - All attachments are saved to disk first (paths in savedPaths)
+ * - Image attachments additionally get base64 content blocks for multimodal vision
+ * - The prompt text is extended with the file listing so the agent knows where to find them
  * - Returns plain string when there are no image attachments (fast path)
  */
 function buildPromptWithAttachments(
   text: string,
   attachments: ChannelAttachment[],
+  savedPaths: string[],
   sessionId: string | null,
 ): string | AsyncIterable<{ type: "user"; message: unknown; parent_tool_use_id: null; session_id: string }> {
-  const imageBlocks: unknown[] = [];
-  const textParts: string[] = [];
+  // Build file listing for the prompt
+  const fileLines = savedPaths.map((p, i) => `- ${p} (${attachments[i].contentType}, ${attachments[i].size} bytes)`);
+  const fileListing = fileLines.length > 0
+    ? `\n\nAttached files saved to your workspace:\n${fileLines.join("\n")}\n\nYou can read, analyze, or process these files using your tools (Read, Bash, etc.).`
+    : "";
 
+  // Collect image blocks for multimodal inline display
+  const imageBlocks: unknown[] = [];
   for (const att of attachments) {
     if (IMAGE_MIME_TYPES.has(att.contentType)) {
       imageBlocks.push({
@@ -244,21 +276,18 @@ function buildPromptWithAttachments(
           data: att.data,
         },
       });
-    } else {
-      // Text file — inline content
-      textParts.push(`\n--- ${att.filename} ---\n${att.data}\n---`);
     }
   }
 
-  // No images → just extend the string prompt (avoids AsyncIterable path)
+  // No images → plain string prompt with file listing
   if (imageBlocks.length === 0) {
-    return text + textParts.join("");
+    return text + fileListing;
   }
 
-  // Images present → wrap in AsyncIterable<SDKUserMessage>
+  // Images present → wrap in AsyncIterable<SDKUserMessage> for multimodal
   const content: unknown[] = [
     ...imageBlocks,
-    { type: "text", text: text + textParts.join("") },
+    { type: "text", text: text + fileListing },
   ];
 
   const userMessage = {
@@ -431,12 +460,16 @@ async function dispatchLocal(
     options.hooks = {
       PreToolUse: [{
         hooks: [async (hookInput: Record<string, unknown>) => {
+          const toolName = String(hookInput.tool_name);
+          const hookStart = Date.now();
           const result = await permissionHook(
-            String(hookInput.tool_name),
+            toolName,
             (hookInput.tool_input ?? {}) as Record<string, unknown>,
           );
+          const hookMs = Date.now() - hookStart;
           // Translate canUseTool result → PreToolUse hook output
           if (result.behavior === "deny") {
+            console.log(`[tool] ${agentId} denied "${toolName}" (${(hookMs / 1000).toFixed(1)}s)`);
             return {
               hookSpecificOutput: {
                 hookEventName: "PreToolUse",
@@ -445,6 +478,7 @@ async function dispatchLocal(
               },
             };
           }
+          console.log(`[tool] ${agentId} allow "${toolName}" (${(hookMs / 1000).toFixed(1)}s)`);
           return {
             hookSpecificOutput: {
               hookEventName: "PreToolUse",
@@ -457,10 +491,18 @@ async function dispatchLocal(
     };
   }
 
-  // Build prompt — multimodal when image attachments are present
-  const prompt = message.attachments?.length
-    ? buildPromptWithAttachments(message.content, message.attachments, sessionId)
-    : message.content;
+  // Save attachments to the agent's workspace and build prompt
+  let prompt: unknown = message.content;
+  if (message.attachments?.length) {
+    const agentCwd = options.cwd as string | undefined;
+    if (agentCwd) {
+      const savedPaths = saveAttachmentsToDisk(message.attachments, agentCwd);
+      prompt = buildPromptWithAttachments(message.content, message.attachments, savedPaths, sessionId);
+    } else {
+      // Fallback: no cwd, pass images inline only
+      prompt = buildPromptWithAttachments(message.content, message.attachments, [], sessionId);
+    }
+  }
 
   const stream = query({
     prompt: prompt as any,
@@ -560,6 +602,10 @@ async function buildSubagentMcpServer(context: DispatchContext) {
       };
 
       // Reuse dispatch() — handles local vs sandboxed routing
+      const taskPreview = args.task.slice(0, 80).replace(/\n/g, " ");
+      console.log(`[dispatch] → subagent ${args.agentId} | "${taskPreview}${args.task.length > 80 ? "…" : ""}"`);
+      const subStart = Date.now();
+
       const result = await dispatch(
         args.agentId,
         subMessage,
@@ -569,6 +615,10 @@ async function buildSubagentMcpServer(context: DispatchContext) {
         context, // pass context through for nested sub-agents
         context.containerManager // thread container manager for sandboxed sub-agents
       );
+
+      const subElapsed = ((Date.now() - subStart) / 1000).toFixed(1);
+      const resultPreview = result.result.slice(0, 100).replace(/\n/g, " ");
+      console.log(`[dispatch] ← subagent ${args.agentId} | ${subElapsed}s | "${resultPreview}${result.result.length > 100 ? "…" : ""}"`);
 
       return {
         content: [{ type: "text" as const, text: result.result }],
@@ -586,13 +636,16 @@ async function buildSubagentMcpServer(context: DispatchContext) {
 /**
  * Remote dispatch via HTTP POST to a worker.
  * Uses buildSystemPrompt() to honour system_mode.
+ *
+ * Attachments are saved to the host agent workspace (which is volume-mounted
+ * into the container at /workspace), so the worker agent can read them.
  */
 async function dispatchRemote(
   agentConfig: AgentConfig,
-  _agentId: string,
+  agentId: string,
   message: ChannelMessage,
   sessionId: string | null,
-  _agentsDir?: string
+  agentsDir?: string
 ): Promise<DispatchResult> {
   const baseUrl =
     agentConfig.url ?? `http://localhost:${agentConfig.port}`;
@@ -606,11 +659,28 @@ async function dispatchRemote(
     ? (builtPrompt as { append: string }).append
     : builtPrompt;
 
+  // Save attachments to the host agent workspace — they appear at /workspace/tmp/attachments/
+  // inside the container via the existing volume mount.
+  let promptText = message.content;
+  if (message.attachments?.length && agentsDir) {
+    const hostCwd = join(agentsDir, agentId);
+    const hostPaths = saveAttachmentsToDisk(message.attachments, hostCwd);
+    // Convert host paths to container paths (/workspace/...)
+    const containerPaths = hostPaths.map(p => p.replace(hostCwd, "/workspace").replace(/\\/g, "/"));
+    const fileLines = containerPaths.map((p, i) =>
+      `- ${p} (${message.attachments![i].contentType}, ${message.attachments![i].size} bytes)`
+    );
+    promptText += `\n\nAttached files saved to your workspace:\n${fileLines.join("\n")}\n\nYou can read, analyze, or process these files using your tools (Read, Bash, etc.).`;
+  }
+
+  const remoteStart = Date.now();
+  console.log(`[dispatch] → remote ${agentId} | POST ${url}`);
+
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      prompt: message.content,
+      prompt: promptText,
       systemPrompt: systemPrompt ?? agentConfig.system,
       tools: agentConfig.tools?.filter((t) => t !== "Agent"),
       model: agentConfig.model,
@@ -621,6 +691,8 @@ async function dispatchRemote(
   });
 
   if (!response.ok) {
+    const remoteElapsed = ((Date.now() - remoteStart) / 1000).toFixed(1);
+    console.log(`[dispatch] ← remote ${agentId} | ${remoteElapsed}s | FAILED ${response.status}`);
     throw new Error(
       `Worker responded with ${response.status}: ${await response.text()}`
     );
@@ -630,5 +702,8 @@ async function dispatchRemote(
     result: string;
     sessionId: string;
   };
+  const remoteElapsed = ((Date.now() - remoteStart) / 1000).toFixed(1);
+  const resultPreview = data.result.slice(0, 100).replace(/\n/g, " ");
+  console.log(`[dispatch] ← remote ${agentId} | ${remoteElapsed}s | "${resultPreview}${data.result.length > 100 ? "…" : ""}"`);
   return { result: data.result, sessionId: data.sessionId };
 }

@@ -1,14 +1,14 @@
 import { config as loadEnv } from "dotenv";
 import Database from "better-sqlite3";
 import { resolve } from "node:path";
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 
 import { loadConfig } from "./config.js";
 import { resolveAgent } from "./router.js";
 import { checkAccess, buildPermissionHook } from "./rbac.js";
-import { initSessionsTable, getSessionId, setSessionId, deleteSession } from "./sessions.js";
+import { initSessionsTable, getSessionId, setSessionId, deleteSession, getAllSessions } from "./sessions.js";
 import { dispatch, type DispatchContext } from "./dispatcher.js";
 import { TerminalAdapter } from "./channels/terminal.js";
 import { DiscordAdapter } from "./channels/discord.js";
@@ -16,7 +16,6 @@ import { ContainerManager, DockerClient, DispatchQueue } from "./containers/inde
 import { startSchedulerLoop, stopSchedulerLoop } from "./scheduler/index.js";
 import type { ChannelMessage, AskApprovalFn, ApprovalChannel } from "./types.js";
 import { buildGatedAskApproval, resolveEffectivePermissions } from "./gatekeeper.js";
-import { watchConfigFiles } from "./watch.js";
 import { syncAgentSkills } from "./skills.js";
 
 import { PLATFORM_HOME } from "./config.js";
@@ -92,12 +91,30 @@ const db = new Database(paths.sessions_db);
 initSessionsTable(db);
 
 // D. Load cached scopes from previous restart (if any)
+// Sessions resume lazily: the next message to each scope triggers a DB lookup
+// and passes the stored session ID to the Agent SDK via options.resume.
+// For local agents, session state lives in <agents_dir>/<agentId>/.claude/ (persistent).
+// For sandboxed agents, session state lives in /workspace/.claude/ (volume-mounted, persistent).
 const activeScopesFile = resolve(paths.data_dir, "active-scopes.json");
 if (existsSync(activeScopesFile)) {
   try {
     const cachedScopes = JSON.parse(readFileSync(activeScopesFile, "utf-8")) as string[];
-    console.log(`[restart] Resuming ${cachedScopes.length} active scope(s)`);
+    console.log(`[restart] Resuming ${cachedScopes.length} active scope(s) — checking session DB`);
     unlinkSync(activeScopesFile);
+
+    let validCount = 0;
+    for (const scope of cachedScopes) {
+      const storedId = getSessionId(db, scope);
+      if (storedId) {
+        console.log(`[restart]   ✓ ${scope.slice(0, 60)} → session ${storedId.slice(0, 12)} (will resume lazily)`);
+        validCount++;
+      } else {
+        console.log(`[restart]   ✗ ${scope.slice(0, 60)} → no session in DB (stale)`);
+      }
+    }
+    if (cachedScopes.length > 0) {
+      console.log(`[restart] ${validCount}/${cachedScopes.length} scope(s) have sessions — will resume on next message`);
+    }
   } catch {
     // Best-effort — ignore malformed cache file
   }
@@ -180,6 +197,11 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
   }
 
   const sessionId = getSessionId(db, effectiveScope);
+  if (sessionId) {
+    console.log(`[dispatch] Scope ${effectiveScope} resuming session ${sessionId.slice(0, 12)}`);
+  } else {
+    console.log(`[dispatch] Scope ${effectiveScope} starting fresh session`);
+  }
   const agentCwd = resolve(paths.agents_dir, agentId);
   // When gatekeeper is enabled, agents without explicit permissions
   // get ["ask:*"] so every tool invocation passes through gatekeeper review.
@@ -236,6 +258,7 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
   console.log(`[dispatch] ← ${agentId} | ${elapsed}s | session=${result.sessionId.slice(0, 12)} | "${resultPreview}${result.result.length > 100 ? "…" : ""}"`);
 
   setSessionId(db, effectiveScope, result.sessionId);
+  console.log(`[dispatch] Scope ${effectiveScope} session saved: ${result.sessionId.slice(0, 12)}`);
   return result.result;
 }
 
@@ -323,46 +346,38 @@ if (config.platform.channels.discord?.enabled) {
   console.log("Discord channel started");
 }
 
-// 6. Hot reload config on file changes
-// Agent definitions, RBAC, gatekeeper, and .env are reloaded live.
-// Channels, container manager, and paths are NOT reloaded (require restart).
-const stopWatch = watchConfigFiles(PLATFORM_HOME, envPath, projectRoot, (next) => {
-  config = { agents: next.agents, platform: { ...next.platform, paths: config.platform.paths } };
-
-  // Re-resolve gatekeeper agent config
-  gatekeeperAgentConfig = config.platform.gatekeeper?.enabled
-    ? config.agents.agents[config.platform.gatekeeper.agent]
-    : undefined;
-
-  // Ensure directories exist for any new agents
-  for (const agentId of Object.keys(config.agents.agents)) {
-    mkdirSync(resolve(paths.agents_dir, agentId), { recursive: true });
-  }
-
-  // Re-sync skills (adds/removes junctions based on new config)
-  syncAgentSkills(config.agents, paths.agents_dir);
-});
-
 // ── Restart support ─────────────────────────────────────────────
 let restartRequested = false;
 let restartWatcher: FSWatcher | undefined;
+let restartPollTimer: ReturnType<typeof setInterval> | undefined;
 
 // 7. Graceful shutdown
 async function shutdown() {
   // Stop accepting new work
-  stopWatch();
   dispatchQueue.shutdown();
   stopSchedulerLoop();
 
-  // Clean up restart signal watcher
+  // Clean up restart signal watcher and poll timer
   if (restartWatcher) {
     restartWatcher.close();
     restartWatcher = undefined;
   }
+  if (restartPollTimer) {
+    clearInterval(restartPollTimer);
+    restartPollTimer = undefined;
+  }
 
   if (containerManager) {
-    console.log("[containers] Shutting down all containers...");
-    await containerManager.shutdownAll();
+    if (restartRequested) {
+      // Stop-only: preserve container filesystems so Claude Code ~/.claude/ state
+      // (session history, memory) survives the restart window. Containers will be
+      // removed as orphans by cleanupOrphans() on the next startup.
+      console.log("[containers] Stopping containers for restart (session state preserved)...");
+      await containerManager.stopAll();
+    } else {
+      console.log("[containers] Shutting down all containers...");
+      await containerManager.shutdownAll();
+    }
   }
 
   // Cache active scopes before closing DB (only on restart)
@@ -391,21 +406,47 @@ process.on("SIGTERM", shutdown);
 // 8. Restart signal file watcher
 // Watch the data_dir directory (not the signal file itself, which may not exist yet)
 const signalFileName = "restart.signal";
+const signalPath = resolve(paths.data_dir, signalFileName);
+
+console.log(`[restart] Watching ${paths.data_dir} for ${signalFileName}`);
+
+function consumeRestartSignal() {
+  if (restartRequested) return; // already in progress
+  if (!existsSync(signalPath)) return; // spurious event, file not actually present
+  console.log(`[restart] Signal file found at ${signalPath} — initiating restart`);
+  restartRequested = true;
+  try {
+    unlinkSync(signalPath);
+    console.log("[restart] Signal file consumed");
+  } catch (err) {
+    console.warn("[restart] Could not remove signal file:", err);
+  }
+  shutdown().catch((err) => {
+    console.error("[restart] Error during shutdown:", err);
+    process.exit(75);
+  });
+}
+
 restartWatcher = fsWatch(paths.data_dir, (eventType, filename) => {
-  if (filename === signalFileName) {
-    console.log("[restart] Restart signal received");
-    restartRequested = true;
-    const signalPath = resolve(paths.data_dir, signalFileName);
-    try {
-      if (existsSync(signalPath)) {
-        unlinkSync(signalPath);
-      }
-    } catch {
-      // Best-effort cleanup
-    }
-    shutdown().catch((err) => {
-      console.error("[restart] Error during shutdown:", err);
-      process.exit(75);
-    });
+  // Log every event so we can debug missed signals
+  console.log(`[restart] fsWatch event: ${eventType} ${filename}`);
+  // On Windows, filename can be null — Node.js docs explicitly warn that filename
+  // is not guaranteed even on supported platforms. Fall back to an existence check
+  // when filename is null so the signal is never silently missed.
+  if (filename === signalFileName || filename == null) {
+    consumeRestartSignal();
   }
 });
+
+restartWatcher.on("error", (err) => {
+  console.error("[restart] Watcher error:", err);
+});
+
+// Polling fallback — guards against fs.watch() silently dropping events,
+// which is a known Windows issue with ReadDirectoryChangesW under load.
+restartPollTimer = setInterval(() => {
+  if (!restartRequested && existsSync(signalPath)) {
+    console.log("[restart] Signal file detected via poll (fs.watch() missed the event)");
+    consumeRestartSignal();
+  }
+}, 5000);

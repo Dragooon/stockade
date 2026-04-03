@@ -14,7 +14,18 @@ export async function runAgent(request: WorkerRunRequest): Promise<WorkerRunResp
     resume: request.sessionId ?? undefined,
     maxTurns: request.maxTurns ?? DEFAULT_MAX_TURNS,
     cwd: process.env.AGENT_WORKSPACE ?? process.cwd(),
+
+    // Load CLAUDE.md and .claude/ settings from the agent's workspace.
+    // Without this, the SDK skips project-level instructions.
+    settingSources: ["project"],
+
+    // Accept file edits without interactive prompts (headless mode).
+    permissionMode: "acceptEdits",
   };
+
+  if (request.effort) {
+    options.effort = request.effort;
+  }
 
   // Only set allowedTools when explicitly provided — omitting enables all tools
   if (request.tools) {

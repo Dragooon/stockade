@@ -27,8 +27,6 @@ export interface GatekeeperReview {
   risk: RiskLevel;
   /** One-line summary of what the tool invocation does */
   summary: string;
-  /** Optional explanation of why this risk level was assigned */
-  reasoning?: string;
 }
 
 export interface GatekeeperConfig {
@@ -41,6 +39,10 @@ export interface GatekeeperConfig {
   agent: string;
   /** Auto-approve invocations at or below this risk level. Default: "low" */
   auto_approve_risk?: RiskLevel;
+  /** Thinking token budget for the gatekeeper model. Enables extended thinking
+   *  so the gatekeeper can reason through obfuscated or complex commands.
+   *  Default: 1024. Set to 0 to disable thinking. */
+  budget_tokens?: number;
 }
 
 // ── Risk comparison ────────────────────────────────────────────────────────
@@ -111,10 +113,16 @@ export function buildGatedAskApproval(
   return async (tool: string, input: Record<string, unknown>): Promise<boolean> => {
     let review: GatekeeperReview | undefined;
 
+    const reviewStart = Date.now();
     try {
-      review = await reviewToolInvocation(tool, input, agentConfig);
+      review = await reviewToolInvocation(tool, input, agentConfig, config.budget_tokens);
+      const reviewMs = Date.now() - reviewStart;
+      console.log(
+        `[gatekeeper] ${review.risk} "${tool}" — ${review.summary} (${(reviewMs / 1000).toFixed(1)}s)`,
+      );
     } catch (err) {
-      console.error("[gatekeeper] Review failed:", err instanceof Error ? err.message : err);
+      const reviewMs = Date.now() - reviewStart;
+      console.error(`[gatekeeper] Review failed after ${(reviewMs / 1000).toFixed(1)}s:`, err instanceof Error ? err.message : err);
       // Fall through to user approval without review
     }
 
@@ -139,26 +147,21 @@ export function buildGatedAskApproval(
  * Default system prompt used when the gatekeeper agent's system prompt is empty.
  * Users should define their own in the agent config for full customizability.
  */
-const DEFAULT_GATEKEEPER_SYSTEM = `You are a security gatekeeper for an AI agent platform. Your job is to assess the risk level of tool invocations that an AI agent wants to execute.
+const DEFAULT_GATEKEEPER_SYSTEM = `You are a security gatekeeper. Assess tool invocation risk.
 
-You will be given a tool name and its arguments. Evaluate the risk and respond with ONLY a JSON object (no markdown, no code fences):
+RESPONSE FORMAT — you MUST reply with exactly one line of raw JSON, nothing else:
+{"risk":"low","summary":"short description"}
 
-{"risk": "low|medium|high|critical", "summary": "one short sentence max"}
+Do NOT wrap in markdown, code fences, or backticks. Do NOT add explanation text before or after. Just the JSON.
 
-Keep the summary under 15 words. No reasoning field needed.
+Risk values: low, medium, high, critical.
+Summary: under 15 words, one sentence.
 
-Risk level guidelines:
-- **low**: Read-only operations, safe searches, reading files, listing directories, non-destructive commands (git status, ls, cat, grep, echo)
-- **medium**: Writing/editing files in expected locations, running build/test commands, installing dev dependencies, git commits
-- **high**: Deleting files, running unfamiliar scripts, modifying system configuration, network requests to external services, writing to sensitive paths, package installs with post-install scripts, git push
-- **critical**: Running as root/admin, modifying auth/credentials, accessing secrets, destructive git operations (force push, reset --hard), rm -rf, modifying CI/CD pipelines, database mutations, sending data to external endpoints
-
-Consider:
-1. Can this action be easily reversed?
-2. Does it affect shared state or external systems?
-3. Could it leak sensitive information?
-4. Does the command look obfuscated or suspicious?
-5. Is the scope of the action proportional to what's described?`;
+Risk guidelines:
+- low: Read-only ops, safe searches, reading files, ls, cat, grep, git status/log/diff
+- medium: Writing/editing files, build/test commands, dev dependency installs, git commit
+- high: Deleting files, unfamiliar scripts, system config changes, external network requests, sensitive paths, git push
+- critical: Root/admin ops, modifying credentials/secrets, rm -rf, force push, database mutations, sending data externally`;
 
 /**
  * Call the Anthropic Messages API to get a risk assessment for a tool invocation.
@@ -171,11 +174,18 @@ export async function reviewToolInvocation(
   tool: string,
   input: Record<string, unknown>,
   agentConfig: AgentConfig,
+  budgetTokens?: number,
 ): Promise<GatekeeperReview> {
   const systemPrompt = agentConfig.system || DEFAULT_GATEKEEPER_SYSTEM;
   const toolDescription = formatToolApproval(tool, input);
 
   const userMessage = `Assess the risk of this tool invocation:\n\nTool: ${tool}\n${toolDescription}\n\nFull input:\n${JSON.stringify(input, null, 2)}`;
+
+  // Build thinking config: default 1024 tokens, 0 disables
+  const effectiveBudget = budgetTokens ?? 1024;
+  const thinking = effectiveBudget > 0
+    ? { type: "enabled" as const, budgetTokens: effectiveBudget }
+    : { type: "disabled" as const };
 
   try {
     let result = "";
@@ -185,6 +195,7 @@ export async function reviewToolInvocation(
       options: {
         model: agentConfig.model,
         systemPrompt,
+        thinking,
         maxTurns: 1,
         allowedTools: [],
       } as any,
@@ -208,8 +219,11 @@ export async function reviewToolInvocation(
  */
 function parseReview(text: string): GatekeeperReview {
   try {
-    // Strip markdown code fences if present (model shouldn't, but be defensive)
-    const cleaned = text.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "").trim();
+    // Aggressively extract JSON from model response — strip markdown fences,
+    // leading/trailing prose, and find the first {...} object.
+    let cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
+    const jsonMatch = cleaned.match(/\{[^}]*"risk"\s*:\s*"[^"]+"\s*[,}][^}]*\}/);
+    if (jsonMatch) cleaned = jsonMatch[0];
     const parsed = JSON.parse(cleaned);
 
     const risk = parsed.risk;
@@ -220,7 +234,6 @@ function parseReview(text: string): GatekeeperReview {
     return {
       risk,
       summary: String(parsed.summary ?? "No summary provided"),
-      reasoning: String(parsed.reasoning ?? "No reasoning provided"),
     };
   } catch {
     console.error("[gatekeeper] Failed to parse response:", text.slice(0, 200));
@@ -239,7 +252,6 @@ function isValidRisk(value: unknown): value is RiskLevel {
 function fallbackReview(tool: string, reason: string): GatekeeperReview {
   return {
     risk: "medium",
-    summary: `Could not assess "${tool}" (${reason})`,
-    reasoning: `Gatekeeper was unable to complete the review: ${reason}. Defaulting to medium risk for safety.`,
+    summary: `Could not assess "${tool}" (${reason}) — defaulting to medium`,
   };
 }

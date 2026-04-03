@@ -35,6 +35,8 @@ export interface AgentConfig {
    * If defined, implicit deny when no rule matches.
    */
   permissions?: string[];
+  /** Skill names to sync from ~/.claude/skills/ into this agent's workspace. */
+  skills?: string[];
 }
 
 export type { ContainerConfig, ContainersConfig };

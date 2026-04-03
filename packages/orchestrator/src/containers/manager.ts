@@ -196,10 +196,45 @@ export class ContainerManager {
 
   /**
    * Graceful shutdown: tear down all managed containers.
+   * Stops AND removes each container. Used for clean exit.
    */
   async shutdownAll(): Promise<void> {
     const keys = [...this.containers.keys()];
     await Promise.all(keys.map((k) => this.teardown(k)));
+  }
+
+  /**
+   * Restart-safe shutdown: stop containers without removing them.
+   *
+   * Preserves the container filesystem so Claude Code session state in
+   * ~/.claude/ inside each container is not destroyed. Agent SDK session
+   * data stored in /workspace/.claude/ (volume-mounted) already survives
+   * container removal, but this avoids any edge cases with home-dir state.
+   *
+   * Provisioning cleanup still runs (gateway tokens revoked, temp files
+   * removed). Stopped containers will be cleaned up as orphans on the
+   * next startup via cleanupOrphans().
+   */
+  async stopAll(): Promise<void> {
+    await Promise.all(
+      [...this.containers.entries()].map(async ([key, state]) => {
+        try {
+          await this.docker.stopContainer(state.containerId, 10);
+        } catch {
+          // Container may already be stopped
+        }
+
+        this.portAllocator.release(state.port);
+
+        // Revoke gateway tokens and remove temp files
+        const cleanup = this.cleanups.get(key);
+        if (cleanup) {
+          await cleanup();
+          this.cleanups.delete(key);
+        }
+      })
+    );
+    this.containers.clear();
   }
 
   /**

@@ -58,15 +58,15 @@ describe("roundtrip", () => {
 });
 
 describe("discordScope", () => {
-  it("builds a discord channel scope", () => {
-    expect(discordScope("s1", "c1", "u1")).toBe("discord:s1:c1:u1");
+  it("builds a discord channel scope (channel-scoped, no userId)", () => {
+    expect(discordScope("s1", "c1")).toBe("discord:s1:c1");
   });
 });
 
 describe("discordThreadScope", () => {
-  it("builds a discord thread scope", () => {
-    expect(discordThreadScope("s1", "c1", "t1", "u1")).toBe(
-      "discord:s1:c1:t1:u1"
+  it("builds a discord thread scope (thread-scoped, no userId)", () => {
+    expect(discordThreadScope("s1", "c1", "t1")).toBe(
+      "discord:s1:c1:t1"
     );
   });
 });

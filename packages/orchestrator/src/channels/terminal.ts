@@ -111,7 +111,5 @@ export class TerminalAdapter {
 }
 
 function formatTerminalReview(review: GatekeeperReview): string {
-  const parts = [`  Risk: ${review.risk.toUpperCase()}`, `  ${review.summary}`];
-  if (review.reasoning) parts.push(`  Reason: ${review.reasoning}`);
-  return parts.join("\n") + "\n";
+  return `  Risk: ${review.risk.toUpperCase()}\n  ${review.summary}\n`;
 }

@@ -14,6 +14,7 @@ const gatekeeperConfigSchema = z.object({
   enabled: z.boolean().default(false),
   agent: z.string().describe("Agent ID to use as the gatekeeper (must be defined in agents section)"),
   auto_approve_risk: z.enum(["low", "medium", "high", "critical"]).default("low"),
+  budget_tokens: z.number().int().nonnegative().default(1024).describe("Thinking token budget for gatekeeper (0 to disable)"),
 });
 
 /**
@@ -44,6 +45,8 @@ const agentConfigSchema = z.object({
   container: containerConfigSchema.optional(),
   memory: memoryConfigSchema.optional(),
   permissions: z.array(z.string()).optional(),
+  /** Skill names to sync from ~/.claude/skills/ into this agent's workspace. */
+  skills: z.array(z.string()).optional(),
 });
 
 const channelBindingSchema = z.object({

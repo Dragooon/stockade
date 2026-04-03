@@ -44,3 +44,18 @@ export function deleteSession(
 ): void {
   db.prepare("DELETE FROM sessions WHERE scope = ?").run(scope);
 }
+
+/**
+ * Return every scope→sessionId pair currently stored.
+ * Used at shutdown to snapshot active sessions for post-restart resumption.
+ */
+export function getAllSessions(
+  db: Database.Database
+): { scope: string; sessionId: string }[] {
+  return (
+    db.prepare("SELECT scope, session_id FROM sessions").all() as {
+      scope: string;
+      session_id: string;
+    }[]
+  ).map((r) => ({ scope: r.scope, sessionId: r.session_id }));
+}

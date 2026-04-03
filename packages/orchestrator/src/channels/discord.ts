@@ -124,6 +124,52 @@ export class DiscordAdapter {
     this.client.destroy();
   }
 
+  /**
+   * Send a brief resumption notice to each Discord channel/thread that had
+   * an active session before the last restart.
+   *
+   * Only processes `discord:` scopes. Agent sub-scopes
+   * (…:agent:<agentId>) are skipped — the parent channel scope already
+   * covers them and we don't want duplicate notifications.
+   *
+   * Each unique channel/thread ID is notified at most once. Failures are
+   * swallowed so a deleted or inaccessible channel never blocks startup.
+   */
+  async notifyChannelsResumed(
+    sessions: { scope: string; sessionId: string }[]
+  ): Promise<void> {
+    const notifiedIds = new Set<string>();
+
+    for (const { scope } of sessions) {
+      if (!scope.startsWith("discord:")) continue;
+      const parts = scope.split(":");
+
+      // Minimum valid Discord scope: discord:<serverId>:<channelId>
+      if (parts.length < 3) continue;
+
+      // Skip agent sub-scopes: …:<channelOrThread>:agent:<agentId>
+      // These share the parent channel and would cause duplicate notifications.
+      if (parts.length >= 5 && parts[parts.length - 2] === "agent") continue;
+
+      // Channel scope (length 3): notify parts[2] (channelId)
+      // Thread scope  (length 4): notify parts[3] (threadId — send inside the thread)
+      const targetId = parts.length === 4 ? parts[3] : parts[2];
+      if (notifiedIds.has(targetId)) continue;
+      notifiedIds.add(targetId);
+
+      try {
+        const channel = await this.client.channels.fetch(targetId);
+        if (channel && channel.isSendable()) {
+          await channel.send(
+            "*(Session resumed — continuing from before restart.)*"
+          );
+        }
+      } catch {
+        // Best-effort — channel may be deleted or the bot may lack access
+      }
+    }
+  }
+
   // ── Slash Command Registration ──────────────────────────────────
 
   private buildSlashCommands(): SlashCommandBuilder[] {

@@ -177,7 +177,7 @@ describe("DiscordAdapter", () => {
 
     expect(onMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        scope: "discord:server-1:any-channel:user-42",
+        scope: "discord:server-1:any-channel",
         content: "Hello", // mention stripped
         userId: "user-42",
         platform: "discord",
@@ -209,7 +209,7 @@ describe("DiscordAdapter", () => {
 
     expect(onMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        scope: "discord:server-1:parent-channel:thread-id:user-42",
+        scope: "discord:server-1:parent-channel:thread-id",
         content: "Thread msg",
       }),
       expect.objectContaining({ askUser: expect.any(Function), notifyAutoApproved: expect.any(Function) }),
@@ -323,7 +323,7 @@ describe("Discord slash commands", () => {
     expect(interaction.deferReply).toHaveBeenCalled();
     expect(onMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        scope: "discord:server-1:any-channel:user-42",
+        scope: "discord:server-1:any-channel",
         content: "Hello from slash",
         platform: "discord",
       }),
@@ -340,7 +340,7 @@ describe("Discord slash commands", () => {
     const interaction = mockInteraction({ commandName: "new" });
     await handler(interaction);
 
-    expect(onSessionReset).toHaveBeenCalledWith("discord:server-1:any-channel:user-42");
+    expect(onSessionReset).toHaveBeenCalledWith("discord:server-1:any-channel");
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining("Session reset"),
@@ -380,7 +380,7 @@ describe("Discord slash commands", () => {
 
     expect(onMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        scope: "discord:server-1:parent-channel-123:thread-id-456:user-42",
+        scope: "discord:server-1:parent-channel-123:thread-id-456",
       }),
       expect.objectContaining({ askUser: expect.any(Function), notifyAutoApproved: expect.any(Function) }),
     );

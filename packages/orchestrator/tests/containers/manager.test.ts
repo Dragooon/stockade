@@ -300,6 +300,65 @@ describe("ContainerManager", () => {
       await manager.shutdownAll();
       expect(manager.size).toBe(0);
       expect(docker.stopContainer).toHaveBeenCalledTimes(2);
+      expect(docker.removeContainer).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("stopAll", () => {
+    it("stops containers without removing them, runs cleanup, clears state", async () => {
+      docker.createContainer
+        .mockResolvedValueOnce("c1")
+        .mockResolvedValueOnce("c2");
+
+      const cleanup1 = vi.fn().mockResolvedValue(undefined);
+      const cleanup2 = vi.fn().mockResolvedValue(undefined);
+
+      (provisionContainer as any)
+        .mockResolvedValueOnce({
+          env: { PORT: "3001" },
+          volumes: [],
+          gatewayToken: "t1",
+          cleanup: cleanup1,
+        })
+        .mockResolvedValueOnce({
+          env: { PORT: "3002" },
+          volumes: [],
+          gatewayToken: "t2",
+          cleanup: cleanup2,
+        });
+
+      await manager.ensure("main", sharedAgent, "s1");
+      await manager.ensure("sandbox", sessionAgent, "s2");
+      expect(manager.size).toBe(2);
+
+      await manager.stopAll();
+
+      // Containers stopped but NOT removed
+      expect(docker.stopContainer).toHaveBeenCalledTimes(2);
+      expect(docker.removeContainer).not.toHaveBeenCalled();
+
+      // Provisioning cleanup ran (tokens revoked, temp files removed)
+      expect(cleanup1).toHaveBeenCalled();
+      expect(cleanup2).toHaveBeenCalled();
+
+      // State cleared
+      expect(manager.size).toBe(0);
+    });
+
+    it("tolerates stop errors (container already stopped)", async () => {
+      (provisionContainer as any).mockResolvedValue({
+        env: { PORT: "3001" },
+        volumes: [],
+        gatewayToken: "t1",
+        cleanup: mockCleanup,
+      });
+
+      await manager.ensure("main", sharedAgent, "s1");
+      docker.stopContainer.mockRejectedValueOnce(new Error("already stopped"));
+
+      // Should not throw
+      await expect(manager.stopAll()).resolves.toBeUndefined();
+      expect(manager.size).toBe(0);
     });
   });
 
