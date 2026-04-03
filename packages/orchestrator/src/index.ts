@@ -215,6 +215,7 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
     askApproval,
     containerManager,
     proxy: proxyConfig,
+    db,
   };
 
   const attachments = (pending.meta?.attachments as import("./types.js").ChannelAttachment[] | undefined);

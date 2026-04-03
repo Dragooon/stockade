@@ -25,13 +25,40 @@ export async function runAgent(request: WorkerRunRequest): Promise<WorkerRunResp
     `[worker] Starting agent query — session: ${request.sessionId ?? "new"}`
   );
 
+  const startTime = Date.now();
+  let turns = 0;
+  let toolStart = 0;
+
   try {
     for await (const message of query({
       prompt: request.prompt,
       options: options as any,
     })) {
       if (message.session_id) sessionId = message.session_id;
-      if ("result" in message) result = (message as { result: string }).result;
+
+      if (message.type === "assistant") {
+        turns++;
+        for (const block of (message as any).message?.content ?? []) {
+          if (block.type === "tool_use") {
+            toolStart = Date.now();
+            console.log(`[worker] tool: ${block.name}`);
+          }
+        }
+      } else if (message.type === "user" && toolStart) {
+        console.log(`[worker] tool completed — ${Date.now() - toolStart}ms`);
+        toolStart = 0;
+      } else if ("result" in message) {
+        result = (message as any).result;
+        const usage = (message as any).usage;
+        if (usage) {
+          console.log(
+            `[worker] llm: ${turns} turns — ${usage.input_tokens ?? "?"}in/${usage.output_tokens ?? "?"}out`
+          );
+        }
+        console.log(
+          `[worker] done — stop: ${(message as any).stop_reason ?? "unknown"}`
+        );
+      }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -39,6 +66,6 @@ export async function runAgent(request: WorkerRunRequest): Promise<WorkerRunResp
     throw err;
   }
 
-  console.log(`[worker] Agent query completed`);
+  console.log(`[worker] Agent query completed — ${Date.now() - startTime}ms`);
   return { result, sessionId };
 }
