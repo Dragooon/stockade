@@ -30,9 +30,9 @@ export function syncAgentSkills(
   agentsDir: string,
 ): void {
   for (const [agentId, agentConfig] of Object.entries(agents.agents)) {
-    // Use workspace_path if configured (e.g. WSL2-backed agents), otherwise
-    // fall back to the default Windows path agentsDir/<agentId>.
-    const workspaceRoot = agentConfig.container?.workspace_host_path ?? agentConfig.container?.workspace_path ?? resolve(agentsDir, agentId);
+    // Use workspace_host_path for WSL2-backed agents, otherwise default path.
+    // Skip workspace_path — it may be a Docker volume name, not a filesystem path.
+    const workspaceRoot = agentConfig.container?.workspace_host_path ?? resolve(agentsDir, agentId);
     const targetSkillsDir = resolve(workspaceRoot, ".claude", "skills");
     const wantedSkills = new Set(agentConfig.skills ?? []);
 
