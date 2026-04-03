@@ -30,9 +30,9 @@ export function syncAgentSkills(
   agentsDir: string,
 ): void {
   for (const [agentId, agentConfig] of Object.entries(agents.agents)) {
-    // Use workspace_host_path for WSL2-backed agents, otherwise default path.
-    // Skip workspace_path — it may be a Docker volume name, not a filesystem path.
-    const workspaceRoot = agentConfig.container?.workspace_host_path ?? resolve(agentsDir, agentId);
+    // Always use the local agents directory — workspace_host_path may be a WSL
+    // or Docker path that isn't directly accessible from the host filesystem.
+    const workspaceRoot = resolve(agentsDir, agentId);
     const targetSkillsDir = resolve(workspaceRoot, ".claude", "skills");
     const wantedSkills = new Set(agentConfig.skills ?? []);
 
@@ -47,7 +47,15 @@ export function syncAgentSkills(
     if (existsSync(targetSkillsDir)) {
       for (const entry of readdirSync(targetSkillsDir)) {
         const entryPath = join(targetSkillsDir, entry);
-        const stat = lstatSync(entryPath);
+        let stat;
+        try {
+          stat = lstatSync(entryPath);
+        } catch {
+          // Inaccessible entry (e.g. dangling WSL symlink) — remove it
+          try { rmSync(entryPath, { force: true }); } catch { /* best-effort */ }
+          console.log(`[skills] removed ${agentId}/${entry} (inaccessible)`);
+          continue;
+        }
 
         if (stat.isSymbolicLink()) {
           // Old junction/symlink from the previous approach — always remove
