@@ -32,7 +32,7 @@ export function syncAgentSkills(
   for (const [agentId, agentConfig] of Object.entries(agents.agents)) {
     // Use workspace_path if configured (e.g. WSL2-backed agents), otherwise
     // fall back to the default Windows path agentsDir/<agentId>.
-    const workspaceRoot = agentConfig.container?.workspace_path ?? resolve(agentsDir, agentId);
+    const workspaceRoot = agentConfig.container?.workspace_host_path ?? agentConfig.container?.workspace_path ?? resolve(agentsDir, agentId);
     const targetSkillsDir = resolve(workspaceRoot, ".claude", "skills");
     const wantedSkills = new Set(agentConfig.skills ?? []);
 

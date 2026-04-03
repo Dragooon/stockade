@@ -42,3 +42,4 @@ QA-AUDIT-REPORT.md
 config/config.yaml
 config/proxy.yaml
 config/resolve-credential.sh
+.pnpm-store/
