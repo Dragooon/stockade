@@ -7,6 +7,7 @@ export const WorkerRunRequestSchema = z.object({
   model: z.string().optional(),
   sessionId: z.string().optional(),
   maxTurns: z.number().int().positive().optional(),
+  scope: z.string().optional(),
 });
 
 export interface WorkerRunRequest {
@@ -16,6 +17,7 @@ export interface WorkerRunRequest {
   model?: string;
   sessionId?: string;
   maxTurns?: number;
+  scope?: string;
 }
 
 export interface WorkerRunResponse {

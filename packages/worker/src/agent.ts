@@ -21,13 +21,24 @@ export async function runAgent(request: WorkerRunRequest): Promise<WorkerRunResp
     options.allowedTools = request.tools;
   }
 
-  for await (const message of query({
-    prompt: request.prompt,
-    options: options as any,
-  })) {
-    if (message.session_id) sessionId = message.session_id;
-    if ("result" in message) result = (message as { result: string }).result;
+  console.log(
+    `[worker] Starting agent query — session: ${request.sessionId ?? "new"}`
+  );
+
+  try {
+    for await (const message of query({
+      prompt: request.prompt,
+      options: options as any,
+    })) {
+      if (message.session_id) sessionId = message.session_id;
+      if ("result" in message) result = (message as { result: string }).result;
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[worker] Agent query failed: ${message}`);
+    throw err;
   }
 
+  console.log(`[worker] Agent query completed`);
   return { result, sessionId };
 }
