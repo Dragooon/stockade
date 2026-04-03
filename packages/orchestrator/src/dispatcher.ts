@@ -13,7 +13,6 @@ import type { CanUseToolResult, PreToolUseHookOutput } from "./rbac.js";
 import { checkAccess, buildPermissionHook, buildPreToolUseHook } from "./rbac.js";
 import { resolveEffectivePermissions } from "./gatekeeper.js";
 import type { ContainerManager } from "./containers/manager.js";
-import { getSessionId, setSessionId } from "./sessions.js";
 
 /**
  * Context needed for sub-agent dispatch — carries the full agent registry,
@@ -43,8 +42,6 @@ export interface DispatchContext {
     host: string;
     caCertPath: string;
   };
-  /** SQLite database for session storage */
-  db?: import("better-sqlite3").Database;
 }
 
 /**
@@ -532,6 +529,9 @@ async function dispatchLocal(
  * Build an inline MCP server that exposes `ask_agent` for sub-agent delegation.
  * The tool reuses dispatch() with full RBAC applied to the original caller.
  */
+// In-memory session cache for sub-agents (survives within process, not across restarts)
+const subagentSessions = new Map<string, string>();
+
 async function buildSubagentMcpServer(context: DispatchContext) {
   const { tool, createSdkMcpServer } = await import(
     "@anthropic-ai/claude-agent-sdk"
@@ -596,9 +596,9 @@ async function buildSubagentMcpServer(context: DispatchContext) {
         context.askApproval,
       );
 
-      // Build a stable message scope for session resumption
+      // Build a stable message scope for session resumption (in-memory only)
       const subScope = `subagent:${args.agentId}:${context.userId}`;
-      const subSessionId = context.db ? getSessionId(context.db, subScope) : null;
+      const subSessionId = subagentSessions.get(subScope) ?? null;
 
       const subMessage: ChannelMessage = {
         scope: subScope,
@@ -622,8 +622,8 @@ async function buildSubagentMcpServer(context: DispatchContext) {
         context.containerManager // thread container manager for sandboxed sub-agents
       );
 
-      if (context.db && result.sessionId) {
-        setSessionId(context.db, subScope, result.sessionId);
+      if (result.sessionId) {
+        subagentSessions.set(subScope, result.sessionId);
       }
 
       const subElapsed = ((Date.now() - subStart) / 1000).toFixed(1);
