@@ -12,10 +12,19 @@ import { rewriteBody } from "./body-rewriter.js";
 import { ensureCA, generateCert, type CaBundle } from "./tls.js";
 
 const META_LOG = join(homedir(), ".stockade", "logs", "cache-meta.ndjson");
+const REQ_LOG  = join(homedir(), ".stockade", "logs", "requests.ndjson");
 
 function metaWrite(entry: object): void {
   try { appendFileSync(META_LOG, JSON.stringify(entry) + "\n"); } catch {}
 }
+
+function reqWrite(entry: object): void {
+  try { appendFileSync(REQ_LOG, JSON.stringify(entry) + "\n"); } catch {}
+}
+
+// Track sessions we've already logged a system prompt for — avoids re-logging
+// the same (unchanged) system on every turn of the same session.
+const loggedSessions = new Set<string>();
 
 /** Extract lightweight request metadata for cache analysis. */
 function extractRequestMeta(body: Buffer): { model: string; msg_count: number; user_turns: number; req_bytes: number } | null {
@@ -480,6 +489,33 @@ async function handleMitmRequest(
   const isMessages = host === "api.anthropic.com" && path.includes("/messages")
     && method !== "GET" && method !== "HEAD" && body.length > 0;
   const requestMeta = isMessages ? extractRequestMeta(body) : null;
+
+  // Request log: capture system prompt once per session (deduped by session ID).
+  // Logs to requests.ndjson — separate from cache-meta so it can be inspected
+  // independently without noise from per-turn usage stats.
+  if (isMessages && stockadeSession && !loggedSessions.has(stockadeSession)) {
+    loggedSessions.add(stockadeSession);
+    try {
+      const parsed = JSON.parse(body.toString("utf8")) as {
+        model?: string;
+        system?: Array<{ type?: string; text?: string; cache_control?: unknown }>;
+      };
+      reqWrite({
+        ts: new Date().toISOString(),
+        session: stockadeSession,
+        agent: stockadeAgent || undefined,
+        scope: stockadeScope || undefined,
+        model: parsed.model,
+        system: (parsed.system ?? []).map((blk, i) => ({
+          index: i,
+          type: blk.type,
+          cache_control: blk.cache_control,
+          bytes: Buffer.byteLength(blk.text ?? "", "utf8"),
+          text: blk.text,
+        })),
+      });
+    } catch { /* ignore parse errors */ }
+  }
 
   // Forward to upstream
   const scheme = port === 443 ? "https" : "http";
