@@ -100,6 +100,16 @@ function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
     let markerCount = 0;
     let modified = false;
 
+    // ── Model-aware cache TTL ──
+    // Haiku does not support ttl:"1h" on system or message cache_control — it returns
+    // 400 ("system.N.cache_control" invalid_request_error). Use standard ephemeral (5m)
+    // for Haiku; use 1h for Opus/Sonnet class models.
+    // Note: scope:global was also tried but returns 400 for all models now.
+    const isHaiku = (req.model ?? "").includes("haiku");
+    const target1hMarker = isHaiku
+      ? { type: "ephemeral" }
+      : { type: "ephemeral", ttl: "1h" };
+
     // ── Normalize user messages: string → array[1] ──
     // Ensures byte-stable prefix regardless of SDK format inconsistencies.
     for (const msg of req.messages ?? []) {
@@ -115,13 +125,6 @@ function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
       const c = msg.content;
       if (Array.isArray(c)) for (const item of c) if ((item as Record<string, unknown>).cache_control) markerCount++;
     }
-
-    // ── 1h cache on last system block (agent platform instructions) ──
-    // scope:global was previously supported for Opus but now returns 400
-    // ("Extra inputs are not permitted") — likely depends on beta header version.
-    // Use ttl:1h without scope for all models; cross-request persistence relies
-    // on prefix-match of identical system content (which works for our static blocks).
-    const target1hMarker = { type: "ephemeral", ttl: "1h" };
 
     if (Array.isArray(req.system)) {
       // Strip scope:global from ALL system blocks — API now rejects it
@@ -148,12 +151,13 @@ function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
     // ── Upgrade all existing message cache markers to 1h TTL ──
     // The SDK sets {type:"ephemeral"} (5m) on the last user message. Upgrade to 1h
     // for consistency and to avoid ttl ordering violations (1h must not follow 5m).
+    // Haiku only supports standard ephemeral (no ttl field), so skip upgrade for it.
     for (const msg of req.messages ?? []) {
       const c = msg.content;
       if (!Array.isArray(c)) continue;
       for (const item of c) {
         const cc = (item as Record<string, unknown>).cache_control as Record<string, unknown> | undefined;
-        if (cc && !cc.ttl) {
+        if (cc && !cc.ttl && !isHaiku) {
           cc.ttl = "1h";
           modified = true;
         }
@@ -191,7 +195,7 @@ function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
         if (Array.isArray(msg.content) && msg.content.length > 0) {
           const lastItem = msg.content[msg.content.length - 1] as Record<string, unknown>;
           if (!lastItem.cache_control) {
-            lastItem.cache_control = { type: "ephemeral", ttl: "1h" };
+            lastItem.cache_control = target1hMarker;
             markerCount++;
             modified = true;
           }
