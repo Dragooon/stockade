@@ -2,6 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { connect as tlsConnect, createSecureContext } from "node:tls";
 import * as net from "node:net";
 import { appendFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ProxyConfig } from "../shared/types.js";
 import { evaluatePolicy } from "../shared/policy.js";
 import { resolveCredential } from "../shared/credentials.js";
@@ -9,16 +11,31 @@ import { stripHeaders, injectCredential, matchRoute } from "./injector.js";
 import { rewriteBody } from "./body-rewriter.js";
 import { ensureCA, generateCert, type CaBundle } from "./tls.js";
 
-const AUDIT_LOG = process.env.STOCKADE_AUDIT_LOG ?? "";
+const META_LOG = join(homedir(), ".stockade", "logs", "cache-meta.ndjson");
 
-function auditWrite(entry: object): void {
-  if (!AUDIT_LOG) return;
-  try { appendFileSync(AUDIT_LOG, JSON.stringify(entry) + "\n"); } catch {}
+function metaWrite(entry: object): void {
+  try { appendFileSync(META_LOG, JSON.stringify(entry) + "\n"); } catch {}
 }
 
-/** Extract usage stats from a streamed SSE response body. */
+/** Extract lightweight request metadata for cache analysis. */
+function extractRequestMeta(body: Buffer): { model: string; msg_count: number; user_turns: number; req_bytes: number } | null {
+  try {
+    const req = JSON.parse(body.toString("utf8")) as { model?: string; messages?: { role: string }[] };
+    const messages = req.messages ?? [];
+    return {
+      model: req.model ?? "unknown",
+      msg_count: messages.length,
+      user_turns: messages.filter((m) => m.role === "user").length,
+      req_bytes: body.length,
+    };
+  } catch { return null; }
+}
+
+/** Extract usage stats from a response body (SSE stream or plain JSON). */
 function extractUsage(body: string): Record<string, number> {
   const usage: Record<string, number> = {};
+
+  // Try SSE stream format first (streaming responses)
   for (const line of body.split("\n")) {
     if (!line.startsWith("data: ")) continue;
     try {
@@ -33,17 +50,44 @@ function extractUsage(body: string): Record<string, number> {
       }
     } catch {}
   }
+
+  // Fall back to plain JSON format (non-streaming responses)
+  if (Object.keys(usage).length === 0) {
+    try {
+      const d = JSON.parse(body) as Record<string, unknown>;
+      const src = d.usage;
+      if (src && typeof src === "object") Object.assign(usage, src);
+    } catch {}
+  }
+
   return usage;
 }
 
 /**
- * Inject cache_control markers into a /v1/messages request body:
- *   - Last system block: { type:"ephemeral", ttl:"1h" } — caches the agent's
- *     platform instructions (block 4) for 1 hour across turns.
- *   - Last user message content: { type:"ephemeral" } — 5-minute cache on the
- *     most recent user turn, useful for tool-call loops and retries.
+ * Normalize user messages and inject cache_control markers.
  *
- * Respects the 4-marker maximum. Skips any block that already has cache_control.
+ * ## SDK cache bug workaround (anthropics/claude-agent-sdk-typescript#269)
+ *
+ * The SDK injects system-reminder blocks into the last user message each turn,
+ * then strips them on replay — changing the format (array[3]→string). Since
+ * Anthropic's caching is byte-exact prefix matching, this breaks the prefix at
+ * the second-to-last user message on every turn.
+ *
+ * Workaround: place a cache breakpoint on the **second-to-last user message**,
+ * which is always in its stable (stripped) form. This anchors the message history
+ * prefix so everything up to that point is cache_read. Only the last user turn
+ * (~1–2K tokens) is cache_create — an acceptable loss vs ~11K without the fix.
+ * This also means cache_read starts from turn 3 instead of turn 4.
+ *
+ * We also normalize all string-content user messages to array format, so the
+ * stable prefix is byte-identical even if the SDK alternates between string and
+ * array representations for historical messages.
+ *
+ * ## Cache markers (up to 4 total, all ttl:1h):
+ *   1. system[2]: SDK sets — proxy strips scope:global and ensures ttl:1h
+ *   2. system[last]: proxy sets ttl:1h — platform instructions
+ *   3. Second-to-last user message: proxy sets ttl:1h — stable history anchor
+ *   4. Last user message: SDK sets — proxy upgrades to ttl:1h
  */
 function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
   if (host !== "api.anthropic.com" || !path.includes("/messages")) return body;
@@ -56,50 +100,99 @@ function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
     let markerCount = 0;
     let modified = false;
 
-    // Count existing cache markers
+    // ── Normalize user messages: string → array[1] ──
+    // Ensures byte-stable prefix regardless of SDK format inconsistencies.
+    for (const msg of req.messages ?? []) {
+      if (msg.role === "user" && typeof msg.content === "string") {
+        (msg as Record<string, unknown>).content = [{ type: "text", text: msg.content }];
+        modified = true;
+      }
+    }
+
+    // Count existing cache markers (after normalization)
     for (const blk of req.system ?? []) if (blk.cache_control) markerCount++;
     for (const msg of req.messages ?? []) {
       const c = msg.content;
       if (Array.isArray(c)) for (const item of c) if ((item as Record<string, unknown>).cache_control) markerCount++;
     }
 
-    // 1h cache on last system block (agent platform instructions).
-    // scope:global enables cross-request persistence but is only valid for Opus-class models.
-    // Haiku supports ttl:1h but not scope:global — using scope:global on Haiku returns 400.
-    // For Opus: upgrade to {ttl:"1h", scope:"global"} for cross-request cache hits.
-    // For Haiku: upgrade SDK's 5m marker to {ttl:"1h"} (no scope) — still persists 1h within
-    //            a session; cross-request persistence relies on prefix-match of system content.
-    const isOpus = (req.model ?? "").includes("opus");
-    const target1hMarker = isOpus
-      ? { type: "ephemeral", ttl: "1h", scope: "global" }
-      : { type: "ephemeral", ttl: "1h" };
+    // ── 1h cache on last system block (agent platform instructions) ──
+    // scope:global was previously supported for Opus but now returns 400
+    // ("Extra inputs are not permitted") — likely depends on beta header version.
+    // Use ttl:1h without scope for all models; cross-request persistence relies
+    // on prefix-match of identical system content (which works for our static blocks).
+    const target1hMarker = { type: "ephemeral", ttl: "1h" };
 
-    if (markerCount < 4 && Array.isArray(req.system) && req.system.length >= 2) {
-      const last = req.system[req.system.length - 1];
-      const cc = last.cache_control as Record<string, unknown> | undefined;
-      const alreadyCorrect = isOpus
-        ? cc?.ttl === "1h" && cc?.scope === "global"
-        : cc?.ttl === "1h" && !cc?.scope;
-      if (!alreadyCorrect) {
-        if (!cc) markerCount++; // new marker; existing markers keep same count
-        last.cache_control = target1hMarker;
-        modified = true;
+    if (Array.isArray(req.system)) {
+      // Strip scope:global from ALL system blocks — API now rejects it
+      for (const blk of req.system) {
+        const cc = blk.cache_control as Record<string, unknown> | undefined;
+        if (cc?.scope) {
+          delete cc.scope;
+          modified = true;
+        }
+      }
+
+      // Upgrade last system block to 1h TTL
+      if (markerCount < 4 && req.system.length >= 2) {
+        const last = req.system[req.system.length - 1];
+        const cc = last.cache_control as Record<string, unknown> | undefined;
+        if (!cc || cc.ttl !== "1h") {
+          if (!cc) markerCount++;
+          last.cache_control = target1hMarker;
+          modified = true;
+        }
       }
     }
 
-    // 5m cache on last user message
+    // ── Upgrade all existing message cache markers to 1h TTL ──
+    // The SDK sets {type:"ephemeral"} (5m) on the last user message. Upgrade to 1h
+    // for consistency and to avoid ttl ordering violations (1h must not follow 5m).
+    for (const msg of req.messages ?? []) {
+      const c = msg.content;
+      if (!Array.isArray(c)) continue;
+      for (const item of c) {
+        const cc = (item as Record<string, unknown>).cache_control as Record<string, unknown> | undefined;
+        if (cc && !cc.ttl) {
+          cc.ttl = "1h";
+          modified = true;
+        }
+        // Also strip scope:global from message markers
+        if (cc?.scope) {
+          delete cc.scope;
+          modified = true;
+        }
+      }
+    }
+
+    // ── Cache breakpoint on second-to-last user message (stable history anchor) ──
+    //
+    // The SDK injects system-reminders into the LAST user message as array blocks,
+    // then strips them when replaying that message as history (SDK bug #269). This
+    // makes the last user message's content unstable across turns.
+    //
+    // The SECOND-to-last user message was the last message one turn ago. By now,
+    // the SDK has already stripped its system-reminders and our proxy has normalized
+    // it to array[1] format. That normalized form is what gets written to cache this
+    // turn — and it's stable: next turn the SDK sends it as a plain string, we
+    // normalize it to the same array[1], and cache_read hits.
+    //
+    // Placing the anchor here instead of third-to-last:
+    //   - Enables cache_read from turn 3 (vs turn 4 with third-to-last)
+    //   - Covers 1 extra turn of history per request in cache_read
+    //   - Works even for short 2–3 turn conversations
     if (markerCount < 4 && Array.isArray(req.messages)) {
+      let userMsgCount = 0;
       for (let i = req.messages.length - 1; i >= 0; i--) {
         const msg = req.messages[i];
         if (msg.role !== "user") continue;
-        if (typeof msg.content === "string") {
-          // Convert string content to array so we can attach cache_control
-          (msg as Record<string, unknown>).content = [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }];
-          modified = true;
-        } else if (Array.isArray(msg.content) && msg.content.length > 0) {
+        userMsgCount++;
+        if (userMsgCount < 2) continue; // skip only the last user message (unstable zone)
+        if (Array.isArray(msg.content) && msg.content.length > 0) {
           const lastItem = msg.content[msg.content.length - 1] as Record<string, unknown>;
           if (!lastItem.cache_control) {
-            lastItem.cache_control = { type: "ephemeral" };
+            lastItem.cache_control = { type: "ephemeral", ttl: "1h" };
+            markerCount++;
             modified = true;
           }
         }
@@ -331,6 +424,15 @@ async function handleMitmRequest(
   delete headers.host;
   delete headers["accept-encoding"]; // Don't request compression — we serve decompressed
 
+  // Extract and strip Stockade context headers (injected by Claude Code via
+  // ANTHROPIC_CUSTOM_HEADERS; must never reach Anthropic's servers)
+  const stockadeSession = (headers["x-stockade-session"] ?? "") as string;
+  const stockadeAgent   = (headers["x-stockade-agent"]   ?? "") as string;
+  const stockadeScope   = (headers["x-stockade-scope"]   ?? "") as string;
+  delete headers["x-stockade-session"];
+  delete headers["x-stockade-agent"];
+  delete headers["x-stockade-scope"];
+
   // Credential injection: only strip auth headers when a route matches
   // (the proxy will inject its own credential). For non-matched routes,
   // pass existing auth headers through so apps like gogcli can use
@@ -370,13 +472,10 @@ async function handleMitmRequest(
     }
   }
 
-  // Audit log: full request payload
-  const isMessages = host === "api.anthropic.com" && path.includes("/messages") && AUDIT_LOG;
-  if (isMessages && method !== "GET" && method !== "HEAD" && body.length > 0) {
-    try {
-      auditWrite({ ts: new Date().toISOString(), type: "request", host, path, body: JSON.parse(body.toString("utf8")) });
-    } catch {}
-  }
+  // Metadata: capture request info for cache analysis
+  const isMessages = host === "api.anthropic.com" && path.includes("/messages")
+    && method !== "GET" && method !== "HEAD" && body.length > 0;
+  const requestMeta = isMessages ? extractRequestMeta(body) : null;
 
   // Forward to upstream
   const scheme = port === 443 ? "https" : "http";
@@ -404,7 +503,7 @@ async function handleMitmRequest(
 
   res.writeHead(response.status, responseHeaders);
 
-  // Stream response, accumulating for audit log
+  // Stream response, accumulating chunks for usage extraction on messages requests
   const responseChunks: Buffer[] = [];
   if (response.body) {
     const reader = response.body.getReader();
@@ -417,10 +516,29 @@ async function handleMitmRequest(
   }
   res.end();
 
-  // Audit log: usage stats from response
-  if (isMessages && responseChunks.length > 0) {
-    const responseText = Buffer.concat(responseChunks).toString("utf8");
-    auditWrite({ ts: new Date().toISOString(), type: "response", host, path, usage: extractUsage(responseText) });
+  // Metadata log: one entry per messages API call with request + usage stats
+  if (isMessages && requestMeta && responseChunks.length > 0) {
+    const usage = extractUsage(Buffer.concat(responseChunks).toString("utf8"));
+    const inputTokens = (usage.input_tokens ?? 0) as number;
+    const cacheRead = (usage.cache_read_input_tokens ?? 0) as number;
+    const cacheCreate = (usage.cache_creation_input_tokens ?? 0) as number;
+    const totalInput = inputTokens + cacheRead;
+    metaWrite({
+      ts: new Date().toISOString(),
+      ...(stockadeSession && { session: stockadeSession }),
+      ...(stockadeAgent   && { agent:   stockadeAgent }),
+      ...(stockadeScope   && { scope:   stockadeScope }),
+      model: requestMeta.model,
+      user_turns: requestMeta.user_turns,
+      msg_count: requestMeta.msg_count,
+      req_bytes: requestMeta.req_bytes,
+      latency_ms: Date.now() - upstreamStart,
+      input_tokens: inputTokens,
+      output_tokens: usage.output_tokens ?? 0,
+      cache_read: cacheRead,
+      cache_create: cacheCreate,
+      cache_read_pct: totalInput > 0 ? Math.round(cacheRead / totalInput * 100) : 0,
+    });
   }
 }
 

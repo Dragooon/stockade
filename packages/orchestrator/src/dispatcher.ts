@@ -1,5 +1,24 @@
-import { join } from "node:path";
+/**
+ * Unified agent dispatcher — all agents run as HTTP worker servers.
+ *
+ * dispatchToWorker():
+ *   1. Gets (or starts) the worker via WorkerManager
+ *   2. Generates a callback token and registers a SessionContext
+ *   3. POSTs /sessions to the worker (with cwd, env, callback URL, RBAC token)
+ *   4. SSE-subscribes to /sessions/:id/events
+ *   5. Handles stale-session retry (re-posts without sessionId)
+ *   6. Returns DispatchResult on terminal event
+ *   7. Cleans up (DELETE session, revoke proxy token, remove session context)
+ *
+ * The orchestrator callback server (port 7420) handles inbound calls from workers:
+ *   - PreToolUse permission checks
+ *   - Agent start / stop / message (sub-agent MCP)
+ */
+
+import { join, resolve } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
 import type {
   AgentConfig,
   AgentsConfig,
@@ -9,91 +28,118 @@ import type {
   DispatchResult,
   PlatformConfig,
 } from "./types.js";
-import type { CanUseToolResult, PreToolUseHookOutput } from "./rbac.js";
-import { checkAccess, buildPermissionHook, buildPreToolUseHook } from "./rbac.js";
-import { resolveEffectivePermissions } from "./gatekeeper.js";
-import type { ContainerManager } from "./containers/manager.js";
+import type { WorkerManager } from "./workers/index.js";
+import {
+  createCallbackSession,
+  deleteCallbackSession,
+  type CallbackSession,
+} from "./api/sessions.js";
+
+// ── Worker protocol types (mirrored from packages/worker/src/types.ts) ──
+
+interface WorkerSessionRequest {
+  prompt: string;
+  systemPrompt?: string | { type: "preset"; preset: "claude_code"; append: string };
+  tools?: string[];
+  disallowedTools?: string[];
+  model?: string;
+  sessionId?: string;
+  forceNewSession?: boolean;
+  maxTurns?: number;
+  effort?: string;
+  scope?: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  orchestratorUrl: string;
+  callbackToken: string;
+  sdkSettings?: Record<string, unknown>;
+}
+
+type WorkerEvent =
+  | { type: "started"; sessionId: string }
+  | { type: "turn"; turns: number; input: number; output: number; cacheRead: number; cacheCreate: number }
+  | { type: "tool_start"; name: string }
+  | { type: "tool_end"; name: string; elapsedMs: number }
+  | { type: "result"; text: string; sessionId: string; stopReason: string }
+  | { type: "error"; message: string }
+  | { type: "stale_session" };
+
+// ── Dispatch log ──
+import { appendLog } from "./log.js";
+const LOG_DIR = join(homedir(), ".stockade", "logs");
+const LOG_FILE = join(LOG_DIR, "dispatch.log");
+mkdirSync(LOG_DIR, { recursive: true });
+
+function dispatchLog(message: string): void {
+  console.log(message);
+  appendLog(LOG_FILE, message);
+}
 
 /**
- * Context needed for sub-agent dispatch — carries the full agent registry,
- * platform config, and the original caller's identity so RBAC applies
- * through the entire chain.
+ * Context needed for agent dispatch.
  */
 export interface DispatchContext {
   allAgents: AgentsConfig;
   platform: PlatformConfig;
-  /** Original caller's userId (for RBAC on sub-agents) */
   userId: string;
-  /** Original caller's platform (for RBAC on sub-agents) */
   userPlatform: string;
-  /** Root directory for per-agent workspaces (data/agents/) */
-  agentsDir?: string;
-  /** Platform root directory (~/.stockade) — for `/` prefix in permission rules */
+  agentsDir: string;
   platformRoot?: string;
-  /** HITL approval callback — threaded from the originating channel so
-   *  approval requests reach the user who sent the message. */
   askApproval?: AskApprovalFn;
-  /** Container manager — threaded so sub-agent dispatch can start containers */
-  containerManager?: ContainerManager;
-  /** Credential proxy config — when set, both local and sandboxed agents
-   *  can route through the proxy for credential injection. */
+  workerManager: WorkerManager;
   proxy?: {
     gatewayUrl: string;
     host: string;
     caCertPath: string;
   };
+  /** Orchestrator callback server URL (e.g., "http://localhost:7420") */
+  orchestratorCallbackUrl: string;
+  /** For inline sub-agents: parent agent's cwd */
+  parentCwd?: string;
+  /**
+   * For self-spawn sub-agents: force parent cwd regardless of agentConfig.inline.
+   * Unlike config-inline (which suppresses settings), self-spawns load memory and CLAUDE.md.
+   */
+  forceParentCwd?: boolean;
+  /** For background sub-agent completion injection */
+  parentWorkerSessionId?: string;
+  parentWorkerUrl?: string;
+  /** runId for the current sub-agent dispatch (set by agent-mcp handler) */
+  parentRunId?: string;
+  /** Whether the platform scheduler is enabled (injects scheduler instructions) */
+  schedulerEnabled?: boolean;
 }
 
 /**
- * Dispatch a message to an agent — either in-process via Agent SDK query(),
- * or via HTTP POST to a sandboxed worker container.
- *
- * If a containerManager is provided and the agent is sandboxed, the manager
- * ensures a container is running before dispatching.
- */
-export async function dispatch(
-  agentId: string,
-  message: ChannelMessage,
-  agentConfig: AgentConfig,
-  sessionId: string | null,
-  permissionHook?: (
-    tool: string,
-    input: Record<string, unknown>
-  ) => Promise<CanUseToolResult>,
-  context?: DispatchContext,
-  containerManager?: ContainerManager
-): Promise<DispatchResult> {
-  if (agentConfig.sandboxed) {
-    // If container manager is available, ensure a container is running
-    if (containerManager) {
-      const url = await containerManager.ensure(
-        agentId,
-        agentConfig,
-        message.scope
-      );
-      return dispatchRemote({ ...agentConfig, url }, agentId, message, sessionId, context?.agentsDir);
-    }
-    return dispatchRemote(agentConfig, agentId, message, sessionId, context?.agentsDir);
-  }
-  return dispatchLocal(agentId, agentConfig, message, sessionId, permissionHook, context);
-}
-
-/**
- * Build platform-injected instructions based on the agent's runtime context.
- * These are operational docs the agent needs to function on the platform —
- * credential proxy usage, available env vars, etc. Kept separate from
- * user-authored system prompts and CLAUDE.md identity.
+ * Build platform-injected instructions for the system prompt.
  */
 function buildPlatformInstructions(
   agentConfig: AgentConfig,
   hasProxy: boolean,
+  allAgents?: AgentsConfig,
+  schedulerEnabled = false,
 ): string {
   const sections: string[] = [];
+
+  // Inject sub-agent roster when this agent has a subagents list
+  if (agentConfig.subagents?.length && allAgents) {
+    const lines = agentConfig.subagents.map((id) => {
+      const sub = allAgents.agents[id];
+      if (!sub) return `- **${id}**`;
+      const tag = sub.sandboxed ? "sandboxed" : sub.inline ? "inline" : "host";
+      const desc = sub.description ? ` — ${sub.description}` : "";
+      return `- **${id}**${desc} [${tag}]`;
+    });
+    lines.push(`- **self-spawn** (omit \`agentId\`) — Parallel copy of this agent in the same workspace with full memory loaded [host]`);
+    sections.push(
+      `## Available Sub-Agents (platform-injected)\n\nInvoke via \`mcp__agent__start\`:\n\n${lines.join("\n")}`,
+    );
+  }
 
   if (hasProxy && agentConfig.credentials?.length) {
     sections.push(`## Credential Proxy (platform-injected)
 
-Your traffic is routed through the Stockade credential proxy. It handles API
+Your outbound traffic is routed through a credential proxy. It handles API
 key injection automatically — you never see raw credentials.
 
 - **Header injection (automatic):** Outbound HTTPS requests to configured hosts
@@ -122,275 +168,284 @@ You run in a sandboxed container. Only hosts in the proxy's network policy allow
 are reachable. If a request is blocked, ask the parent agent if access is needed.`);
   }
 
+  if (schedulerEnabled) {
+    sections.push(`## Scheduler (platform-injected)
+
+You can manage scheduled tasks that run prompts automatically on a recurring or one-shot basis.
+Results are delivered back to the channel where the task was created.
+
+Tools:
+- \`mcp__scheduler__list\` — list all scheduled tasks (id, prompt, schedule, status, next_run)
+- \`mcp__scheduler__create\` — create a task. Params: \`prompt\`, \`schedule_type\` (interval|cron|once), \`schedule_value\` (ms for interval, cron expression, or ISO datetime), \`context_mode\` (optional, default: isolated)
+- \`mcp__scheduler__update\` — pause or resume a task. Params: \`taskId\`, \`status\` (active|paused)
+- \`mcp__scheduler__delete\` — permanently delete a task. Params: \`taskId\`
+
+Schedule types:
+- \`interval\`: repeat every N milliseconds (e.g. \`120000\` = every 2 min)
+- \`cron\`: cron expression (e.g. \`0 9 * * *\` = daily at 9 AM)
+- \`once\`: ISO datetime for a one-shot run (e.g. \`2026-04-06T09:00:00Z\`)`);
+  }
+
   return sections.join("\n\n");
 }
 
 /**
- * Build the system prompt based on agent config and system_mode.
+ * Build the system prompt for an agent.
  *
- * Combines the user-authored system prompt (from config.yaml) with
- * platform-injected instructions (credential proxy, network policy, etc.).
+ * - "replace" mode (default): returns a plain string
+ * - "append" mode: returns a SDK preset object that keeps the Claude Code prompt
  *
- * - "replace": returns combined prompt as a plain string (SDK replaces its default)
- * - "append": returns a preset object that keeps the SDK's Claude Code prompt and appends
- *
- * User identity and preferences live in CLAUDE.md in the agent's workspace directory,
- * loaded automatically by Claude Code via settingSources: ["project"].
+ * Use config-based hasProxy (not runtime token check) so the prompt is stable
+ * across dispatches — a flaky proxy timeout must not change the cache prefix.
  */
 export function buildSystemPrompt(
   agentConfig: AgentConfig,
   hasProxy = false,
+  allAgents?: AgentsConfig,
+  schedulerEnabled = false,
 ): string | { type: "preset"; preset: "claude_code"; append: string } | undefined {
-  const platformInstructions = buildPlatformInstructions(agentConfig, hasProxy);
-  const userSystem = agentConfig.system;
-
-  // Combine user system prompt + platform instructions
-  const combined = [userSystem, platformInstructions].filter(Boolean).join("\n\n");
+  const platform = buildPlatformInstructions(agentConfig, hasProxy, allAgents, schedulerEnabled);
+  const user = agentConfig.system;
+  const combined = [user, platform].filter(Boolean).join("\n\n");
   if (!combined) return undefined;
 
   const mode = agentConfig.system_mode ?? "replace";
-
   if (mode === "append") {
     return { type: "preset" as const, preset: "claude_code" as const, append: combined };
   }
-
-  // replace mode — plain string
   return combined;
 }
 
 /**
  * Tools that must never be available to agents.
- * - Agent: bypasses our orchestration (RBAC, session, dispatch queue).
- *   Delegation must go through mcp__orchestrator__ask_agent.
- * - WebSearch: disabled platform-wide. Agents use Tavily via proxy instead.
+ * The "Agent" tool is replaced by our mcp__agent__* suite.
  */
-export const PLATFORM_DISALLOWED_TOOLS = ["Agent", "WebSearch"];
-
-/**
- * Deny rules that prevent agents from modifying their own configuration.
- *
- * Since we set `settingSources: ["project"]`, Claude Code loads settings and
- * CLAUDE.md from the agent's cwd. If the agent writes to `.claude/` or
- * CLAUDE.md, those changes take effect on the next query() call — effectively
- * allowing the agent to rewrite its own permissions, hooks, instructions,
- * or MCP servers.
- *
- * These deny rules are injected at the highest-priority settings layer
- * and override even bypassPermissions mode.
- */
-export const SELF_MODIFICATION_DENY_RULES = [
-  // Block all writes to .claude/ — settings, MCP config, skills, agents, rules
-  "Write(.claude/**)",
-  "Edit(.claude/**)",
+export const PLATFORM_DISALLOWED_TOOLS = [
+  "Agent",
+  "WebSearch",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
+  "NotebookEdit",
+  "SendMessage",
+  "TeamDelete",
+  "AskUserQuestion",
 ];
 
 /**
- * Build the SDK `settings` object for an agent.
- * Controls memory, permissions, and prevents agents from modifying their
- * own configuration or instructions.
+ * Deny rules that prevent agents from modifying their own configuration.
+ */
+export const SELF_MODIFICATION_DENY_RULES = [
+  "Write(.claude/settings*)",
+  "Write(.claude/agents/**)",
+  "Write(.claude/mcp*)",
+  "Write(.claude/rules/**)",
+  "Edit(.claude/settings*)",
+  "Edit(.claude/agents/**)",
+  "Edit(.claude/mcp*)",
+  "Edit(.claude/rules/**)",
+];
+
+/**
+ * Build SDK settings object for an agent.
+ *
+ * @param agentConfig  Agent configuration
+ * @param agentId      Agent ID (for logs)
+ * @param memoryDir    Resolved memory directory as seen inside the worker
  */
 export function buildSdkSettings(
   agentConfig: AgentConfig,
   agentId: string,
-  agentsDir?: string
+  memoryDir?: string,
+  inline = false,
 ): Record<string, unknown> {
-  const memoryDir = agentsDir
-    ? join(agentsDir, agentId, "memory")
-    : undefined;
-
-  const memoryEnabled = agentConfig.memory?.enabled ?? true;
+  const memoryEnabled = !inline && (agentConfig.memory?.enabled ?? true);
 
   return {
     autoMemoryEnabled: memoryEnabled,
-    ...(memoryDir ? { autoMemoryDirectory: memoryDir } : {}),
-    autoDreamEnabled: agentConfig.memory?.autoDream ?? false,
+    ...(memoryEnabled && memoryDir ? { autoMemoryDirectory: memoryDir } : {}),
+    autoDreamEnabled: !inline && (agentConfig.memory?.autoDream ?? false),
+    // Inline agents share a parent's workspace but must not load that workspace's
+    // project config (CLAUDE.md, settings, skills) — they're programmatically defined.
+    // Non-inline agents load only project-level settings (no user-global bleed).
+    settingSources: inline ? [] : ["project"],
     permissions: {
       deny: [
-        // Prevent Agent tool (bypasses our orchestration)
         "Agent",
-        // Prevent self-modification of settings, instructions, MCP config
         ...SELF_MODIFICATION_DENY_RULES,
       ],
     },
   };
 }
 
-/** Image MIME types the Anthropic API accepts as multimodal content blocks. */
-const IMAGE_MIME_TYPES = new Set([
-  "image/png", "image/jpeg", "image/gif", "image/webp",
-]);
+/** Image MIME types accepted by the Anthropic API for inline content blocks. */
+const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 /**
- * Save attachments to the agent's workspace and return the saved paths.
- * Files are written to `<agentCwd>/tmp/attachments/<timestamp>/`.
- * Returns both host paths and container paths (for sandboxed agents).
+ * Save attachments to the agent's host workspace.
+ * Returns host paths. Caller converts to container paths if needed.
  */
-function saveAttachmentsToDisk(
-  attachments: ChannelAttachment[],
-  agentCwd: string,
-): string[] {
+function saveAttachmentsToDisk(attachments: ChannelAttachment[], agentCwd: string): string[] {
   const ts = Date.now();
   const dir = join(agentCwd, "tmp", "attachments", String(ts));
   mkdirSync(dir, { recursive: true });
 
-  const paths: string[] = [];
-  for (const att of attachments) {
-    // Sanitize filename — strip path separators to prevent traversal
+  return attachments.map((att) => {
     const safeName = att.filename.replace(/[/\\]/g, "_");
     const filePath = join(dir, safeName);
     writeFileSync(filePath, Buffer.from(att.data, "base64"));
-    paths.push(filePath);
-  }
-  return paths;
+    return filePath;
+  });
 }
 
 /**
- * Build a prompt from text + attachments for Agent SDK query().
- *
- * - All attachments are saved to disk first (paths in savedPaths)
- * - Image attachments additionally get base64 content blocks for multimodal vision
- * - The prompt text is extended with the file listing so the agent knows where to find them
- * - Returns plain string when there are no image attachments (fast path)
+ * Build a prompt string that references saved attachment files.
+ * All files are saved to disk; text is extended with a file listing.
  */
 function buildPromptWithAttachments(
   text: string,
   attachments: ChannelAttachment[],
   savedPaths: string[],
-  sessionId: string | null,
-): string | AsyncIterable<{ type: "user"; message: unknown; parent_tool_use_id: null; session_id: string }> {
-  // Build file listing for the prompt
-  const fileLines = savedPaths.map((p, i) => `- ${p} (${attachments[i].contentType}, ${attachments[i].size} bytes)`);
-  const fileListing = fileLines.length > 0
-    ? `\n\nAttached files saved to your workspace:\n${fileLines.join("\n")}\n\nYou can read, analyze, or process these files using your tools (Read, Bash, etc.).`
-    : "";
-
-  // Collect image blocks for multimodal inline display
-  const imageBlocks: unknown[] = [];
-  for (const att of attachments) {
-    if (IMAGE_MIME_TYPES.has(att.contentType)) {
-      imageBlocks.push({
-        type: "image",
-        source: {
-          type: "base64",
-          media_type: att.contentType,
-          data: att.data,
-        },
-      });
-    }
-  }
-
-  // No images → plain string prompt with file listing
-  if (imageBlocks.length === 0) {
-    return text + fileListing;
-  }
-
-  // Images present → wrap in AsyncIterable<SDKUserMessage> for multimodal
-  const content: unknown[] = [
-    ...imageBlocks,
-    { type: "text", text: text + fileListing },
-  ];
-
-  const userMessage = {
-    type: "user" as const,
-    message: { role: "user" as const, content },
-    parent_tool_use_id: null,
-    session_id: sessionId ?? "",
-  };
-
-  return (async function* () {
-    yield userMessage;
-  })();
+): string {
+  const fileLines = savedPaths.map(
+    (p, i) => `- ${p} (${attachments[i].contentType}, ${attachments[i].size} bytes)`,
+  );
+  if (fileLines.length === 0) return text;
+  return (
+    text +
+    `\n\nAttached files saved to your workspace:\n${fileLines.join("\n")}\n\n` +
+    `You can read, analyze, or process these files using your tools (Read, Bash, etc.).`
+  );
 }
 
+// ── SSE stream reader ──
+
 /**
- * In-process dispatch using Agent SDK query().
+ * Subscribe to a worker's SSE event stream and return the first terminal event.
+ * Logs intermediate events (turn, tool_start, tool_end) as they arrive.
  */
-async function dispatchLocal(
+async function subscribeToEvents(
+  workerUrl: string,
+  workerSessionId: string,
   agentId: string,
-  agentConfig: AgentConfig,
-  message: ChannelMessage,
-  sessionId: string | null,
-  permissionHook?: (
-    tool: string,
-    input: Record<string, unknown>
-  ) => Promise<CanUseToolResult>,
-  context?: DispatchContext
-): Promise<DispatchResult> {
-  // Dynamic import to allow mocking in tests
-  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  timeoutMs: number,
+): Promise<WorkerEvent & { type: "result" | "error" | "stale_session" }> {
+  const res = await fetch(`${workerUrl}/sessions/${workerSessionId}/events`, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
 
-  let resultText = "";
-  let resultSessionId = "";
-
-  // Use `tools` to restrict which built-in tools are available to the agent.
-  // NOTE: `allowedTools` auto-approves tools WITHOUT calling canUseTool — never use it.
-  // Always strip Agent from explicit tool lists — delegation goes through ask_agent.
-  const agentTools = agentConfig.tools
-    ? agentConfig.tools.filter((t) => t !== "Agent")
-    : undefined;
-
-  const options: Record<string, unknown> = {
-    model: agentConfig.model,
-    maxTurns: 20,
-
-    // ── Isolation: only load project-level settings/CLAUDE.md from agent cwd ──
-    // Skips 'user' (no global settings bleed) and 'local' (no local overrides).
-    settingSources: ["project"],
-
-    // ── Permissions: PreToolUse hook is our sole gatekeeper ──
-    // "acceptEdits" auto-approves file operations at the SDK level, but our
-    // PreToolUse hook runs FIRST (step 1 in the permission chain) and handles
-    // all allow/deny/ask decisions before the SDK's built-in logic.
-    // This avoids interactive prompts that would hang in headless mode.
-    permissionMode: "acceptEdits" as const,
-
-    // ── Hard deny: Agent tool removed from model context entirely ──
-    disallowedTools: PLATFORM_DISALLOWED_TOOLS,
-
-    // ── Settings: inject memory config + deny Agent at settings level ──
-    settings: buildSdkSettings(agentConfig, agentId, context?.agentsDir),
-  };
-
-  // Effort level
-  if (agentConfig.effort) {
-    options.effort = agentConfig.effort;
+  if (!res.ok || !res.body) {
+    throw new Error(`SSE connection failed: ${res.status}`);
   }
 
-  // Set agent's working directory
-  if (context?.agentsDir) {
-    options.cwd = join(context.agentsDir, agentId);
-  }
+  const reader = (res.body as any).getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let turns = 0;
 
-  // If agent has subagents and we have context, build the MCP server
-  if (agentConfig.subagents?.length && context) {
-    const mcpServer = await buildSubagentMcpServer(context);
-    options.mcpServers = { orchestrator: mcpServer };
-    if (agentTools) {
-      agentTools.push("mcp__orchestrator__ask_agent");
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const event = JSON.parse(line.slice(6)) as WorkerEvent;
+
+        if (event.type === "turn") {
+          turns++;
+          const parts = [`${event.input}in/${event.output}out`];
+          if (event.cacheRead > 0) parts.push(`cache_read:${event.cacheRead}`);
+          if (event.cacheCreate > 0) parts.push(`cache_create:${event.cacheCreate}`);
+          dispatchLog(`[dispatch] ${agentId} turn ${turns}: ${parts.join(" ")}`);
+        } else if (event.type === "tool_start") {
+          dispatchLog(`[dispatch] ${agentId} tool: ${event.name}`);
+        } else if (event.type === "tool_end") {
+          dispatchLog(`[dispatch] ${agentId} tool done: ${event.elapsedMs}ms`);
+        }
+
+        if (event.type === "result" || event.type === "error" || event.type === "stale_session") {
+          return event as WorkerEvent & { type: "result" | "error" | "stale_session" };
+        }
+      }
     }
+  } finally {
+    reader.cancel().catch(() => {});
   }
 
-  // Use `tools` (not `allowedTools`) to restrict available tools.
-  // `tools` controls availability; `canUseTool` controls permissions.
-  if (agentTools) {
-    options.tools = agentTools;
-  }
+  throw new Error("SSE stream ended without terminal event");
+}
 
-  if (sessionId) {
-    options.resume = sessionId;
-  }
+// ── Sub-agent session cache (persists within process) ──
+const subagentSessions = new Map<string, string>();
 
-  // ── Credential proxy: route all agents with credentials through proxy ──
-  // The proxy handles credential injection (Anthropic, Tavily, GitHub, etc.)
-  // for both local and sandboxed agents. OAuth tokens use cache_ttl: 0 in
-  // the proxy config to avoid serving stale tokens after CLI refresh.
+/**
+ * Dispatch a message to an agent via its worker.
+ *
+ * This is the single dispatch path — all agents go through workers.
+ * For sandboxed agents, the WorkerManager starts/manages Docker containers.
+ * For host agents, the WorkerManager manages child processes.
+ */
+export async function dispatchToWorker(
+  agentId: string,
+  message: ChannelMessage,
+  agentConfig: AgentConfig,
+  sessionId: string | null,
+  context: DispatchContext,
+  permissionHook?: (tool: string, input: Record<string, unknown>) => Promise<unknown>,
+): Promise<DispatchResult> {
+  void permissionHook; // unused — RBAC goes through the HTTP callback now
+
+  const dispatchStart = Date.now();
+  const preview = message.content.slice(0, 80).replace(/\n/g, " ");
+  dispatchLog(`[dispatch] → ${agentId} | user=${context.userId} scope=${message.scope.slice(0, 40)} | "${preview}${message.content.length > 80 ? "…" : ""}"`);
+
+  // Determine agent cwd (inline agents share parent workspace)
+  // forceParentCwd = self-spawn: uses parent cwd but still loads settings/memory
+  const isInline = (agentConfig.inline || context.forceParentCwd) && context.parentCwd;
+  const hostAgentCwd = isInline
+    ? context.parentCwd!
+    : resolve(context.agentsDir, agentId);
+
+  // cwd as seen inside the worker (Docker: /workspace, host: absolute path)
+  const workerCwd = agentConfig.sandboxed ? "/workspace" : hostAgentCwd;
+
+  // ── Step 1: Ensure the worker is running ──
+  const workerUrl = await context.workerManager.ensure(agentId, agentConfig, message.scope);
+
+  // ── Step 2: Build callback token & register session ──
+  const callbackToken = randomUUID();
+  const sessionCtx: CallbackSession = {
+    callbackToken,
+    agentId,
+    scope: message.scope,
+    userId: context.userId,
+    userPlatform: context.userPlatform,
+    agentConfig,
+    agentCwd: workerCwd,
+    platformRoot: context.platformRoot ?? join(homedir(), ".stockade"),
+    askApproval: context.askApproval,
+    platformConfig: context.platform,
+    allAgents: context.allAgents,
+    agentsDir: context.agentsDir,
+    workerUrl,
+  };
+  createCallbackSession(callbackToken, sessionCtx);
+
+  // ── Step 3: Fetch proxy token & build env (if applicable) ──
   let proxyToken: string | undefined;
-  if (context?.proxy && agentConfig.credentials?.length) {
+  let workerEnv: Record<string, string> | undefined;
+
+  if (context.proxy && agentConfig.credentials?.length) {
     try {
       const tokenRes = await fetch(`${context.proxy.gatewayUrl}/token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(3_000),
         body: JSON.stringify({
           agentId,
           credentials: agentConfig.credentials,
@@ -398,13 +453,13 @@ async function dispatchLocal(
         }),
       });
       if (tokenRes.ok) {
-        const data = (await tokenRes.json()) as { token: string; expiresAt: number };
+        const data = (await tokenRes.json()) as { token: string };
         proxyToken = data.token;
-        options.env = {
-          ...process.env,
+        const sid = sessionId ?? "";
+        workerEnv = {
           HTTP_PROXY: `http://${context.proxy.host}:10255`,
           HTTPS_PROXY: `http://${context.proxy.host}:10255`,
-          NO_PROXY: "localhost,127.0.0.1",
+          NO_PROXY: "localhost,127.0.0.1,host.docker.internal",
           NODE_EXTRA_CA_CERTS: context.proxy.caCertPath,
           CURL_CA_BUNDLE: context.proxy.caCertPath,
           REQUESTS_CA_BUNDLE: context.proxy.caCertPath,
@@ -413,328 +468,166 @@ async function dispatchLocal(
           APW_GATEWAY: context.proxy.gatewayUrl,
           APW_TOKEN: data.token,
           PYTHONIOENCODING: "utf-8",
+          // Stockade context headers — injected via Claude Code's custom-headers
+          // mechanism so the proxy can tag each API call with session/agent/scope.
+          // The proxy strips these before forwarding to Anthropic.
+          ANTHROPIC_CUSTOM_HEADERS: [
+            `X-Stockade-Session: ${sid}`,
+            `X-Stockade-Agent: ${agentId}`,
+            `X-Stockade-Scope: ${message.scope ?? ""}`,
+          ].join("\n"),
         };
 
-        // Resolve credential env vars for CLI tools (e.g. tavily CLI)
-        // These map credential keys to the env vars that CLI tools expect.
+        // Resolve credential env vars for CLI tools (e.g. tavily)
         const credentialEnvMap: Record<string, string> = {
           "tavily-api-key": "TAVILY_API_KEY",
         };
-        const envMap = options.env as Record<string, string>;
-        for (const credKey of agentConfig.credentials ?? []) {
+        for (const credKey of agentConfig.credentials) {
           const envVar = credentialEnvMap[credKey];
-          if (envVar && !envMap[envVar]) {
+          if (envVar && !workerEnv[envVar]) {
             try {
-              const refRes = await fetch(
-                `${context.proxy.gatewayUrl}/gateway/reveal/${credKey}`,
-                {
-                  headers: { Authorization: `Bearer ${data.token}` },
-                  signal: AbortSignal.timeout(5000),
-                },
-              );
+              const refRes = await fetch(`${context.proxy.gatewayUrl}/gateway/reveal/${credKey}`, {
+                headers: { Authorization: `Bearer ${data.token}` },
+                signal: AbortSignal.timeout(5_000),
+              });
               if (refRes.ok) {
                 const refData = (await refRes.json()) as { value: string };
-                envMap[envVar] = refData.value;
+                workerEnv[envVar] = refData.value;
               }
-            } catch {
-              // Non-fatal — CLI tool will fail but proxy injection still works
-            }
+            } catch { /* non-fatal */ }
           }
         }
       }
-    } catch {
-      // Proxy not running — continue without credential injection
-    }
+    } catch { /* proxy not running — continue without credential injection */ }
   }
 
-  // Build system prompt with platform instructions (credential proxy docs, etc.)
-  const systemPrompt = buildSystemPrompt(agentConfig, !!proxyToken);
-  if (systemPrompt) {
-    options.systemPrompt = systemPrompt;
+  // For inline agents, override AGENT_WORKSPACE so the persistent worker's
+  // default workspace env doesn't bleed into the SDK subprocess.
+  if (isInline) {
+    workerEnv = { ...workerEnv, AGENT_WORKSPACE: hostAgentCwd };
   }
 
-  // ── PreToolUse hook: our RBAC runs at step 1 in the SDK permission chain ──
-  // Unlike canUseTool (step 5, skipped when built-in logic auto-approves),
-  // PreToolUse hooks run FIRST — every tool invocation passes through our RBAC.
-  if (permissionHook) {
-    options.hooks = {
-      PreToolUse: [{
-        hooks: [async (hookInput: Record<string, unknown>) => {
-          const toolName = String(hookInput.tool_name);
-          const hookStart = Date.now();
-          const result = await permissionHook(
-            toolName,
-            (hookInput.tool_input ?? {}) as Record<string, unknown>,
-          );
-          const hookMs = Date.now() - hookStart;
-          // Translate canUseTool result → PreToolUse hook output
-          if (result.behavior === "deny") {
-            console.log(`[tool] ${agentId} denied "${toolName}" (${(hookMs / 1000).toFixed(1)}s)`);
-            return {
-              hookSpecificOutput: {
-                hookEventName: "PreToolUse",
-                permissionDecision: "deny",
-                permissionDecisionReason: result.message ?? "Denied by RBAC",
-              },
-            };
-          }
-          console.log(`[tool] ${agentId} allow "${toolName}" (${(hookMs / 1000).toFixed(1)}s)`);
-          return {
-            hookSpecificOutput: {
-              hookEventName: "PreToolUse",
-              permissionDecision: "allow",
-              updatedInput: result.updatedInput,
-            },
-          };
-        }],
-      }],
-    };
-  }
+  // ── Step 4: Build system prompt and SDK settings ──
+  const hasProxyConfig = !!(context.proxy && agentConfig.credentials?.length);
+  const systemPrompt = buildSystemPrompt(agentConfig, hasProxyConfig, context.allAgents, context.schedulerEnabled);
+  const memoryDir = context.workerManager.resolveMemoryPath(agentId, agentConfig);
+  // Config-inline suppresses settings (settingSources: []); self-spawn loads them normally.
+  // agentConfig.inline && !!isInline → true only for config-inline, not self-spawn.
+  const sdkSettings = buildSdkSettings(agentConfig, agentId, memoryDir, agentConfig.inline && !!isInline);
 
-  // Save attachments to the agent's workspace and build prompt
-  let prompt: unknown = message.content;
+  // ── Step 5: Build prompt string (save attachments if any) ──
+  let promptText = message.content;
   if (message.attachments?.length) {
-    const agentCwd = options.cwd as string | undefined;
-    if (agentCwd) {
-      const savedPaths = saveAttachmentsToDisk(message.attachments, agentCwd);
-      prompt = buildPromptWithAttachments(message.content, message.attachments, savedPaths, sessionId);
-    } else {
-      // Fallback: no cwd, pass images inline only
-      prompt = buildPromptWithAttachments(message.content, message.attachments, [], sessionId);
-    }
+    const savedPaths = saveAttachmentsToDisk(message.attachments, hostAgentCwd);
+    // For Docker workers, convert host paths to container paths
+    const promptPaths = agentConfig.sandboxed
+      ? savedPaths.map((p) => p.replace(hostAgentCwd, "/workspace").replace(/\\/g, "/"))
+      : savedPaths;
+    promptText = buildPromptWithAttachments(message.content, message.attachments, promptPaths);
   }
 
-  const stream = query({
-    prompt: prompt as any,
-    options: options as any,
-  });
+  // ── Step 6: POST /sessions to worker ──
+  const sessionReq: WorkerSessionRequest = {
+    prompt: promptText,
+    systemPrompt,
+    tools: agentConfig.tools?.filter((t) => t !== "Agent"),
+    disallowedTools: PLATFORM_DISALLOWED_TOOLS,
+    model: agentConfig.model,
+    sessionId: sessionId ?? undefined,
+    maxTurns: 20,
+    effort: agentConfig.effort,
+    scope: message.scope,
+    cwd: workerCwd,
+    env: workerEnv,
+    // Sandboxed agents run in Docker containers: localhost resolves to the container
+    // itself, not the host. Use host.docker.internal so the container can reach back.
+    orchestratorUrl: agentConfig.sandboxed
+      ? context.orchestratorCallbackUrl.replace("localhost", "host.docker.internal")
+      : context.orchestratorCallbackUrl,
+    callbackToken,
+    sdkSettings,
+  };
+
+  const timeoutMs = agentConfig.timeout_ms ?? 3_600_000;
+
+  const doDispatch = async (req: WorkerSessionRequest): Promise<DispatchResult> => {
+    let sessRes: Response;
+    try {
+      sessRes = await fetch(`${workerUrl}/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (err) {
+      throw new Error(`Failed to create worker session: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    if (!sessRes.ok) {
+      throw new Error(`Worker returned ${sessRes.status}: ${await sessRes.text()}`);
+    }
+
+    const { workerSessionId } = await sessRes.json() as { workerSessionId: string };
+
+    // Update session context with worker session ID (for inject / background completion)
+    sessionCtx.workerSessionId = workerSessionId;
+
+    // Register the session ID with the parent run (for agent-mcp stop/message)
+    if (context.parentRunId) {
+      const { registerRunSession } = await import("./agent-mcp.js");
+      registerRunSession(context.parentRunId, workerUrl, workerSessionId);
+    }
+
+    // ── Step 7: Subscribe to SSE and wait for terminal event ──
+    const terminal = await subscribeToEvents(workerUrl, workerSessionId, agentId, timeoutMs);
+
+    // Cleanup worker session
+    fetch(`${workerUrl}/sessions/${workerSessionId}`, { method: "DELETE" }).catch(() => {});
+
+    if (terminal.type === "stale_session") {
+      return null as unknown as DispatchResult; // signal stale
+    }
+    if (terminal.type === "error") {
+      throw new Error(terminal.message);
+    }
+
+    // terminal.type === "result"
+    const elapsed = ((Date.now() - dispatchStart) / 1000).toFixed(1);
+    const resultPreview = terminal.text.slice(0, 100).replace(/\n/g, " ");
+    dispatchLog(`[dispatch] ← ${agentId} | ${elapsed}s | session=${terminal.sessionId.slice(0, 12)} | "${resultPreview}${terminal.text.length > 100 ? "…" : ""}"`);
+
+    return { result: terminal.text, sessionId: terminal.sessionId };
+  };
 
   try {
-    for await (const msg of stream) {
-      const m = msg as Record<string, unknown>;
-      if (m.session_id) resultSessionId = String(m.session_id);
-      if ("result" in m) resultText = String(m.result);
+    let result = await doDispatch(sessionReq);
+
+    // Stale session recovery — retry without resume
+    if (result === null) {
+      console.log(`[dispatch] Stale session for ${agentId} — retrying fresh`);
+      result = await doDispatch({ ...sessionReq, sessionId: undefined, forceNewSession: true });
     }
+
+    return result;
   } finally {
-    // Revoke proxy gateway token (best-effort)
-    if (proxyToken && context?.proxy) {
+    deleteCallbackSession(callbackToken);
+    if (proxyToken && context.proxy) {
       fetch(`${context.proxy.gatewayUrl}/token/${proxyToken}`, { method: "DELETE" }).catch(() => {});
     }
   }
-
-  return { result: resultText, sessionId: resultSessionId };
 }
 
 /**
- * Build an inline MCP server that exposes `ask_agent` for sub-agent delegation.
- * The tool reuses dispatch() with full RBAC applied to the original caller.
+ * Top-level dispatch entry point — wraps dispatchToWorker with sub-agent session caching.
+ * Used by the orchestrator's message handler and scheduler.
  */
-// In-memory session cache for sub-agents (survives within process, not across restarts)
-const subagentSessions = new Map<string, string>();
-
-async function buildSubagentMcpServer(context: DispatchContext) {
-  const { tool, createSdkMcpServer } = await import(
-    "@anthropic-ai/claude-agent-sdk"
-  );
-  const { z } = await import("zod");
-
-  const askAgentTool = tool(
-    "ask_agent",
-    "Delegate a task to another agent. Returns the agent's response text.",
-    {
-      agentId: z.string().describe(
-        "The ID of the agent to delegate to (must be defined in agents.yaml)"
-      ),
-      task: z.string().describe(
-        "The task or question to send to the agent"
-      ),
-    },
-    async (args: { agentId: string; task: string }) => {
-      const targetConfig = context.allAgents.agents[args.agentId];
-      if (!targetConfig) {
-        return {
-          content: [
-            { type: "text" as const, text: `Unknown agent: ${args.agentId}` },
-          ],
-        };
-      }
-
-      // RBAC: check if the original user can access the target agent
-      if (
-        !checkAccess(
-          context.userId,
-          context.userPlatform,
-          args.agentId,
-          context.platform
-        )
-      ) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Access denied: user cannot invoke agent "${args.agentId}"`,
-            },
-          ],
-        };
-      }
-
-      // Build permission hook for the sub-agent (same user identity + target agent's rules)
-      const subAgentCwd = context.agentsDir
-        ? join(context.agentsDir, args.agentId)
-        : undefined;
-      const subEffectivePermissions = resolveEffectivePermissions(
-        targetConfig.permissions,
-        context.platform.gatekeeper,
-      );
-      const subPermissionHook = buildPermissionHook(
-        context.userId,
-        context.userPlatform,
-        context.platform,
-        subEffectivePermissions,
-        subAgentCwd,
-        context.platformRoot,
-        context.askApproval,
-      );
-
-      // Build a stable message scope for session resumption (in-memory only)
-      const subScope = `subagent:${args.agentId}:${context.userId}`;
-      const subSessionId = subagentSessions.get(subScope) ?? null;
-
-      const subMessage: ChannelMessage = {
-        scope: subScope,
-        content: args.task,
-        userId: context.userId,
-        platform: context.userPlatform,
-      };
-
-      // Reuse dispatch() — handles local vs sandboxed routing
-      const taskPreview = args.task.slice(0, 80).replace(/\n/g, " ");
-      console.log(`[dispatch] → subagent ${args.agentId} | "${taskPreview}${args.task.length > 80 ? "…" : ""}"`);
-      const subStart = Date.now();
-
-      const result = await dispatch(
-        args.agentId,
-        subMessage,
-        targetConfig,
-        subSessionId,
-        subPermissionHook,
-        context, // pass context through for nested sub-agents
-        context.containerManager // thread container manager for sandboxed sub-agents
-      );
-
-      if (result.sessionId) {
-        subagentSessions.set(subScope, result.sessionId);
-      }
-
-      const subElapsed = ((Date.now() - subStart) / 1000).toFixed(1);
-      const resultPreview = result.result.slice(0, 100).replace(/\n/g, " ");
-      console.log(`[dispatch] ← subagent ${args.agentId} | ${subElapsed}s | "${resultPreview}${result.result.length > 100 ? "…" : ""}"`);
-
-      return {
-        content: [{ type: "text" as const, text: result.result }],
-      };
-    }
-  );
-
-  return createSdkMcpServer({
-    name: "orchestrator",
-    version: "1.0.0",
-    tools: [askAgentTool],
-  });
-}
-
-/**
- * Remote dispatch via HTTP POST to a worker.
- * Uses buildSystemPrompt() to honour system_mode.
- *
- * Attachments are saved to the host agent workspace (which is volume-mounted
- * into the container at /workspace), so the worker agent can read them.
- */
-async function dispatchRemote(
-  agentConfig: AgentConfig,
+export async function dispatch(
   agentId: string,
   message: ChannelMessage,
+  agentConfig: AgentConfig,
   sessionId: string | null,
-  agentsDir?: string
+  permissionHook: ((tool: string, input: Record<string, unknown>) => Promise<unknown>) | undefined,
+  context: DispatchContext,
 ): Promise<DispatchResult> {
-  const baseUrl =
-    agentConfig.url ?? `http://localhost:${agentConfig.port}`;
-  const url = `${baseUrl}/run`;
-
-  // Remote workers only accept string system prompts — flatten preset objects.
-  // The worker's query() doesn't support the preset format, so always send raw text.
-  // Sandboxed agents always go through proxy, so inject platform instructions.
-  const builtPrompt = buildSystemPrompt(agentConfig, !!agentConfig.credentials?.length);
-  const systemPrompt = typeof builtPrompt === "object" && builtPrompt !== null && builtPrompt !== undefined
-    ? (builtPrompt as { append: string }).append
-    : builtPrompt;
-
-  // Save attachments to the host agent workspace — they appear at /workspace/tmp/attachments/
-  // inside the container via the existing volume mount.
-  let promptText = message.content;
-  if (message.attachments?.length && agentsDir) {
-    const hostCwd = join(agentsDir, agentId);
-    const hostPaths = saveAttachmentsToDisk(message.attachments, hostCwd);
-    // Convert host paths to container paths (/workspace/...)
-    const containerPaths = hostPaths.map(p => p.replace(hostCwd, "/workspace").replace(/\\/g, "/"));
-    const fileLines = containerPaths.map((p, i) =>
-      `- ${p} (${message.attachments![i].contentType}, ${message.attachments![i].size} bytes)`
-    );
-    promptText += `\n\nAttached files saved to your workspace:\n${fileLines.join("\n")}\n\nYou can read, analyze, or process these files using your tools (Read, Bash, etc.).`;
-  }
-
-  const remoteStart = Date.now();
-  console.log(`[dispatch] → remote ${agentId} | POST ${url}`);
-
-  const maxAttempts = 3;
-  let lastError: Error | undefined;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: AbortSignal.timeout(300_000),
-        body: JSON.stringify({
-          prompt: promptText,
-          systemPrompt: systemPrompt ?? agentConfig.system,
-          tools: agentConfig.tools?.filter((t) => t !== "Agent"),
-          model: agentConfig.model,
-          sessionId: sessionId ?? undefined,
-          maxTurns: 20,
-          ...(agentConfig.effort ? { effort: agentConfig.effort } : {}),
-        }),
-      });
-    } catch (err) {
-      // Network-level failure (connection refused, fetch failed, timeout, etc.)
-      // Retry on these — do NOT retry on HTTP 4xx/5xx.
-      lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < maxAttempts) {
-        console.log(`[dispatch] Remote dispatch to ${url} failed (attempt ${attempt}/${maxAttempts}): ${lastError.message}, retrying...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        continue;
-      }
-      break;
-    }
-
-    if (!response.ok) {
-      const remoteElapsed = ((Date.now() - remoteStart) / 1000).toFixed(1);
-      console.log(`[dispatch] ← remote ${agentId} | ${remoteElapsed}s | FAILED ${response.status}`);
-      throw new Error(
-        `Worker responded with ${response.status}: ${await response.text()}`
-      );
-    }
-
-    const data = (await response.json()) as {
-      result: string;
-      sessionId: string;
-    };
-    const remoteElapsed = ((Date.now() - remoteStart) / 1000).toFixed(1);
-    const resultPreview = data.result.slice(0, 100).replace(/\n/g, " ");
-    console.log(`[dispatch] ← remote ${agentId} | ${remoteElapsed}s | "${resultPreview}${data.result.length > 100 ? "…" : ""}"`);
-    return { result: data.result, sessionId: data.sessionId };
-  }
-
-  throw new Error(`Remote dispatch to worker failed after ${maxAttempts} attempts: ${lastError!.message}`);
+  return dispatchToWorker(agentId, message, agentConfig, sessionId, context, permissionHook);
 }
