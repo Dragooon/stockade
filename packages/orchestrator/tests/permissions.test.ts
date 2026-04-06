@@ -684,13 +684,13 @@ describe("evaluateAgentPermissions", () => {
 
   it("MCP-style tool names work", async () => {
     const rules = [
-      "allow:mcp__orchestrator__ask_agent",
+      "allow:mcp__agent__start",
       "allow:*",
     ];
     expect(
       await evaluateAgentPermissions(
         rules,
-        "mcp__orchestrator__ask_agent",
+        "mcp__agent__start",
         { agentId: "explorer", task: "look up X" },
         ctx,
       ),

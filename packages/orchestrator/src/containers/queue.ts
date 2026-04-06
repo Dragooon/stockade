@@ -38,8 +38,6 @@ export interface PendingMessage {
 
 interface AgentState {
   active: boolean;
-  /** The dispatch is idle — finished processing, waiting for new input */
-  idleWaiting: boolean;
   /** Whether the current dispatch is a scheduled task */
   isTask: boolean;
   /** Currently running task ID, if any */
@@ -64,9 +62,6 @@ export class DispatchQueue {
   private processMessageFn:
     | ((agentKey: string, message: PendingMessage) => Promise<boolean>)
     | null = null;
-  private injectMessageFn:
-    | ((agentKey: string, text: string) => boolean)
-    | null = null;
   private shuttingDown = false;
 
   constructor(private readonly config: QueueConfig) {}
@@ -84,18 +79,7 @@ export class DispatchQueue {
   }
 
   /**
-   * Set the function that injects a follow-up message into a running dispatch.
-   * Returns true if the message was injected, false if no active dispatch.
-   */
-  setInjectMessageFn(fn: (agentKey: string, text: string) => boolean): void {
-    this.injectMessageFn = fn;
-  }
-
-  /**
    * Enqueue a message for an agent scope.
-   * If the agent has an active dispatch that's idle, inject via the message fn.
-   * Otherwise, queue for the next dispatch cycle.
-   *
    * Returns a promise that resolves with the dispatch result.
    */
   enqueue(agentKey: string, text: string, meta?: Record<string, unknown>): Promise<string> {
@@ -108,19 +92,7 @@ export class DispatchQueue {
       const state = this.getAgent(agentKey);
       const pending: PendingMessage = { text, resolve, meta };
 
-      // If active and idle, try to inject the message directly
-      if (state.active && state.idleWaiting && !state.isTask) {
-        if (this.injectMessageFn?.(agentKey, text)) {
-          state.idleWaiting = false;
-          // Injection pipes the message into the running dispatch.
-          // The result comes from that dispatch, not the queue.
-          // Resolve immediately — the running dispatch handles the work.
-          resolve("(injected into active dispatch)");
-          return;
-        }
-      }
-
-      // If active but not idle, queue for later
+      // If active, queue for later
       if (state.active) {
         state.pendingMessages.push(pending);
         return;
@@ -142,23 +114,13 @@ export class DispatchQueue {
   }
 
   /**
-   * Legacy enqueueMessage — fire-and-forget variant for backward compat.
-   * Used by scheduled tasks and internal retry logic.
+   * Fire-and-forget enqueue — used by scheduler tasks.
    */
   enqueueMessage(agentKey: string, text?: string): void {
     if (this.shuttingDown) return;
 
     const state = this.getAgent(agentKey);
 
-    // If active and idle, try to inject the message directly
-    if (state.active && state.idleWaiting && !state.isTask && text) {
-      if (this.injectMessageFn?.(agentKey, text)) {
-        state.idleWaiting = false;
-        return;
-      }
-    }
-
-    // If active but not idle, mark pending (fire-and-forget has no resolver)
     if (state.active) {
       if (text) {
         state.pendingMessages.push({ text, resolve: () => {} });
@@ -166,7 +128,6 @@ export class DispatchQueue {
       return;
     }
 
-    // If at concurrency limit or retry is pending, queue
     if (this.activeCount >= this.config.maxConcurrent || state.retryScheduled) {
       if (text) {
         state.pendingMessages.push({ text, resolve: () => {} });
@@ -177,7 +138,6 @@ export class DispatchQueue {
       return;
     }
 
-    // Start processing immediately
     if (text) {
       state.pendingMessages.push({ text, resolve: () => {} });
     }
@@ -199,10 +159,6 @@ export class DispatchQueue {
 
     if (state.active) {
       state.pendingTasks.push({ id: taskId, agentKey, fn });
-      // If idle, preempt to run the task sooner
-      if (state.idleWaiting) {
-        this.notifyClose(agentKey);
-      }
       return;
     }
 
@@ -219,44 +175,10 @@ export class DispatchQueue {
   }
 
   /**
-   * Signal that the active dispatch for an agent is now idle
-   * (finished work, waiting for more input).
-   */
-  notifyIdle(agentKey: string): void {
-    const state = this.getAgent(agentKey);
-    state.idleWaiting = true;
-    // If tasks are pending, preempt immediately
-    if (state.pendingTasks.length > 0) {
-      this.notifyClose(agentKey);
-    }
-  }
-
-  /**
-   * Signal the active dispatch to wind down (close its input).
-   * Used when tasks need to preempt an idle session.
-   */
-  notifyClose(agentKey: string): void {
-    const state = this.getAgent(agentKey);
-    if (!state.active) return;
-    this.onClose?.(agentKey);
-  }
-
-  /** Callback invoked when a close is requested. Set by the wiring layer. */
-  onClose: ((agentKey: string) => void) | null = null;
-
-  /**
    * Check if an agent currently has an active dispatch.
    */
   isActive(agentKey: string): boolean {
     return this.getAgent(agentKey).active;
-  }
-
-  /**
-   * Check if an agent is idle (active but waiting for input).
-   */
-  isIdle(agentKey: string): boolean {
-    const state = this.getAgent(agentKey);
-    return state.active && state.idleWaiting;
   }
 
   /**
@@ -284,7 +206,6 @@ export class DispatchQueue {
 
   /**
    * Remove agent states that are idle with no pending work.
-   * Call periodically to prevent unbounded growth of the state map.
    */
   cleanup(): void {
     for (const [key, state] of this.agents) {
@@ -300,9 +221,7 @@ export class DispatchQueue {
   }
 
   /**
-   * Graceful shutdown — stop accepting new work.
-   * Active dispatches finish naturally.
-   * Resolves all pending messages with an error.
+   * Graceful shutdown — stop accepting new work, resolve pending with error.
    */
   shutdown(): void {
     this.shuttingDown = true;
@@ -311,7 +230,6 @@ export class DispatchQueue {
         msg.resolve("Queue is shutting down.");
       }
       state.pendingMessages = [];
-      // Clear pending tasks so they aren't silently dropped
       state.pendingTasks = [];
     }
     this.waitingAgents.length = 0;
@@ -320,13 +238,10 @@ export class DispatchQueue {
   // ── Private ──
 
   private getAgent(agentKey: string): AgentState {
-    let state = this.agents.get(agentKey) as
-      | (AgentState)
-      | undefined;
+    let state = this.agents.get(agentKey);
     if (!state) {
       state = {
         active: false,
-        idleWaiting: false,
         isTask: false,
         runningTaskId: null,
         pendingMessages: [],
@@ -345,11 +260,9 @@ export class DispatchQueue {
   ): Promise<void> {
     const state = this.getAgent(agentKey);
     state.active = true;
-    state.idleWaiting = false;
     state.isTask = false;
     this.activeCount++;
 
-    // Take the next pending message before the try so it's accessible in catch
     const message = state.pendingMessages.shift();
     try {
       if (message && this.processMessageFn) {
@@ -357,23 +270,19 @@ export class DispatchQueue {
         if (success) {
           state.retryCount = 0;
         } else {
-          // Re-queue the message for retry
           state.pendingMessages.unshift(message);
           this.scheduleRetry(agentKey, state);
         }
       } else if (message) {
-        // No processMessageFn set — resolve with error to avoid hanging promises
         message.resolve("Error: no message processor configured.");
       }
     } catch {
-      // Re-queue the message so retry can pick it up
       if (message) {
         state.pendingMessages.unshift(message);
       }
       this.scheduleRetry(agentKey, state);
     } finally {
       state.active = false;
-      state.idleWaiting = false;
       this.activeCount--;
       this.drainAgent(agentKey);
     }
@@ -382,7 +291,6 @@ export class DispatchQueue {
   private async runTask(agentKey: string, task: QueuedTask): Promise<void> {
     const state = this.getAgent(agentKey);
     state.active = true;
-    state.idleWaiting = false;
     state.isTask = true;
     state.runningTaskId = task.id;
     this.activeCount++;
@@ -395,20 +303,15 @@ export class DispatchQueue {
       state.active = false;
       state.isTask = false;
       state.runningTaskId = null;
-      state.idleWaiting = false;
       this.activeCount--;
       this.drainAgent(agentKey);
     }
   }
 
-  private scheduleRetry(
-    agentKey: string,
-    state: AgentState
-  ): void {
+  private scheduleRetry(agentKey: string, state: AgentState): void {
     state.retryCount++;
     if (state.retryCount > MAX_RETRIES) {
       state.retryCount = 0;
-      // Resolve all pending messages with error
       for (const msg of state.pendingMessages) {
         msg.resolve("Failed after maximum retries.");
       }
@@ -431,14 +334,14 @@ export class DispatchQueue {
 
     const state = this.getAgent(agentKey);
 
-    // Tasks first (they won't be re-discovered like messages)
+    // Tasks first
     if (state.pendingTasks.length > 0) {
       const task = state.pendingTasks.shift()!;
       this.runTask(agentKey, task).catch(() => {});
       return;
     }
 
-    // Then pending messages (but not if a retry timer is pending)
+    // Then pending messages
     if (state.pendingMessages.length > 0 && !state.retryScheduled) {
       this.runForAgent(agentKey, "drain").catch(() => {});
       return;
@@ -456,7 +359,6 @@ export class DispatchQueue {
       const nextKey = this.waitingAgents.shift()!;
       const state = this.getAgent(nextKey);
 
-      // Tasks first
       if (state.pendingTasks.length > 0) {
         const task = state.pendingTasks.shift()!;
         this.runTask(nextKey, task).catch(() => {});

@@ -293,7 +293,8 @@ describe("Concurrency limit", () => {
 
 // ── Message injection ─────────────────────────────────────────────────────────
 
-describe("Message injection", () => {
+// Skipped: notifyIdle / setInjectMessageFn removed from DispatchQueue in new architecture
+describe.skip("Message injection", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -595,7 +596,8 @@ describe("Task priority", () => {
 
 // ── Idle preemption ───────────────────────────────────────────────────────────
 
-describe("Idle preemption", () => {
+// Skipped: notifyIdle removed from DispatchQueue in new architecture
+describe.skip("Idle preemption", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -874,7 +876,8 @@ describe("State tracking", () => {
     expect(queue.isActive("agent-a")).toBe(false);
   });
 
-  it("test 26: isIdle transitions correctly around injection and completion", async () => {
+  // Skipped: notifyIdle / setInjectMessageFn removed from DispatchQueue in new architecture
+  it.skip("test 26: isIdle transitions correctly around injection and completion", async () => {
     const queue = makeQueue();
     const dispatch = deferred();
 

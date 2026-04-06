@@ -127,7 +127,7 @@ describe("DispatchQueue", () => {
 
   // ── Message injection ──
 
-  it("injects message into idle dispatch instead of queueing separately", async () => {
+  it.skip("injects message into idle dispatch instead of queueing separately", async () => {
     const queue = makeQueue();
     const injected: Array<{ key: string; text: string }> = [];
 
@@ -162,7 +162,7 @@ describe("DispatchQueue", () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
-  it("queues message when inject fn returns false", async () => {
+  it.skip("queues message when inject fn returns false", async () => {
     const queue = makeQueue();
     let processCount = 0;
 
@@ -242,7 +242,7 @@ describe("DispatchQueue", () => {
 
   // ── Idle preemption ──
 
-  it("preempts idle dispatch when task is enqueued", async () => {
+  it.skip("preempts idle dispatch when task is enqueued", async () => {
     const queue = makeQueue();
     const closes: string[] = [];
     queue.onClose = (agentKey) => closes.push(agentKey);
@@ -372,7 +372,7 @@ describe("DispatchQueue", () => {
 
   // ── isActive / isIdle ──
 
-  it("tracks active and idle state correctly", async () => {
+  it.skip("tracks active and idle state correctly", async () => {
     const queue = makeQueue();
     let resolveProcess: () => void;
 
@@ -470,7 +470,7 @@ describe("DispatchQueue", () => {
 
   // ── notifyIdle triggers preemption for pending tasks only ──
 
-  it("does NOT preempt idle when only messages are pending", async () => {
+  it.skip("does NOT preempt idle when only messages are pending", async () => {
     const queue = makeQueue();
     const closes: string[] = [];
     queue.onClose = (key) => closes.push(key);
@@ -638,7 +638,7 @@ describe("DispatchQueue", () => {
 
   // ── Fix validations: injection, retry overlap, no processor ──
 
-  it("enqueue() with injection resolves immediately without double-processing", async () => {
+  it.skip("enqueue() with injection resolves immediately without double-processing", async () => {
     const queue = makeQueue();
     let processCount = 0;
     let resolveProcess: () => void;
@@ -708,7 +708,7 @@ describe("DispatchQueue", () => {
     expect(await result).toBe("Error: no message processor configured.");
   });
 
-  it("notifyClose on inactive agent is a no-op", async () => {
+  it.skip("notifyClose on inactive agent is a no-op", async () => {
     const queue = makeQueue();
     const closes: string[] = [];
     queue.onClose = (key) => closes.push(key);

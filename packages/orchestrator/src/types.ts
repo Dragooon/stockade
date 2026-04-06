@@ -13,6 +13,8 @@ export interface MemoryConfig {
 /** Agent configuration from agents.yaml */
 export interface AgentConfig {
   model: string;
+  /** Short description of this agent's role. Platform-injected into parent agent's system prompt. */
+  description?: string;
   system?: string;
   /** "append" uses SDK's Claude Code preset + appends system. "replace" uses system as-is. */
   system_mode?: "append" | "replace";
@@ -37,6 +39,17 @@ export interface AgentConfig {
   permissions?: string[];
   /** Skill names to sync from ~/.claude/skills/ into this agent's workspace. */
   skills?: string[];
+  /**
+   * Maximum wall-clock time for a single dispatch, in milliseconds.
+   * Default: 3600000 (60 minutes).
+   */
+  timeout_ms?: number;
+  /**
+   * Inline agent — shares the parent agent's workspace (cwd) instead of its own.
+   * Useful for exploratory fan-out tasks that need to read/write the same files.
+   * Only applies when dispatched as a sub-agent; top-level dispatches use own workspace.
+   */
+  inline?: boolean;
 }
 
 export type { ContainerConfig, ContainersConfig };
@@ -70,6 +83,8 @@ export interface PathsConfig {
   sessions_db: string;
   /** Container provisioning temp files (default: <data_dir>/containers) */
   containers_dir: string;
+  /** Log files directory (default: <data_dir>/logs) */
+  logs_dir: string;
   /** Config directory (set at runtime from loadConfig's configDir arg) */
   config_dir: string;
 }

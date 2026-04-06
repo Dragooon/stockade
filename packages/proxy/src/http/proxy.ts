@@ -145,11 +145,15 @@ function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
         }
       }
 
-      // Upgrade last system block to 1h TTL
+      // Normalise last system block: set to target1hMarker
+      // (1h for Sonnet/Opus, plain ephemeral for Haiku)
       if (markerCount < 4 && req.system.length >= 2) {
         const last = req.system[req.system.length - 1];
         const cc = last.cache_control as Record<string, unknown> | undefined;
-        if (!cc || cc.ttl !== "1h") {
+        const needsUpdate = isHaiku
+          ? !cc || cc.ttl !== undefined           // Haiku: strip ttl if present
+          : !cc || cc.ttl !== "1h";               // non-Haiku: upgrade to 1h
+        if (needsUpdate) {
           if (!cc) markerCount++;
           last.cache_control = target1hMarker;
           modified = true;
@@ -157,21 +161,30 @@ function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
       }
     }
 
-    // ── Upgrade all existing message cache markers to 1h TTL ──
-    // The SDK sets {type:"ephemeral"} (5m) on the last user message. Upgrade to 1h
-    // for consistency and to avoid ttl ordering violations (1h must not follow 5m).
-    // Haiku only supports standard ephemeral (no ttl field), so skip upgrade for it.
+    // ── Normalise all message cache markers ──
+    // For Sonnet/Opus: upgrade {type:"ephemeral"} (5m) → ttl:"1h" to avoid ordering
+    //   violations (a 1h marker must not be followed by a 5m marker).
+    // For Haiku: strip ttl field entirely — Haiku only supports standard ephemeral
+    //   (no ttl field). The SDK may set ttl:"1h" even for Haiku, causing 400 errors.
+    // Always strip scope:global (API rejects it for all models).
     for (const msg of req.messages ?? []) {
       const c = msg.content;
       if (!Array.isArray(c)) continue;
       for (const item of c) {
         const cc = (item as Record<string, unknown>).cache_control as Record<string, unknown> | undefined;
-        if (cc && !cc.ttl && !isHaiku) {
+        if (!cc) continue;
+        if (isHaiku) {
+          // Downgrade: strip ttl so Haiku gets plain {type:"ephemeral"}
+          if (cc.ttl) {
+            delete cc.ttl;
+            modified = true;
+          }
+        } else if (!cc.ttl) {
+          // Upgrade: add ttl:"1h" for non-Haiku models
           cc.ttl = "1h";
           modified = true;
         }
-        // Also strip scope:global from message markers
-        if (cc?.scope) {
+        if (cc.scope) {
           delete cc.scope;
           modified = true;
         }

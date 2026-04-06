@@ -32,6 +32,7 @@ const memoryConfigSchema = z.object({
 
 const agentConfigSchema = z.object({
   model: z.string(),
+  description: z.string().optional(),
   system: z.string().optional(),
   system_mode: z.enum(["append", "replace"]).default("replace"),
   effort: z.enum(["low", "medium", "high", "max"]).optional(),
@@ -47,6 +48,7 @@ const agentConfigSchema = z.object({
   permissions: z.array(z.string()).optional(),
   /** Skill names to sync from ~/.claude/skills/ into this agent's workspace. */
   skills: z.array(z.string()).optional(),
+  inline: z.boolean().optional(),
 });
 
 const channelBindingSchema = z.object({
@@ -159,12 +161,14 @@ export function resolvePaths(
   const agentsDir = raw?.agents_dir ? r(raw.agents_dir) : join(dataDir, "agents");
   const sessionsDb = raw?.sessions_db ? r(raw.sessions_db) : join(dataDir, "sessions.db");
   const containersDir = raw?.containers_dir ? r(raw.containers_dir) : join(dataDir, "containers");
+  const logsDir = join(dataDir, "logs");
 
   return {
     data_dir: dataDir,
     agents_dir: agentsDir,
     sessions_db: sessionsDb,
     containers_dir: containersDir,
+    logs_dir: logsDir,
     config_dir: resolve(configDir),
   };
 }

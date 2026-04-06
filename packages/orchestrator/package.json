@@ -9,12 +9,14 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.83",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.92",
+    "@hono/node-server": "^1.19.12",
     "better-sqlite3": "^11.10.0",
     "cron-parser": "^5.5.0",
     "discord.js": "^14.18.0",
     "dotenv": "^17.3.1",
     "execa": "^9.6.1",
+    "hono": "^4.12.10",
     "js-yaml": "^4.1.0",
     "zod": "^4.3.6"
   },

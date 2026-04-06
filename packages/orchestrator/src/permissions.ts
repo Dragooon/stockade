@@ -42,12 +42,25 @@ import { realpath } from "node:fs/promises";
  * be blocked by permission rules. These bypass both user-level RBAC
  * and agent-level permission checks.
  *
- * - `mcp__orchestrator__ask_agent`: Sub-agent delegation — core to how
- *   agents collaborate. Blocking this would break multi-agent workflows.
+ * Only the platform's own MCP tools are listed here. Third-party MCP servers
+ * that happen to use the mcp__ prefix are subject to normal permission checks.
  */
 export const CORE_PLATFORM_TOOLS = new Set([
-  "mcp__orchestrator__ask_agent",
+  // Agent delegation (mcp__agent__ server)
+  "mcp__agent__start",
+  "mcp__agent__stop",
+  "mcp__agent__message",
+  // Scheduler (mcp__scheduler__ server)
+  "mcp__scheduler__create",
+  "mcp__scheduler__list",
+  "mcp__scheduler__update",
+  "mcp__scheduler__delete",
 ]);
+
+/** Returns true if the tool should bypass all permission checks. */
+export function isCorePlatformTool(tool: string): boolean {
+  return CORE_PLATFORM_TOOLS.has(tool);
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

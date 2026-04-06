@@ -1,37 +1,132 @@
+/**
+ * Worker HTTP server — session-based API.
+ *
+ * Routes:
+ *   POST   /sessions              — create and start a new agent session
+ *   GET    /sessions/:id/events   — SSE stream of WorkerEvent
+ *   POST   /sessions/:id/inject   — inject a message into the running session
+ *   DELETE /sessions/:id          — abort the session and clean up
+ *   GET    /health                — liveness check
+ */
+
 import { Hono } from "hono";
-import { WorkerRunRequestSchema } from "./types.js";
-import { runAgent } from "./agent.js";
+import { randomUUID } from "node:crypto";
+import { WorkerSessionRequestSchema } from "./types.js";
+import { WorkerSession } from "./session.js";
 
 export const app = new Hono();
 
 const workerId = process.env.WORKER_ID ?? `worker-${process.pid}`;
 
+/** Active sessions keyed by worker session ID. */
+const sessions = new Map<string, WorkerSession>();
+
 app.get("/health", (c) => {
-  return c.json({ ok: true, workerId });
+  return c.json({ ok: true, workerId, sessions: sessions.size });
 });
 
-app.post("/run", async (c) => {
-  const start = Date.now();
+app.post("/sessions", async (c) => {
   const body = await c.req.json();
-
-  const parsed = WorkerRunRequestSchema.safeParse(body);
+  const parsed = WorkerSessionRequestSchema.safeParse(body);
   if (!parsed.success) {
     return c.json({ error: parsed.error.flatten().fieldErrors }, 400);
   }
 
-  const { scope, model } = parsed.data;
-  console.log(
-    `[worker] POST /run — scope: ${scope ?? "—"}, model: ${model ?? "default"}`
-  );
+  const request = parsed.data;
+  const workerSessionId = randomUUID();
+  const session = new WorkerSession();
 
-  try {
-    const response = await runAgent(parsed.data);
-    const duration = Date.now() - start;
-    console.log(`[worker] POST /run — completed in ${duration}ms`);
-    return c.json(response);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`[worker] POST /run — error: ${message}`);
-    return c.json({ error: message }, 500);
+  sessions.set(workerSessionId, session);
+
+  // Start in background — errors are emitted as WorkerEvent { type: "error" }
+  session.start(request as any);
+
+  // Auto-remove session when it finishes (with a delay for late SSE connects)
+  const cleanup = () => {
+    setTimeout(() => sessions.delete(workerSessionId), 30_000);
+  };
+  // Check periodically if done (can't subscribe here without conflicting)
+  const pollDone = setInterval(() => {
+    if (session.done) {
+      clearInterval(pollDone);
+      cleanup();
+    }
+  }, 1_000);
+
+  console.log(`[worker] Session ${workerSessionId.slice(0, 8)} created`);
+  return c.json({ workerSessionId });
+});
+
+app.get("/sessions/:id/events", (c) => {
+  const id = c.req.param("id");
+  const session = sessions.get(id);
+
+  if (!session) {
+    return c.json({ error: "Session not found" }, 404);
   }
+
+  // SSE: stream WorkerEvents as "data: <json>\n\n"
+  const { readable, writable } = new TransformStream<string, string>();
+  const writer = writable.getWriter();
+
+  const write = (line: string) => writer.write(line).catch(() => {});
+
+  const sendEvent = (event: unknown) => {
+    write(`data: ${JSON.stringify(event)}\n\n`);
+  };
+
+  // Subscribe — drains buffered events immediately, then real-time
+  session.subscribe((event) => {
+    sendEvent(event);
+    if (event.type === "result" || event.type === "error" || event.type === "stale_session") {
+      writer.close().catch(() => {});
+    }
+  });
+
+  // If session is already done and no events will come, close now
+  if (session.done) {
+    writer.close().catch(() => {});
+  }
+
+  return new Response(readable as any, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    },
+  });
+});
+
+app.post("/sessions/:id/inject", async (c) => {
+  const id = c.req.param("id");
+  const session = sessions.get(id);
+
+  if (!session) {
+    return c.json({ error: "Session not found" }, 404);
+  }
+
+  if (session.done) {
+    return c.json({ error: "Session is done" }, 409);
+  }
+
+  const { text } = await c.req.json() as { text: string };
+  if (!text) {
+    return c.json({ error: "text is required" }, 400);
+  }
+
+  session.inject(text);
+  return c.json({ ok: true });
+});
+
+app.delete("/sessions/:id", (c) => {
+  const id = c.req.param("id");
+  const session = sessions.get(id);
+
+  if (session) {
+    session.abort();
+    sessions.delete(id);
+    console.log(`[worker] Session ${id.slice(0, 8)} deleted`);
+  }
+
+  return c.json({ ok: true });
 });

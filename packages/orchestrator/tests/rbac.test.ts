@@ -244,10 +244,11 @@ describe("buildPermissionHook", () => {
     expect(await hook("mcp__some_server__some_tool", {})).toMatchObject({ behavior: "allow" });
   });
 
-  it("core platform tools (ask_agent) always allowed even with deny:*", async () => {
+  it("core platform tools always allowed even with deny:*", async () => {
     const hook = buildPermissionHook("dave", "terminal", config);
 
-    expect((await hook("mcp__orchestrator__ask_agent", {})).behavior).toBe("allow");
+    expect((await hook("mcp__agent__start", {})).behavior).toBe("allow");
+    expect((await hook("mcp__scheduler__list", {})).behavior).toBe("allow");
   });
 });
 

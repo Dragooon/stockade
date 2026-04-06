@@ -82,7 +82,8 @@ describe("ContainerManager", () => {
       docker as any,
       containersConfig,
       "http://localhost:10256",
-      "/tmp/test-data"
+      "/tmp/test-data",
+      "/tmp/test-logs",
     );
 
     // Default provision mock
@@ -273,7 +274,8 @@ describe("ContainerManager", () => {
     });
   });
 
-  describe("shutdownAll", () => {
+  // Skipped: shutdownAll now stops without removing (containers preserved for restart)
+  describe.skip("shutdownAll", () => {
     it("tears down everything", async () => {
       docker.createContainer
         .mockResolvedValueOnce("c1")
@@ -304,7 +306,7 @@ describe("ContainerManager", () => {
     });
   });
 
-  describe("stopAll", () => {
+  describe("shutdownAll", () => {
     it("stops containers without removing them, runs cleanup, clears state", async () => {
       docker.createContainer
         .mockResolvedValueOnce("c1")
@@ -331,7 +333,7 @@ describe("ContainerManager", () => {
       await manager.ensure("sandbox", sessionAgent, "s2");
       expect(manager.size).toBe(2);
 
-      await manager.stopAll();
+      await manager.shutdownAll();
 
       // Containers stopped but NOT removed
       expect(docker.stopContainer).toHaveBeenCalledTimes(2);
@@ -357,7 +359,7 @@ describe("ContainerManager", () => {
       docker.stopContainer.mockRejectedValueOnce(new Error("already stopped"));
 
       // Should not throw
-      await expect(manager.stopAll()).resolves.toBeUndefined();
+      await expect(manager.shutdownAll()).resolves.toBeUndefined();
       expect(manager.size).toBe(0);
     });
   });
@@ -385,7 +387,8 @@ describe("ContainerManager", () => {
         docker as any,
         shortConfig,
         "http://localhost:10256",
-        "/tmp/test-data"
+        "/tmp/test-data",
+        "/tmp/test-logs",
       );
 
       (provisionContainer as any).mockResolvedValue({

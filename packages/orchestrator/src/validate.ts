@@ -7,16 +7,19 @@
 import Database from "better-sqlite3";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 
 import { loadConfig } from "./config.js";
 import { resolveAgent } from "./router.js";
-import { checkAccess, buildPermissionHook } from "./rbac.js";
+import { checkAccess } from "./rbac.js";
 import { initSessionsTable, getSessionId, setSessionId } from "./sessions.js";
 import { dispatch, type DispatchContext } from "./dispatcher.js";
 import { TerminalAdapter } from "./channels/terminal.js";
 import { DispatchQueue } from "./containers/queue.js";
+import { HostWorkerManager } from "./workers/host.js";
+import { startCallbackServer, CALLBACK_PORT } from "./api/server.js";
+import { getCallbackSession } from "./api/sessions.js";
 import type { ChannelMessage, ApprovalChannel } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -40,6 +43,30 @@ const db = new Database(paths.sessions_db);
 initSessionsTable(db);
 console.log(`[validate] Sessions DB ready at ${paths.sessions_db}`);
 
+// Set up host worker manager
+const hostWorkerManager = new HostWorkerManager(paths.agents_dir, paths.logs_dir);
+const orchestratorCallbackUrl = `http://localhost:${CALLBACK_PORT}`;
+
+const stopCallbackServer = startCallbackServer(
+  hostWorkerManager,
+  (token) => {
+    const ctx = getCallbackSession(token);
+    if (!ctx) return null;
+    return {
+      allAgents: config.agents,
+      platform: config.platform,
+      userId: ctx.userId,
+      userPlatform: ctx.userPlatform,
+      agentsDir: paths.agents_dir,
+      platformRoot: paths.data_dir,
+      askApproval: ctx.askApproval,
+      workerManager: hostWorkerManager,
+      proxy: undefined,
+      orchestratorCallbackUrl,
+    };
+  },
+);
+
 // Set up dispatch queue
 const dispatchQueue = new DispatchQueue({ maxConcurrent: 5 });
 console.log(`[validate] DispatchQueue ready (maxConcurrent=5)`);
@@ -55,44 +82,25 @@ async function handleMessage(msg: ChannelMessage, _approvalChannel?: ApprovalCha
     console.log(`[validate] Access DENIED for ${msg.userId}`);
     return "Access denied.";
   }
-  console.log(`[validate] Access granted`);
 
   const agentConfig = config.agents.agents[agentId];
-  if (!agentConfig) {
-    return `Unknown agent: ${agentId}`;
-  }
+  if (!agentConfig) return `Unknown agent: ${agentId}`;
 
   const sessionId = getSessionId(db, msg.scope);
   console.log(`[validate] Session: ${sessionId ?? "(new)"}`);
-
-  const agentCwd = paths.agents_dir
-    ? resolve(paths.agents_dir, agentId)
-    : undefined;
-  const permissionHook = buildPermissionHook(
-    msg.userId,
-    msg.platform,
-    config.platform,
-    agentConfig.permissions,
-    agentCwd,
-    paths.data_dir,
-    undefined, // askApproval — validate doesn't test HITL
-  );
 
   const context: DispatchContext = {
     allAgents: config.agents,
     platform: config.platform,
     userId: msg.userId,
     userPlatform: msg.platform,
+    agentsDir: paths.agents_dir,
+    platformRoot: paths.data_dir,
+    workerManager: hostWorkerManager,
+    orchestratorCallbackUrl,
   };
 
-  const result = await dispatch(
-    agentId,
-    msg,
-    agentConfig,
-    sessionId,
-    permissionHook,
-    context
-  );
+  const result = await dispatch(agentId, msg, agentConfig, sessionId, undefined, context);
 
   setSessionId(db, msg.scope, result.sessionId);
   console.log(`[validate] Response (${result.result.length} chars), session=${result.sessionId}`);
@@ -113,7 +121,8 @@ if (terminalConfig?.enabled) {
 // Graceful shutdown
 process.on("SIGINT", () => {
   console.log("\n[validate] Shutting down...");
+  stopCallbackServer();
   dispatchQueue.shutdown();
   db.close();
-  process.exit(0);
+  hostWorkerManager.shutdownAll().then(() => process.exit(0));
 });

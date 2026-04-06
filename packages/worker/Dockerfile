@@ -50,9 +50,9 @@ WORKDIR /app/packages/worker
 RUN mkdir -p /home/node/.ssh /home/node/.claude /workspace \
     && chown -R node:node /home/node/.ssh /home/node/.claude /workspace
 
-# Install apw CLI (credential proxy ref token tool)
+# Install apw CLI (credential proxy ref token tool, strip Windows CRLF)
 COPY packages/proxy/src/cli/apw /usr/local/bin/apw
-RUN chmod +x /usr/local/bin/apw
+RUN sed -i 's/\r$//' /usr/local/bin/apw && chmod +x /usr/local/bin/apw
 
 # Run as non-root
 USER node

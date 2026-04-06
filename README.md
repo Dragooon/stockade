@@ -1,6 +1,6 @@
 # Stockade
 
-![version](https://img.shields.io/badge/version-0.1--alpha-orange) ![tests](https://img.shields.io/badge/tests-749%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
+![version](https://img.shields.io/badge/version-0.1--alpha-orange) ![tests](https://img.shields.io/badge/tests-724%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 [**dragooon.github.io/stockade**](https://dragooon.github.io/stockade/)
 
@@ -15,8 +15,10 @@ Multi-agent orchestrator for Claude with layered security. Agents run in contain
 - [How It Works](#how-it-works)
   - [Tool Permissions](#tool-permissions)
   - [Credential Management](#credential-management)
+  - [Prompt Cache Injection](#prompt-cache-injection)
   - [Container Isolation](#container-isolation)
   - [RBAC](#rbac)
+  - [Observability](#observability)
 - [Configuration](#configuration)
 - [Comparison](#comparison)
 - [Tests](#tests)
@@ -90,6 +92,15 @@ flowchart LR
 
 Sandboxed agents are forced through the proxy (it's their only route out). Local agents route through it automatically when the proxy is running and the agent has credentials configured. If the proxy is down, local agents fall back to host credentials.
 
+### Prompt Cache Injection
+
+The credential proxy automatically injects Anthropic prompt cache markers on every API request, reducing token costs significantly on long conversations:
+
+- **System prompt** — last block gets a 1-hour TTL cache marker (`scope:global` for Opus, standard ephemeral for Haiku which doesn't support extended TTL)
+- **Conversation history** — second-to-last user message gets a 1-hour cache marker; last user message gets 5-minute ephemeral (skipped if the SDK already marked it)
+
+This is transparent to agents and requires no configuration. Cache hit stats appear in the audit logs.
+
 ### Container Isolation
 
 ```mermaid
@@ -104,6 +115,8 @@ flowchart TB
 ```
 
 Containers have no direct internet access — the proxy is the only way out. Local agents route through the proxy when credentials are configured, falling back to host credentials if the proxy is down. Both paths enforce the same deny-by-default network policy.
+
+**WSL2 / cross-filesystem support:** When the Docker host filesystem differs from the orchestrator's filesystem (e.g. WSL2), use `workspace_path` (relative to the agents dir) or `workspace_host_path` (explicit host path) in the container config to point Docker at the correct mount location.
 
 ### RBAC
 
@@ -123,6 +136,17 @@ User permissions are checked at every delegation boundary — not just the first
 
 See the [architecture docs](https://dragooon.github.io/stockade/architecture) for full details on message flow, container lifecycle, and credential proxy internals.
 
+### Observability
+
+The proxy writes two NDJSON log files to `~/.stockade/logs/`:
+
+| File | Contents |
+|---|---|
+| `cache-meta.ndjson` | Per-API-call token stats: input, output, cache_read, cache_create, latency, session/agent/scope tags |
+| `requests.ndjson` | Per-session system prompt snapshot (logged once per session ID, includes each block's type/bytes/cache_control) |
+
+Enable with `STOCKADE_AUDIT_LOG=1` in the proxy's environment. The orchestrator also logs dispatch events, session resumes, and container lifecycle to stdout.
+
 ## Configuration
 
 ```yaml
@@ -132,6 +156,7 @@ agents:
     tools: [Bash, Read, Write, Edit, Glob, Grep]
     subagents: [researcher]
     sandboxed: true
+    skills: [tavily-search, gogcli]   # sync from ~/.claude/skills/
     permissions:
       - "deny:Write(/config/**)"
       - "allow:*"
@@ -140,6 +165,10 @@ agents:
     model: claude-haiku-4-5-20251001
     tools: [Read, WebSearch, WebFetch]
     sandboxed: true
+    credentials: [tavily-api-key]
+    container:
+      workspace_path: researcher     # relative to agents dir (WSL2: use workspace_host_path)
+      memory: 512m
 ```
 
 See [`config/config.example.yaml`](config/config.example.yaml) for the full default and the [configuration reference](https://dragooon.github.io/stockade/configuration) for all options.
@@ -151,16 +180,16 @@ See [`config/config.example.yaml`](config/config.example.yaml) for the full defa
 | **Isolation** | Optional containers, app-level perms | Container per group | Landlock + seccomp + netns | Container + RBAC + permissions + proxy + network |
 | **Credentials** | In-process | Gateway injection | Host-only via OpenShell | MITM proxy, per-route, zero secrets in container |
 | **Multi-agent** | Single | Single per group | Single (wraps OpenClaw) | Hierarchical delegation with `ask_agent` MCP |
-| **Codebase** | ~500k lines | ~2k lines | Thin CLI over OpenClaw | ~8k lines, 749 tests |
+| **Codebase** | ~500k lines | ~2k lines | Thin CLI over OpenClaw | ~9k lines, 724 tests |
 | **Status** | Production | Production | Alpha | Alpha |
 
 ## Tests
 
 ```bash
-pnpm test              # all 749 tests
+pnpm test              # all tests
 ```
 
-749 tests across 3 packages: orchestrator (614), proxy (117), worker (18).
+724 tests across 3 packages: orchestrator (587), proxy (125), worker (12).
 
 ## Requirements
 

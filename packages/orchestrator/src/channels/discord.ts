@@ -125,6 +125,33 @@ export class DiscordAdapter {
   }
 
   /**
+   * Deliver a message to the channel identified by scope.
+   * Used by the scheduler to post task results back to the originating channel.
+   *
+   * Scope formats:
+   *   discord:<serverId>:<channelId>           → sends to channelId
+   *   discord:<serverId>:<channelId>:<threadId> → sends to threadId
+   */
+  async send(scope: string, text: string): Promise<void> {
+    const parts = scope.split(":");
+    if (parts[0] !== "discord" || parts.length < 3) return;
+
+    // Thread scope: parts[3] is the threadId; channel scope: parts[2] is channelId
+    const targetId = parts.length >= 4 ? parts[3] : parts[2];
+
+    try {
+      const channel = await this.client.channels.fetch(targetId);
+      if (!channel || !channel.isSendable()) return;
+      const chunks = splitMessage(text, 2000);
+      for (const chunk of chunks) {
+        await (channel as any).send(chunk);
+      }
+    } catch (err) {
+      console.error(`[discord] Failed to deliver scheduled task result to ${targetId}:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  /**
    * Send a brief resumption notice to each Discord channel/thread that had
    * an active session before the last restart.
    *

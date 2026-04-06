@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Trigger an orchestrator restart by writing the signal file.
-SIGNAL_FILE="${HOME}/.stockade/data/restart.signal"
+SIGNAL_FILE="${HOME}/.stockade/restart.signal"
 
 # Optional: merge a branch before restart
 if [ -n "$1" ]; then

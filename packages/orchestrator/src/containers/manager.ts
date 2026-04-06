@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
 import type { DockerClient } from "./docker.js";
 import type { ContainersConfig, ContainerState } from "./types.js";
 import type { AgentConfig } from "../types.js";
+import type { WorkerManager } from "../workers/index.js";
 import { PortAllocator } from "./ports.js";
 import { provisionContainer, type ProvisionResult } from "./provision.js";
 import { resolveDockerfile, ensureImage } from "./images.js";
+import { createWorkerLogger } from "../log.js";
 
 /**
  * Manages the lifecycle of Docker containers for sandboxed agents.
@@ -12,10 +15,11 @@ import { resolveDockerfile, ensureImage } from "./images.js";
  * Shared containers (default): one container per agentId, reused across scopes.
  * Session-isolated containers: one container per scope, keyed by agentId:scopeHash.
  */
-export class ContainerManager {
+export class ContainerManager implements WorkerManager {
   private readonly containers = new Map<string, ContainerState>();
   private readonly cleanups = new Map<string, () => Promise<void>>();
   private readonly inflight = new Map<string, Promise<string>>();
+  private readonly logProcs = new Map<string, ChildProcess>();
   private readonly portAllocator: PortAllocator;
 
   constructor(
@@ -23,7 +27,8 @@ export class ContainerManager {
     private readonly config: ContainersConfig,
     private readonly proxyGatewayUrl: string,
     private readonly dataDir: string,
-    private readonly agentsDir?: string
+    private readonly logsDir: string,
+    private readonly agentsDir?: string,
   ) {
     this.portAllocator = new PortAllocator(config.port_range);
   }
@@ -135,6 +140,16 @@ export class ContainerManager {
     // Wait for health check
     await this.waitForHealth(port);
 
+    // Stream container logs to <logsDir>/workers/<agentId>.log
+    const log = createWorkerLogger(this.logsDir, agentId);
+    const logProc = spawn("docker", ["logs", "--follow", containerId], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    logProc.stdout?.on("data", (d: Buffer) => log(d.toString().trimEnd()));
+    logProc.stderr?.on("data", (d: Buffer) => log(`[stderr] ${d.toString().trimEnd()}`));
+    logProc.on("exit", () => this.logProcs.delete(key));
+    this.logProcs.set(key, logProc);
+
     const url = `http://localhost:${port}`;
     const state: ContainerState = {
       containerId,
@@ -175,6 +190,13 @@ export class ContainerManager {
     this.portAllocator.release(state.port);
     this.containers.delete(key);
 
+    // Stop log follower
+    const logProc = this.logProcs.get(key);
+    if (logProc) {
+      logProc.kill();
+      this.logProcs.delete(key);
+    }
+
     // Run provisioning cleanup (revoke token, remove temp files)
     const cleanup = this.cleanups.get(key);
     if (cleanup) {
@@ -195,11 +217,48 @@ export class ContainerManager {
   }
 
   /**
-   * Graceful shutdown: tear down all managed containers.
+   * Graceful shutdown: stop all managed containers (without removing them),
+   * run provisioning cleanup callbacks, and clear internal state.
    */
   async shutdownAll(): Promise<void> {
-    const keys = [...this.containers.keys()];
-    await Promise.all(keys.map((k) => this.teardown(k)));
+    // Kill all log followers first
+    for (const [key, logProc] of this.logProcs) {
+      logProc.kill();
+      this.logProcs.delete(key);
+    }
+
+    const entries = [...this.containers.entries()];
+    await Promise.all(
+      entries.map(async ([key, state]) => {
+        try {
+          await this.docker.stopContainer(state.containerId, 5);
+        } catch {
+          // Container may already be stopped
+        }
+        this.portAllocator.release(state.port);
+        const cleanup = this.cleanups.get(key);
+        if (cleanup) {
+          await cleanup();
+          this.cleanups.delete(key);
+        }
+      }),
+    );
+    this.containers.clear();
+  }
+
+  /**
+   * WorkerManager: restart the shared container for an agent.
+   * The next ensure() call will re-provision it.
+   */
+  async restart(agentId: string, _agentConfig: AgentConfig): Promise<void> {
+    await this.restartContainer(agentId);
+  }
+
+  /**
+   * WorkerManager: the memory path as seen inside the container is always /workspace/memory.
+   */
+  resolveMemoryPath(_agentId: string, _agentConfig: AgentConfig): string {
+    return "/workspace/memory";
   }
 
   /**

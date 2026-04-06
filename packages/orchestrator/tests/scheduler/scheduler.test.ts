@@ -22,10 +22,12 @@ function makeTask(overrides?: Partial<ScheduledTask>): ScheduledTask {
     id: "t1",
     agentId: "main",
     scope: "test:scope",
+    userId: "user1",
+    userPlatform: "terminal",
     prompt: "do something",
     schedule_type: "interval",
     schedule_value: "60000",
-    context_mode: "agent",
+    context_mode: "isolated",
     next_run: new Date(Date.now() - 1000).toISOString(), // 1s ago (due)
     last_run: null,
     last_result: null,

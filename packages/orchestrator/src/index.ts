@@ -7,17 +7,27 @@ import { dirname } from "node:path";
 
 import { loadConfig } from "./config.js";
 import { resolveAgent } from "./router.js";
-import { checkAccess, buildPermissionHook } from "./rbac.js";
+import { checkAccess } from "./rbac.js";
 import { initSessionsTable, getSessionId, setSessionId, deleteSession } from "./sessions.js";
 import { dispatch, type DispatchContext } from "./dispatcher.js";
 import { TerminalAdapter } from "./channels/terminal.js";
 import { DiscordAdapter } from "./channels/discord.js";
 import { ContainerManager, DockerClient, DispatchQueue } from "./containers/index.js";
-import { startSchedulerLoop, stopSchedulerLoop } from "./scheduler/index.js";
+import { HostWorkerManager } from "./workers/host.js";
+import { startCallbackServer, CALLBACK_PORT } from "./api/server.js";
+import { getCallbackSession } from "./api/sessions.js";
+import {
+  startSchedulerLoop,
+  stopSchedulerLoop,
+  SQLiteTaskStore,
+  initSchedulerTables,
+} from "./scheduler/index.js";
+import type { ScheduledTask } from "./scheduler/types.js";
 import type { ChannelMessage, AskApprovalFn, ApprovalChannel } from "./types.js";
 import { buildGatedAskApproval, resolveEffectivePermissions } from "./gatekeeper.js";
 import { watchConfigFiles } from "./watch.js";
 import { syncAgentSkills } from "./skills.js";
+import type { WorkerManager } from "./workers/index.js";
 
 import { PLATFORM_HOME } from "./config.js";
 
@@ -77,6 +87,7 @@ function releaseLock() {
 // ────────────────────────────────────────────────────────────────
 mkdirSync(paths.agents_dir, { recursive: true });
 mkdirSync(paths.containers_dir, { recursive: true });
+mkdirSync(paths.logs_dir, { recursive: true });
 
 // Create per-agent directories and sync skills
 for (const agentId of Object.keys(config.agents.agents)) {
@@ -90,6 +101,8 @@ console.log(`[paths] agents_dir=${paths.agents_dir}`);
 // 2. Set up sessions DB
 const db = new Database(paths.sessions_db);
 initSessionsTable(db);
+initSchedulerTables(db);
+const taskStore = new SQLiteTaskStore(db);
 
 // D. Load cached scopes from previous restart (if any)
 const activeScopesFile = resolve(paths.data_dir, "active-scopes.json");
@@ -103,7 +116,12 @@ if (existsSync(activeScopesFile)) {
   }
 }
 
-// 3. Set up container manager (if containers config is present)
+// 3. Set up worker managers
+
+// Host worker manager — manages child processes for non-sandboxed agents
+const hostWorkerManager = new HostWorkerManager(paths.agents_dir, paths.logs_dir);
+
+// Container manager — manages Docker containers for sandboxed agents (optional)
 let containerManager: ContainerManager | undefined;
 
 if (config.platform.containers) {
@@ -115,10 +133,10 @@ if (config.platform.containers) {
     config.platform.containers,
     proxyGatewayUrl,
     paths.data_dir,
-    paths.agents_dir
+    paths.logs_dir,
+    paths.agents_dir,
   );
 
-  // Ensure Docker network exists
   const network = config.platform.containers.network;
   const exists = await docker.networkExists(network);
   if (!exists) {
@@ -126,12 +144,89 @@ if (config.platform.containers) {
     console.log(`[containers] Created Docker network: ${network}`);
   }
 
-  // Clean up orphaned containers from a previous run
   await containerManager.cleanupOrphans();
   console.log("[containers] Container manager initialized");
 }
 
-// 3b. Set up dispatch queue (concurrency control)
+// Composite WorkerManager — routes to host or container based on agentConfig.sandboxed
+const workerManager: WorkerManager = {
+  async ensure(agentId, agentConfig, scope) {
+    if (agentConfig.sandboxed && containerManager) {
+      return containerManager.ensure(agentId, agentConfig, scope);
+    }
+    return hostWorkerManager.ensure(agentId, agentConfig, scope);
+  },
+  async restart(agentId, agentConfig) {
+    if (agentConfig.sandboxed && containerManager) {
+      return containerManager.restart(agentId, agentConfig);
+    }
+    return hostWorkerManager.restart(agentId, agentConfig);
+  },
+  async shutdownAll() {
+    await Promise.all([
+      hostWorkerManager.shutdownAll(),
+      containerManager?.shutdownAll(),
+    ]);
+  },
+  async cleanupOrphans() {
+    await Promise.all([
+      hostWorkerManager.cleanupOrphans(),
+      containerManager?.cleanupOrphans(),
+    ]);
+  },
+  resolveMemoryPath(agentId, agentConfig) {
+    if (agentConfig.sandboxed && containerManager) {
+      return containerManager.resolveMemoryPath(agentId, agentConfig);
+    }
+    return hostWorkerManager.resolveMemoryPath(agentId, agentConfig);
+  },
+};
+
+// 3b. Start orchestrator callback server (port 7420)
+// Workers call back here for permission checks and agent MCP tool invocations.
+const orchestratorCallbackUrl = `http://localhost:${CALLBACK_PORT}`;
+
+const stopCallbackServer = startCallbackServer(
+  workerManager,
+  (token) => {
+    const ctx = getCallbackSession(token);
+    if (!ctx) return null;
+    const proxyConfig = config.platform.containers ? {
+      gatewayUrl: `http://${config.platform.containers.proxy_host}:10256`,
+      host: config.platform.containers.proxy_host,
+      caCertPath: resolve(projectRoot, config.platform.containers.proxy_ca_cert),
+    } : undefined;
+    return {
+      allAgents: config.agents,
+      platform: config.platform,
+      userId: ctx.userId,
+      userPlatform: ctx.userPlatform,
+      agentsDir: paths.agents_dir,
+      platformRoot: paths.data_dir,
+      askApproval: ctx.askApproval,
+      workerManager,
+      proxy: proxyConfig,
+      orchestratorCallbackUrl,
+      onBackgroundComplete: (scope, text, meta) => {
+        console.log(`[agent-mcp] background completion for scope=${scope.slice(0, 40)} — re-dispatching via queue`);
+        dispatchQueue.enqueue(scope, text, { userId: meta.userId, userPlatform: meta.userPlatform, askApproval: meta.askApproval })
+          .then((result) => {
+            const platform = scope.split(":")[0];
+            const sender = channelSenders.get(platform);
+            if (sender) {
+              return sender(scope, result);
+            }
+          })
+          .catch((err: unknown) => {
+            console.error(`[agent-mcp] background completion dispatch failed for scope=${scope.slice(0, 40)}:`, err);
+          });
+      },
+    };
+  },
+  taskStore,
+);
+
+// 3c. Set up dispatch queue (concurrency control)
 const maxConcurrent = config.platform.containers?.max_concurrent ?? 5;
 const dispatchQueue = new DispatchQueue({ maxConcurrent });
 
@@ -156,12 +251,13 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
   const userId = (pending.meta?.userId as string) ?? "system";
   const userPlatform = (pending.meta?.userPlatform as string) ?? "internal";
   const askApproval = pending.meta?.askApproval as AskApprovalFn | undefined;
+  // noSession: isolated scheduled tasks — don't resume or overwrite the channel session
+  const noSession = (pending.meta?.noSession as boolean) ?? false;
 
   // Handle /agent:<id> routing prefix (from Discord /agent slash command)
   let messageText = pending.text;
   let agentId = resolveAgent(scope, config.platform);
   let effectiveScope = scope;
-  const dispatchStart = Date.now();
 
   const agentPrefixMatch = messageText.match(/^\/agent:(\S+)\s+([\s\S]*)$/);
   if (agentPrefixMatch) {
@@ -169,7 +265,6 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
     if (config.agents.agents[targetAgentId]) {
       agentId = targetAgentId;
       messageText = agentPrefixMatch[2];
-      // Use a separate scope so each agent gets its own session
       effectiveScope = `${scope}:agent:${targetAgentId}`;
     }
   }
@@ -179,26 +274,9 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
     return `Unknown agent: ${agentId}`;
   }
 
-  const sessionId = getSessionId(db, effectiveScope);
-  const agentCwd = resolve(paths.agents_dir, agentId);
-  // When gatekeeper is enabled, agents without explicit permissions
-  // get ["ask:*"] so every tool invocation passes through gatekeeper review.
-  const effectivePermissions = resolveEffectivePermissions(
-    agentConfig.permissions,
-    config.platform.gatekeeper,
-  );
+  const sessionId = noSession ? null : getSessionId(db, effectiveScope);
 
-  const permissionHook = buildPermissionHook(
-    userId,
-    userPlatform,
-    config.platform,
-    effectivePermissions,
-    agentCwd,
-    paths.data_dir,
-    askApproval,
-  );
-
-  // Build proxy config for credential injection (both local and sandboxed agents)
+  // Build proxy config for credential injection
   const proxyConfig = config.platform.containers ? {
     gatewayUrl: `http://${config.platform.containers.proxy_host}:10256`,
     host: config.platform.containers.proxy_host,
@@ -213,30 +291,54 @@ async function doDispatch(scope: string, pending: { text: string; meta?: Record<
     agentsDir: paths.agents_dir,
     platformRoot: paths.data_dir,
     askApproval,
-    containerManager,
+    workerManager,
     proxy: proxyConfig,
+    orchestratorCallbackUrl,
+    schedulerEnabled: true,
   };
 
   const attachments = (pending.meta?.attachments as import("./types.js").ChannelAttachment[] | undefined);
-  const preview = messageText.slice(0, 80).replace(/\n/g, " ");
-  console.log(`[dispatch] → ${agentId} | user=${userId} scope=${effectiveScope.slice(0, 40)} | "${preview}${messageText.length > 80 ? "…" : ""}"`);
 
   const result = await dispatch(
     agentId,
-    { scope, content: messageText, userId, platform: userPlatform, attachments },
+    { scope: effectiveScope, content: messageText, userId, platform: userPlatform, attachments },
     agentConfig,
     sessionId,
-    permissionHook,
+    undefined, // RBAC now handled via HTTP callback in worker's PreToolUse hook
     context,
-    containerManager
   );
 
-  const elapsed = ((Date.now() - dispatchStart) / 1000).toFixed(1);
-  const resultPreview = result.result.slice(0, 100).replace(/\n/g, " ");
-  console.log(`[dispatch] ← ${agentId} | ${elapsed}s | session=${result.sessionId.slice(0, 12)} | "${resultPreview}${result.result.length > 100 ? "…" : ""}"`);
-
-  setSessionId(db, effectiveScope, result.sessionId);
+  if (!noSession) {
+    setSessionId(db, effectiveScope, result.sessionId);
+  }
   return result.result;
+}
+
+// 3d. Channel sender registry — populated when adapters start
+// Used by scheduler to deliver task results back to the originating channel.
+const channelSenders = new Map<string, (scope: string, text: string) => Promise<void>>();
+
+/**
+ * Execute a scheduled task: dispatch to the agent and deliver the result
+ * back to the channel the task was created in.
+ */
+async function executeTask(task: ScheduledTask): Promise<string> {
+  const result = await dispatchQueue.enqueue(task.scope, task.prompt, {
+    userId: task.userId,
+    userPlatform: task.userPlatform,
+    noSession: task.context_mode === "isolated",
+  });
+
+  // Deliver result back to the originating channel
+  const platform = task.scope.split(":")[0];
+  const sender = channelSenders.get(platform);
+  if (sender) {
+    sender(task.scope, result).catch((err: unknown) =>
+      console.error(`[scheduler] Failed to deliver result for task ${task.id}:`, err)
+    );
+  }
+
+  return result;
 }
 
 // 4. Define handleMessage callback — routes through the dispatch queue
@@ -310,6 +412,7 @@ if (config.platform.channels.terminal?.enabled) {
     handleMessage,
   );
   adapter.start();
+  channelSenders.set("terminal", (scope, text) => adapter.send(scope, text));
   console.log("Terminal channel started");
 }
 
@@ -320,8 +423,14 @@ if (config.platform.channels.discord?.enabled) {
     agents: config.agents,
   });
   await adapter.start();
+  channelSenders.set("discord", (scope, text) => adapter.send(scope, text));
   console.log("Discord channel started");
 }
+
+// 5b. Start the scheduler loop
+const schedulerConfig = config.platform.scheduler ?? { poll_interval_ms: 60_000, timezone: "UTC" };
+startSchedulerLoop({ store: taskStore, config: schedulerConfig, executeTask });
+console.log(`[scheduler] Started (poll every ${schedulerConfig.poll_interval_ms}ms, tz=${schedulerConfig.timezone})`);
 
 // 6. Hot reload config on file changes
 // Agent definitions, RBAC, gatekeeper, and .env are reloaded live.
@@ -342,13 +451,16 @@ const stopWatch = watchConfigFiles(PLATFORM_HOME, envPath, projectRoot, (next) =
   // Re-sync skills (adds/removes junctions based on new config)
   syncAgentSkills(config.agents, paths.agents_dir);
 
-  // Restart all running containers so they pick up the new config
-  if (containerManager) {
-    const agentIds = Object.keys(config.agents.agents);
-    Promise.all(agentIds.map((agentId) => containerManager!.restartContainer(agentId))).catch(
-      (err) => console.error("[watch] Container restart after config reload failed:", err),
-    );
-  }
+  // Restart all workers so they pick up the new config
+  const agentIds = Object.keys(config.agents.agents);
+  Promise.all(
+    agentIds.map((agentId) => {
+      const agentCfg = config.agents.agents[agentId];
+      return workerManager.restart(agentId, agentCfg).catch(
+        (err: Error) => console.error(`[watch] Worker restart failed for ${agentId}:`, err),
+      );
+    }),
+  ).catch((err) => console.error("[watch] Worker restart after config reload failed:", err));
 });
 
 // ── Restart support ─────────────────────────────────────────────
@@ -359,6 +471,7 @@ let restartWatcher: FSWatcher | undefined;
 async function shutdown() {
   // Stop accepting new work
   stopWatch();
+  stopCallbackServer();
   dispatchQueue.shutdown();
   stopSchedulerLoop();
 
@@ -368,10 +481,8 @@ async function shutdown() {
     restartWatcher = undefined;
   }
 
-  if (containerManager) {
-    console.log("[containers] Shutting down all containers...");
-    await containerManager.shutdownAll();
-  }
+  console.log("[workers] Shutting down all workers...");
+  await workerManager.shutdownAll();
 
   // Cache active scopes before closing DB (only on restart)
   if (restartRequested) {

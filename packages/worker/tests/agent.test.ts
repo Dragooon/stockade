@@ -1,215 +1,170 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { WorkerRunRequest } from "../src/types.js";
+import { ConversationChannel } from "../src/channel.js";
+import type { WorkerSessionRequest } from "../src/types.js";
 
-// Mock the Agent SDK before importing agent module
+// Mock the Agent SDK
 const mockQuery = vi.fn();
+const mockTool = vi.fn().mockImplementation((_name: string, _desc: string, _schema: unknown, fn: Function) => fn);
+const mockCreateSdkMcpServer = vi.fn().mockReturnValue({});
+
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
-  query: mockQuery,
+  query: (...args: unknown[]) => mockQuery(...args),
+  tool: (...args: unknown[]) => mockTool(...args),
+  createSdkMcpServer: (...args: unknown[]) => mockCreateSdkMcpServer(...args),
 }));
 
-// Import after mock is set up
-const { runAgent } = await import("../src/agent.js");
+const { runAgentSession } = await import("../src/agent.js");
 
 /** Helper: create an async iterable from an array of messages */
 function fakeStream(messages: Record<string, unknown>[]) {
   return {
     async *[Symbol.asyncIterator]() {
-      for (const msg of messages) {
-        yield msg;
-      }
+      for (const msg of messages) yield msg;
     },
   };
 }
 
-describe("runAgent", () => {
+const BASE_REQUEST: WorkerSessionRequest = {
+  prompt: "test",
+  orchestratorUrl: "http://localhost:7420",
+  callbackToken: "test-token",
+};
+
+describe("runAgentSession", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("returns result and sessionId from a successful run", async () => {
+  it("emits started event with SDK session ID", async () => {
     mockQuery.mockReturnValue(
       fakeStream([
-        { type: "system", session_id: "sess-abc123" },
-        { type: "assistant", content: "thinking..." },
-        { type: "result", result: "Hello, world!" },
-      ])
+        { session_id: "sdk-sess-1" },
+        { result: "done", stop_reason: "end_turn" },
+      ]),
     );
 
-    const request: WorkerRunRequest = { prompt: "Say hello" };
-    const response = await runAgent(request);
+    const channel = new ConversationChannel();
+    channel.push("hello");
+    setTimeout(() => channel.close(), 10);
 
-    expect(response.result).toBe("Hello, world!");
-    expect(response.sessionId).toBe("sess-abc123");
+    const events: unknown[] = [];
+    await runAgentSession(BASE_REQUEST, channel, (ev) => events.push(ev));
+
+    const started = events.find((e: any) => e.type === "started") as any;
+    expect(started?.sessionId).toBe("sdk-sess-1");
   });
 
-  it("passes sessionId for session resumption", async () => {
+  it("emits result event with text and sessionId", async () => {
     mockQuery.mockReturnValue(
       fakeStream([
-        { type: "system", session_id: "sess-existing" },
-        { type: "result", result: "Resumed!" },
-      ])
+        { session_id: "sdk-sess-2" },
+        { result: "Hello, world!", stop_reason: "end_turn" },
+      ]),
     );
 
-    const request: WorkerRunRequest = {
-      prompt: "Continue",
-      sessionId: "sess-existing",
-    };
-    await runAgent(request);
+    const channel = new ConversationChannel();
+    channel.push("hello");
+    setTimeout(() => channel.close(), 10);
+
+    const events: unknown[] = [];
+    await runAgentSession(BASE_REQUEST, channel, (ev) => events.push(ev));
+
+    const result = events.find((e: any) => e.type === "result") as any;
+    expect(result?.text).toBe("Hello, world!");
+    expect(result?.sessionId).toBe("sdk-sess-2");
+    expect(result?.stopReason).toBe("end_turn");
+  });
+
+  it("emits stale_session event on stale session error", async () => {
+    mockQuery.mockImplementation(function* () {
+      throw new Error("No conversation found with the given session_id");
+    });
+
+    const channel = new ConversationChannel();
+    channel.push("hello");
+
+    const events: unknown[] = [];
+    await runAgentSession(
+      { ...BASE_REQUEST, sessionId: "stale-session" },
+      channel,
+      (ev) => events.push(ev),
+    );
+
+    const stale = events.find((e: any) => e.type === "stale_session");
+    expect(stale).toBeDefined();
+  });
+
+  it("passes resume option when sessionId provided", async () => {
+    mockQuery.mockReturnValue(
+      fakeStream([
+        { session_id: "sdk-sess-3" },
+        { result: "resumed", stop_reason: "end_turn" },
+      ]),
+    );
+
+    const channel = new ConversationChannel();
+    channel.push("hello");
+    setTimeout(() => channel.close(), 10);
+
+    await runAgentSession(
+      { ...BASE_REQUEST, sessionId: "existing-session" },
+      channel,
+      () => {},
+    );
 
     expect(mockQuery).toHaveBeenCalledWith(
       expect.objectContaining({
-        options: expect.objectContaining({
-          resume: "sess-existing",
-        }),
-      })
+        options: expect.objectContaining({ resume: "existing-session" }),
+      }),
     );
   });
 
-  it("uses default tools when none specified", async () => {
+  it("uses bypassPermissions mode", async () => {
     mockQuery.mockReturnValue(
       fakeStream([
-        { type: "system", session_id: "sess-1" },
-        { type: "result", result: "done" },
-      ])
+        { session_id: "sdk-sess-4" },
+        { result: "done", stop_reason: "end_turn" },
+      ]),
     );
 
-    await runAgent({ prompt: "test" });
+    const channel = new ConversationChannel();
+    channel.push("hello");
+    setTimeout(() => channel.close(), 10);
 
-    // When no tools specified, allowedTools should be omitted (enables all tools)
-    const callArgs = mockQuery.mock.calls[0][0];
-    expect(callArgs.options).not.toHaveProperty("allowedTools");
-  });
-
-  it("uses custom tools when provided", async () => {
-    mockQuery.mockReturnValue(
-      fakeStream([
-        { type: "system", session_id: "sess-2" },
-        { type: "result", result: "done" },
-      ])
-    );
-
-    await runAgent({ prompt: "search", tools: ["WebSearch", "WebFetch"] });
+    await runAgentSession(BASE_REQUEST, channel, () => {});
 
     expect(mockQuery).toHaveBeenCalledWith(
       expect.objectContaining({
-        options: expect.objectContaining({
-          allowedTools: ["WebSearch", "WebFetch"],
-        }),
-      })
+        options: expect.objectContaining({ permissionMode: "bypassPermissions" }),
+      }),
     );
   });
 
-  it("uses custom model when provided", async () => {
+  it("emits turn events for each assistant message", async () => {
     mockQuery.mockReturnValue(
       fakeStream([
-        { type: "system", session_id: "sess-3" },
-        { type: "result", result: "done" },
-      ])
+        { session_id: "sdk-sess-5" },
+        {
+          type: "assistant",
+          message: {
+            usage: { input_tokens: 100, output_tokens: 50 },
+            content: [],
+          },
+        },
+        { result: "done", stop_reason: "end_turn" },
+      ]),
     );
 
-    await runAgent({ prompt: "test", model: "opus" });
+    const channel = new ConversationChannel();
+    channel.push("hello");
+    setTimeout(() => channel.close(), 10);
 
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.objectContaining({
-        options: expect.objectContaining({
-          model: "opus",
-        }),
-      })
-    );
-  });
+    const events: unknown[] = [];
+    await runAgentSession(BASE_REQUEST, channel, (ev) => events.push(ev));
 
-  it("defaults model to sonnet", async () => {
-    mockQuery.mockReturnValue(
-      fakeStream([
-        { type: "system", session_id: "sess-4" },
-        { type: "result", result: "done" },
-      ])
-    );
-
-    await runAgent({ prompt: "test" });
-
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.objectContaining({
-        options: expect.objectContaining({
-          model: "sonnet",
-        }),
-      })
-    );
-  });
-
-  it("defaults maxTurns to 20", async () => {
-    mockQuery.mockReturnValue(
-      fakeStream([
-        { type: "system", session_id: "sess-5" },
-        { type: "result", result: "done" },
-      ])
-    );
-
-    await runAgent({ prompt: "test" });
-
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.objectContaining({
-        options: expect.objectContaining({
-          maxTurns: 20,
-        }),
-      })
-    );
-  });
-
-  it("passes custom maxTurns", async () => {
-    mockQuery.mockReturnValue(
-      fakeStream([
-        { type: "system", session_id: "sess-6" },
-        { type: "result", result: "done" },
-      ])
-    );
-
-    await runAgent({ prompt: "test", maxTurns: 5 });
-
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.objectContaining({
-        options: expect.objectContaining({
-          maxTurns: 5,
-        }),
-      })
-    );
-  });
-
-  it("passes systemPrompt when provided", async () => {
-    mockQuery.mockReturnValue(
-      fakeStream([
-        { type: "system", session_id: "sess-7" },
-        { type: "result", result: "done" },
-      ])
-    );
-
-    await runAgent({ prompt: "test", systemPrompt: "You are helpful." });
-
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.objectContaining({
-        options: expect.objectContaining({
-          systemPrompt: "You are helpful.",
-        }),
-      })
-    );
-  });
-
-  it("does not pass resume when sessionId is absent", async () => {
-    mockQuery.mockReturnValue(
-      fakeStream([
-        { type: "system", session_id: "sess-8" },
-        { type: "result", result: "done" },
-      ])
-    );
-
-    await runAgent({ prompt: "test" });
-
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.objectContaining({
-        options: expect.objectContaining({
-          resume: undefined,
-        }),
-      })
-    );
+    const turns = events.filter((e: any) => e.type === "turn");
+    expect(turns.length).toBe(1);
+    expect((turns[0] as any).input).toBe(100);
+    expect((turns[0] as any).output).toBe(50);
   });
 });

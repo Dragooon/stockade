@@ -70,6 +70,12 @@ export class TerminalAdapter {
     this.rl = null;
   }
 
+  /** Deliver a scheduled task result to the terminal. */
+  async send(_scope: string, text: string): Promise<void> {
+    process.stdout.write(`\n[Scheduled task]\n${text}\n\n`);
+    this.rl?.prompt();
+  }
+
   /**
    * Create an ApprovalChannel for the terminal.
    *

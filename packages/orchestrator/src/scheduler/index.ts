@@ -6,6 +6,7 @@ export {
   _resetSchedulerForTests,
 } from "./scheduler.js";
 export { computeNextRun } from "./compute-next-run.js";
+export { SQLiteTaskStore, initSchedulerTables } from "./store.js";
 export type {
   ScheduledTask,
   TaskRunLog,

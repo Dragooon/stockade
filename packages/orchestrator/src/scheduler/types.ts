@@ -15,8 +15,9 @@ export interface ScheduledTask {
   id: string;
   agentId: string;
   scope: string;
+  userId: string;
+  userPlatform: string;
   prompt: string;
-  script?: string | null;
   schedule_type: ScheduleType;
   schedule_value: string;
   context_mode: ContextMode;

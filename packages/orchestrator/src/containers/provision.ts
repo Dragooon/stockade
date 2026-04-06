@@ -74,7 +74,7 @@ export async function provisionContainer(
     const proxyHost = containersConfig.proxy_host;
     env.HTTP_PROXY = `http://${proxyHost}:10255`;
     env.HTTPS_PROXY = `http://${proxyHost}:10255`;
-    env.NO_PROXY = "localhost,127.0.0.1";
+    env.NO_PROXY = "localhost,127.0.0.1,host.docker.internal";
     env.NODE_EXTRA_CA_CERTS = "/certs/proxy-ca.crt";
     env.CURL_CA_BUNDLE = "/certs/proxy-ca.crt";
     env.REQUESTS_CA_BUNDLE = "/certs/proxy-ca.crt";
@@ -138,10 +138,12 @@ export async function provisionContainer(
 
   // Agent workspace — mount the agent's host workspace as /workspace in the container.
   // The SDK uses this as cwd, so CLAUDE.md, skills, and memory are available.
+  // Priority: workspace_host_path (explicit host path) > workspace_path (relative to agentsDir) > agentsDir/agentId
   if (agentsDir) {
-    const customPath = agentConfig.container?.workspace_path;
-    const workspaceDir = customPath ?? resolve(agentsDir, agentId);
-    if (!customPath) {
+    const hostPath = agentConfig.container?.workspace_host_path;
+    const relPath = agentConfig.container?.workspace_path;
+    const workspaceDir = hostPath ?? (relPath ? resolve(agentsDir, relPath) : resolve(agentsDir, agentId));
+    if (!hostPath && !relPath) {
       mkdirSync(workspaceDir, { recursive: true });
     }
     volumes.push(`${workspaceDir}:/workspace`);
