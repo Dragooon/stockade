@@ -327,6 +327,12 @@ schedule_type options:
   // HOME, PATH, and other critical vars — request.env overrides where needed.
   if (request.env) options.env = { ...process.env, ...request.env };
 
+  // Capture SDK subprocess stderr for debugging auth failures
+  options.stderr = (text: string) => {
+    const trimmed = text.trim();
+    if (trimmed) console.error(`[worker] [sdk-stderr] ${trimmed}`);
+  };
+
   if (request.sessionId && !request.forceNewSession) {
     options.resume = request.sessionId;
   }

@@ -16,9 +16,10 @@
  */
 
 import { join, resolve } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import type {
   AgentConfig,
   AgentsConfig,
@@ -455,6 +456,32 @@ export async function dispatchToWorker(
   };
   createCallbackSession(callbackToken, sessionCtx);
 
+  // ── Step 2b: Read OAuth token for SDK auth ──
+  // The SDK's OAuth flow intermittently fails when running through a proxy
+  // (credential store reads, file lock contention, etc.). Read the token ourselves
+  // and pass it via CLAUDE_CODE_OAUTH_TOKEN so the SDK uses it directly.
+  // Also refreshes the token if near expiry.
+  let oauthToken: string | undefined;
+  {
+    try {
+      const credsPath = join(homedir(), ".claude", ".credentials.json");
+      const creds = JSON.parse(readFileSync(credsPath, "utf-8"));
+      const oauth = creds?.claudeAiOauth;
+      if (oauth?.accessToken) {
+        const needsRefresh = oauth.expiresAt && Date.now() + 5 * 60_000 >= oauth.expiresAt;
+        if (needsRefresh && oauth.refreshToken) {
+          try {
+            const readerScript = resolve(homedir(), ".stockade/repo/packages/proxy/src/cli/read-claude-oauth.py");
+            const result = execFileSync("python", [readerScript], { timeout: 20_000, stdio: "pipe" });
+            oauthToken = result.toString().trim();
+          } catch { oauthToken = oauth.accessToken; }
+        } else {
+          oauthToken = oauth.accessToken;
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
+
   // ── Step 3: Fetch proxy token & build env (if applicable) ──
   let proxyToken: string | undefined;
   let workerEnv: Record<string, string> | undefined;
@@ -464,16 +491,23 @@ export async function dispatchToWorker(
     // Always route through the MITM proxy so cache markers are fixed and requests
     // are logged — even for agents without credentials. The MITM injects credentials
     // only when a route matches; otherwise it passes requests through unchanged.
+    // Sandboxed agents run in Docker — the CA cert is mounted at /certs/proxy-ca.crt,
+    // not the host's Windows path. Use the container path for sandboxed agents.
+    const caCertPath = agentConfig.sandboxed ? "/certs/proxy-ca.crt" : context.proxy.caCertPath;
     workerEnv = {
       HTTP_PROXY: `http://${context.proxy.host}:10255`,
       HTTPS_PROXY: `http://${context.proxy.host}:10255`,
-      NO_PROXY: "localhost,127.0.0.1,host.docker.internal",
-      NODE_EXTRA_CA_CERTS: context.proxy.caCertPath,
-      CURL_CA_BUNDLE: context.proxy.caCertPath,
-      REQUESTS_CA_BUNDLE: context.proxy.caCertPath,
-      SSL_CERT_FILE: context.proxy.caCertPath,
+      NO_PROXY: "localhost,127.0.0.1,host.docker.internal,platform.claude.com,console.anthropic.com",
+      NODE_EXTRA_CA_CERTS: caCertPath,
+      CURL_CA_BUNDLE: caCertPath,
+      REQUESTS_CA_BUNDLE: caCertPath,
+      SSL_CERT_FILE: caCertPath,
       NODE_TLS_REJECT_UNAUTHORIZED: "0",
       PYTHONIOENCODING: "utf-8",
+      // Pass the OAuth token directly so the SDK skips reading .credentials.json.
+      // Uses CLAUDE_CODE_OAUTH_TOKEN (not ANTHROPIC_API_KEY) to preserve the OAuth
+      // auth path — switching to API key auth breaks session resume.
+      ...(oauthToken ? { CLAUDE_CODE_OAUTH_TOKEN: oauthToken } : {}),
       // Stockade context headers — injected via Claude Code's custom-headers
       // mechanism so the proxy can tag each API call with session/agent/scope.
       // The proxy strips these before forwarding to Anthropic.
@@ -526,6 +560,13 @@ export async function dispatchToWorker(
     }
   }
 
+  // Disable 1M context models and adaptive thinking for all agent sessions.
+  workerEnv = {
+    ...workerEnv,
+    CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1",
+    CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
+  };
+
   // For inline agents, override AGENT_WORKSPACE so the persistent worker's
   // default workspace env doesn't bleed into the SDK subprocess.
   if (isInline) {
@@ -559,7 +600,7 @@ export async function dispatchToWorker(
     disallowedTools: PLATFORM_DISALLOWED_TOOLS,
     model: agentConfig.model,
     sessionId: sessionId ?? undefined,
-    maxTurns: 20,
+    maxTurns: agentConfig.max_turns ?? 200,
     effort: agentConfig.effort,
     scope: message.scope,
     cwd: sdkCwd,

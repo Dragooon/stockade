@@ -49,6 +49,7 @@ const agentConfigSchema = z.object({
   /** Skill names to sync from ~/.claude/skills/ into this agent's workspace. */
   skills: z.array(z.string()).optional(),
   inline: z.boolean().optional(),
+  max_turns: z.number().optional(),
 });
 
 const channelBindingSchema = z.object({

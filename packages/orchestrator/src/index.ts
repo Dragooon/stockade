@@ -435,6 +435,11 @@ console.log(`[scheduler] Started (poll every ${schedulerConfig.poll_interval_ms}
 // 6. Hot reload config on file changes
 // Agent definitions, RBAC, gatekeeper, and .env are reloaded live.
 // Channels, container manager, and paths are NOT reloaded (require restart).
+// Track serialized agent configs to diff on reload — only restart workers whose config changed.
+const prevAgentConfigs = new Map<string, string>();
+for (const [id, cfg] of Object.entries(config.agents.agents)) {
+  prevAgentConfigs.set(id, JSON.stringify(cfg));
+}
 const stopWatch = watchConfigFiles(PLATFORM_HOME, envPath, projectRoot, (next) => {
   config = { agents: next.agents, platform: { ...next.platform, paths: config.platform.paths } };
 
@@ -451,16 +456,34 @@ const stopWatch = watchConfigFiles(PLATFORM_HOME, envPath, projectRoot, (next) =
   // Re-sync skills (adds/removes junctions based on new config)
   syncAgentSkills(config.agents, paths.agents_dir);
 
-  // Restart all workers so they pick up the new config
+  // Only restart workers whose agent config actually changed (avoids killing active sessions).
+  // The config object is small — JSON stringify comparison is sufficient.
   const agentIds = Object.keys(config.agents.agents);
-  Promise.all(
-    agentIds.map((agentId) => {
-      const agentCfg = config.agents.agents[agentId];
-      return workerManager.restart(agentId, agentCfg).catch(
-        (err: Error) => console.error(`[watch] Worker restart failed for ${agentId}:`, err),
-      );
-    }),
-  ).catch((err) => console.error("[watch] Worker restart after config reload failed:", err));
+  const changed = agentIds.filter((id) => {
+    const prev = prevAgentConfigs.get(id);
+    const curr = JSON.stringify(config.agents.agents[id]);
+    prevAgentConfigs.set(id, curr);
+    return prev !== undefined && prev !== curr;
+  });
+  // Also track new agents (no restart needed, but store for next diff)
+  for (const id of agentIds) {
+    if (!prevAgentConfigs.has(id)) {
+      prevAgentConfigs.set(id, JSON.stringify(config.agents.agents[id]));
+    }
+  }
+  if (changed.length === 0) {
+    console.log("[watch] config reloaded — no agent config changes, skipping worker restarts");
+  } else {
+    console.log(`[watch] config changed for: ${changed.join(", ")} — restarting`);
+    Promise.all(
+      changed.map((agentId) => {
+        const agentCfg = config.agents.agents[agentId];
+        return workerManager.restart(agentId, agentCfg).catch(
+          (err: Error) => console.error(`[watch] Worker restart failed for ${agentId}:`, err),
+        );
+      }),
+    ).catch((err) => console.error("[watch] Worker restart after config reload failed:", err));
+  }
 });
 
 // ── Restart support ─────────────────────────────────────────────
