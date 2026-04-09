@@ -160,8 +160,11 @@ export function startGateway(getConfig: () => ProxyConfig) {
 
   // ── POST /gateway/cache/invalidate — Clear credential cache ──
   app.post("/gateway/cache/invalidate", async (c) => {
-    const body = await c.req.json<{ key?: string }>().catch(() => ({}));
-    invalidateCache((body as any)?.key);
+    const body = await c.req.json<{ key?: string }>().catch(() => null);
+    if (body === null) {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    invalidateCache(body.key);
     return c.json({ ok: true });
   });
 

@@ -98,7 +98,7 @@ function extractUsage(body: string): Record<string, number> {
  *   3. Second-to-last user message: proxy sets ttl:1h — stable history anchor
  *   4. Last user message: SDK sets — proxy upgrades to ttl:1h
  */
-function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
+export function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
   if (host !== "api.anthropic.com" || !path.includes("/messages")) return body;
   try {
     const req = JSON.parse(body.toString("utf8")) as {
@@ -136,26 +136,35 @@ function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
     }
 
     if (Array.isArray(req.system)) {
-      // Strip scope:global from ALL system blocks — API now rejects it
+      // Normalise ALL system blocks: strip scope:global (API rejects it)
+      // and upgrade/downgrade ttl to match model capabilities.
+      // Without this, an SDK-set {type:"ephemeral"} (5m) on an early system
+      // block followed by a proxy-set ttl:"1h" on a later block triggers:
+      //   "a ttl='1h' cache_control block must not come after a ttl='5m' block"
       for (const blk of req.system) {
         const cc = blk.cache_control as Record<string, unknown> | undefined;
-        if (cc?.scope) {
+        if (!cc) continue;
+        if (cc.scope) {
           delete cc.scope;
+          modified = true;
+        }
+        if (isHaiku) {
+          if (cc.ttl !== undefined) {
+            delete cc.ttl;
+            modified = true;
+          }
+        } else if (cc.ttl !== "1h") {
+          cc.ttl = "1h";
           modified = true;
         }
       }
 
-      // Normalise last system block: set to target1hMarker
-      // (1h for Sonnet/Opus, plain ephemeral for Haiku)
+      // Ensure last system block has a cache marker (ttl already normalised above)
       if (markerCount < 4 && req.system.length >= 2) {
         const last = req.system[req.system.length - 1];
-        const cc = last.cache_control as Record<string, unknown> | undefined;
-        const needsUpdate = isHaiku
-          ? !cc || cc.ttl !== undefined           // Haiku: strip ttl if present
-          : !cc || cc.ttl !== "1h";               // non-Haiku: upgrade to 1h
-        if (needsUpdate) {
-          if (!cc) markerCount++;
+        if (!last.cache_control) {
           last.cache_control = target1hMarker;
+          markerCount++;
           modified = true;
         }
       }

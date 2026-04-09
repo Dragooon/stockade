@@ -30,7 +30,7 @@ export async function resolveCredential(
   }
 
   const cmd = readCmd.replace(/\{key\}/g, key);
-  const value = await execProviderCommand(cmd);
+  const value = await execProviderCommand(cmd, provider);
 
   if (cacheTtl > 0) {
     cache.set(key, {
@@ -70,19 +70,19 @@ export async function storeCredential(
       .replace(/\{value\}/g, value);
 
     try {
-      await execProviderCommand(updateCmd);
+      await execProviderCommand(updateCmd, provider);
     } catch {
       if (!provider.write) throw new Error("Provider update failed and no write command configured");
       const writeCmd = provider.write
         .replace(/\{key\}/g, key)
         .replace(/\{value\}/g, value);
-      await execProviderCommand(writeCmd);
+      await execProviderCommand(writeCmd, provider);
     }
   } else {
     const writeCmd = provider.write!
       .replace(/\{key\}/g, key)
       .replace(/\{value\}/g, value);
-    await execProviderCommand(writeCmd);
+    await execProviderCommand(writeCmd, provider);
   }
 
   // Invalidate cache
@@ -105,17 +105,90 @@ export function getCacheSize(): number {
   return cache.size;
 }
 
+// ─── Provider session management ───────────────────────────────────────────
+// When a provider defines `signin` + `session_env`, we run the signin command
+// once, capture stdout as a session token, and inject it into every child
+// process via the named env var.  Completely generic — works for 1Password,
+// Vault, custom token endpoints, etc.
+
+let session: string | null = null;
+let signinPromise: Promise<string> | null = null;
+
 /**
- * Execute a shell command and return trimmed stdout.
- * Throws on non-zero exit.
+ * Run the provider's signin command and cache the token.
+ * Concurrent callers share the same in-flight promise.
  */
-async function execProviderCommand(cmd: string): Promise<string> {
+async function ensureSession(provider: Provider): Promise<string> {
+  if (session) return session;
+  if (signinPromise) return signinPromise;
+
+  signinPromise = (async () => {
+    const token = await execShell(provider.signin!);
+    if (!token) throw new Error("Provider signin command returned empty output");
+    session = token;
+    signinPromise = null;
+    return token;
+  })();
+
+  return signinPromise;
+}
+
+/**
+ * Invalidate the cached provider session (e.g. after an auth error).
+ */
+export function invalidateSession(): void {
+  session = null;
+  signinPromise = null;
+}
+
+/**
+ * Execute a shell command and return trimmed stdout. Throws on non-zero exit.
+ */
+async function execShell(cmd: string, env?: NodeJS.ProcessEnv): Promise<string> {
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
   const execFileAsync = promisify(execFile);
   const bash = process.platform === "win32"
     ? "C:\\Program Files\\Git\\usr\\bin\\bash.exe"
     : "bash";
-  const { stdout } = await execFileAsync(bash, ["-c", cmd]);
-  return stdout.trim();
+  const opts = env ? { env } : undefined;
+  const { stdout } = await execFileAsync(bash, ["-c", cmd], opts);
+  return String(stdout).trim();
+}
+
+/**
+ * Execute a provider command with optional session injection and retry.
+ *
+ * If the provider has `signin` + `session_env` configured, the session token
+ * is obtained once and injected into every child process.  On auth-like errors,
+ * the session is refreshed and the command retried once.
+ */
+async function execProviderCommand(cmd: string, provider: Provider): Promise<string> {
+  const hasSignin = provider.signin && provider.session_env;
+
+  let env: NodeJS.ProcessEnv | undefined;
+  if (hasSignin) {
+    try {
+      const token = await ensureSession(provider);
+      env = { ...process.env, [provider.session_env!]: token };
+    } catch (err) {
+      console.warn(`[credentials] signin failed, running command without session: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  try {
+    return await execShell(cmd, env);
+  } catch (err: any) {
+    // On auth errors, refresh session and retry once
+    if (hasSignin) {
+      const msg = err?.stderr ?? err?.message ?? "";
+      if (/not.*sign|session.*expir|401|auth/i.test(msg)) {
+        invalidateSession();
+        const token = await ensureSession(provider);
+        const retryEnv = { ...process.env, [provider.session_env!]: token };
+        return execShell(cmd, retryEnv);
+      }
+    }
+    throw err;
+  }
 }

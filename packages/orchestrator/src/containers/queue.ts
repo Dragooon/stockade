@@ -276,7 +276,8 @@ export class DispatchQueue {
       } else if (message) {
         message.resolve("Error: no message processor configured.");
       }
-    } catch {
+    } catch (err) {
+      console.error(`[queue] ${agentKey} message processing error (retry ${state.retryCount + 1}/${MAX_RETRIES}): ${err instanceof Error ? err.message : err}`);
       if (message) {
         state.pendingMessages.unshift(message);
       }
@@ -297,8 +298,8 @@ export class DispatchQueue {
 
     try {
       await task.fn();
-    } catch {
-      // Task error — logged by caller
+    } catch (err) {
+      console.error(`[queue] ${agentKey} task ${task.id} failed: ${err instanceof Error ? err.message : err}`);
     } finally {
       state.active = false;
       state.isTask = false;

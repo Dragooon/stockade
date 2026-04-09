@@ -468,18 +468,35 @@ export async function dispatchToWorker(
       const creds = JSON.parse(readFileSync(credsPath, "utf-8"));
       const oauth = creds?.claudeAiOauth;
       if (oauth?.accessToken) {
-        const needsRefresh = oauth.expiresAt && Date.now() + 5 * 60_000 >= oauth.expiresAt;
+        const now = Date.now();
+        const isExpired = oauth.expiresAt && now >= oauth.expiresAt;
+        const needsRefresh = oauth.expiresAt ? now + 5 * 60_000 >= oauth.expiresAt : false;
         if (needsRefresh && oauth.refreshToken) {
           try {
             const readerScript = resolve(homedir(), ".stockade/repo/packages/proxy/src/cli/read-claude-oauth.py");
             const result = execFileSync("python", [readerScript], { timeout: 20_000, stdio: "pipe" });
             oauthToken = result.toString().trim();
-          } catch { oauthToken = oauth.accessToken; }
-        } else {
+          } catch (err) {
+            // Refresh failed — only use the old token if it hasn't fully expired yet.
+            // Using an expired token produces "Not logged in · Please run /login".
+            if (!isExpired) {
+              oauthToken = oauth.accessToken;
+            }
+            const ttl = oauth.expiresAt ? Math.round((oauth.expiresAt - now) / 60_000) : "unknown";
+            console.log(`[dispatch] OAuth refresh failed (ttl=${ttl}m, expired=${!!isExpired}): ${err instanceof Error ? err.message : err}`);
+          }
+        } else if (!isExpired) {
           oauthToken = oauth.accessToken;
+        } else {
+          // Token is expired and either no refreshToken or no expiresAt to detect refresh need.
+          // Don't pass the dead token — let the SDK surface the real error.
+          const reason = !oauth.refreshToken ? "no refreshToken" : "no expiresAt";
+          console.log(`[dispatch] OAuth token expired, cannot refresh (${reason}). Agent will start without auth.`);
         }
       }
-    } catch { /* non-fatal */ }
+    } catch (err) {
+      console.log(`[dispatch] Failed to read OAuth credentials: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   // ── Step 3: Fetch proxy token & build env (if applicable) ──
