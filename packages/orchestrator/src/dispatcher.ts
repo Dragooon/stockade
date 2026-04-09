@@ -19,7 +19,6 @@ import { join, resolve } from "node:path";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import type {
   AgentConfig,
   AgentsConfig,
@@ -456,49 +455,6 @@ export async function dispatchToWorker(
   };
   createCallbackSession(callbackToken, sessionCtx);
 
-  // ── Step 2b: Read OAuth token for SDK auth ──
-  // The SDK's OAuth flow intermittently fails when running through a proxy
-  // (credential store reads, file lock contention, etc.). Read the token ourselves
-  // and pass it via CLAUDE_CODE_OAUTH_TOKEN so the SDK uses it directly.
-  // Also refreshes the token if near expiry.
-  let oauthToken: string | undefined;
-  {
-    try {
-      const credsPath = join(homedir(), ".claude", ".credentials.json");
-      const creds = JSON.parse(readFileSync(credsPath, "utf-8"));
-      const oauth = creds?.claudeAiOauth;
-      if (oauth?.accessToken) {
-        const now = Date.now();
-        const isExpired = oauth.expiresAt && now >= oauth.expiresAt;
-        const needsRefresh = oauth.expiresAt ? now + 5 * 60_000 >= oauth.expiresAt : false;
-        if (needsRefresh && oauth.refreshToken) {
-          try {
-            const readerScript = resolve(homedir(), ".stockade/repo/packages/proxy/src/cli/read-claude-oauth.py");
-            const result = execFileSync("python", [readerScript], { timeout: 20_000, stdio: "pipe" });
-            oauthToken = result.toString().trim();
-          } catch (err) {
-            // Refresh failed — only use the old token if it hasn't fully expired yet.
-            // Using an expired token produces "Not logged in · Please run /login".
-            if (!isExpired) {
-              oauthToken = oauth.accessToken;
-            }
-            const ttl = oauth.expiresAt ? Math.round((oauth.expiresAt - now) / 60_000) : "unknown";
-            console.log(`[dispatch] OAuth refresh failed (ttl=${ttl}m, expired=${!!isExpired}): ${err instanceof Error ? err.message : err}`);
-          }
-        } else if (!isExpired) {
-          oauthToken = oauth.accessToken;
-        } else {
-          // Token is expired and either no refreshToken or no expiresAt to detect refresh need.
-          // Don't pass the dead token — let the SDK surface the real error.
-          const reason = !oauth.refreshToken ? "no refreshToken" : "no expiresAt";
-          console.log(`[dispatch] OAuth token expired, cannot refresh (${reason}). Agent will start without auth.`);
-        }
-      }
-    } catch (err) {
-      console.log(`[dispatch] Failed to read OAuth credentials: ${err instanceof Error ? err.message : err}`);
-    }
-  }
-
   // ── Step 3: Fetch proxy token & build env (if applicable) ──
   let proxyToken: string | undefined;
   let workerEnv: Record<string, string> | undefined;
@@ -521,10 +477,14 @@ export async function dispatchToWorker(
       SSL_CERT_FILE: caCertPath,
       NODE_TLS_REJECT_UNAUTHORIZED: "0",
       PYTHONIOENCODING: "utf-8",
-      // Pass the OAuth token directly so the SDK skips reading .credentials.json.
-      // Uses CLAUDE_CODE_OAUTH_TOKEN (not ANTHROPIC_API_KEY) to preserve the OAuth
-      // auth path — switching to API key auth breaks session resume.
-      ...(oauthToken ? { CLAUDE_CODE_OAUTH_TOKEN: oauthToken } : {}),
+      // Don't set CLAUDE_CODE_OAUTH_TOKEN — let the SDK manage its own OAuth
+      // refresh.  Setting it overrides the SDK's built-in credential reading,
+      // so a stale value produces "Not logged in" instead of triggering refresh.
+      // Host workers: SDK reads ~/.claude/.credentials.json and refreshes via
+      //   platform.claude.com (in NO_PROXY, bypasses MITM).
+      // Sandboxed containers: stub credentials mounted by provisionContainer();
+      //   proxy strips the stub token and injects real auth on the wire.
+      //
       // Stockade context headers — injected via Claude Code's custom-headers
       // mechanism so the proxy can tag each API call with session/agent/scope.
       // The proxy strips these before forwarding to Anthropic.
