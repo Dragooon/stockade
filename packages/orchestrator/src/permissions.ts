@@ -50,6 +50,8 @@ export const CORE_PLATFORM_TOOLS = new Set([
   "mcp__agent__start",
   "mcp__agent__stop",
   "mcp__agent__message",
+  // File delivery (mcp__agent__ server)
+  "mcp__agent__send_file",
   // Scheduler (mcp__scheduler__ server)
   "mcp__scheduler__create",
   "mcp__scheduler__list",
