@@ -211,6 +211,10 @@ export interface ChannelFile {
   contentType: string;
   /** Absolute path readable by the orchestrator process. */
   path: string;
+  /** Base64-encoded file content. Present when the file is from a sandboxed agent
+   * whose filesystem is not accessible to the orchestrator. When set, the Discord
+   * adapter uses this buffer instead of reading from `path`. */
+  content?: string;
 }
 
 /** Structured response from an agent dispatch — text plus optional file attachments. */

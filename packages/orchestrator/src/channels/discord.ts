@@ -55,6 +55,14 @@ async function downloadAttachment(
   }
 }
 
+/** Build a Discord AttachmentBuilder from a ChannelFile.
+ * Uses embedded base64 content when present (sandboxed agents whose filesystem
+ * is not accessible from the host), otherwise reads from the path directly. */
+function toAttachment(f: ChannelFile): AttachmentBuilder {
+  const data = f.content ? Buffer.from(f.content, "base64") : f.path;
+  return new AttachmentBuilder(data as any, { name: f.filename });
+}
+
 export interface DiscordAdapterOptions {
   /** Called to handle a message and return the agent's response. */
   onMessage: (msg: ChannelMessage, approvalChannel?: ApprovalChannel) => Promise<ChannelResponse>;
@@ -144,7 +152,7 @@ export class DiscordAdapter {
       const channel = await this.client.channels.fetch(targetId);
       if (!channel || !channel.isSendable()) return;
       const chunks = splitMessage(text, 2000);
-      const attachments = files?.map((f) => new AttachmentBuilder(f.path, { name: f.filename })) ?? [];
+      const attachments = files?.map(toAttachment) ?? [];
       await (channel as any).send({ content: chunks[0], files: attachments });
       for (const chunk of chunks.slice(1)) {
         await (channel as any).send(chunk);
@@ -384,7 +392,7 @@ export class DiscordAdapter {
       this.opts.onMessage(channelMessage, askApproval).then(async (response) => {
         const { text, files } = response;
         const chunks = splitMessage(text, 2000);
-        const attachments = files?.map((f) => new AttachmentBuilder(f.path, { name: f.filename })) ?? [];
+        const attachments = files?.map(toAttachment) ?? [];
         await interaction.editReply({ content: chunks[0], files: attachments });
         for (const chunk of chunks.slice(1)) {
           await interaction.followUp(chunk);
@@ -423,7 +431,7 @@ export class DiscordAdapter {
     this.opts.onMessage(channelMessage, askApproval).then(async (response) => {
       const { text, files } = response;
       const chunks = splitMessage(text, 2000);
-      const attachments = files?.map((f) => new AttachmentBuilder(f.path, { name: f.filename })) ?? [];
+      const attachments = files?.map(toAttachment) ?? [];
       await interaction.editReply({ content: chunks[0], files: attachments });
       for (const chunk of chunks.slice(1)) {
         await interaction.followUp(chunk);
@@ -532,7 +540,7 @@ export class DiscordAdapter {
       // Empty/whitespace-only = agent chose to stay silent (shared channel filtering)
       if (!text?.trim()) return;
       const chunks = splitMessage(text, 2000);
-      const attachments = files?.map((f) => new AttachmentBuilder(f.path, { name: f.filename })) ?? [];
+      const attachments = files?.map(toAttachment) ?? [];
       await ch.send({ content: chunks[0], files: attachments });
       for (const chunk of chunks.slice(1)) {
         await ch.send(chunk);

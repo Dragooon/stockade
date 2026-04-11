@@ -55,7 +55,7 @@ export type WorkerEvent =
   | { type: "turn"; turns: number; input: number; output: number; cacheRead: number; cacheCreate: number }
   | { type: "tool_start"; name: string }
   | { type: "tool_end"; name: string; elapsedMs: number }
-  | { type: "result"; text: string; sessionId: string; stopReason: string; files?: Array<{ filename: string; contentType: string; path: string }> }
+  | { type: "result"; text: string; sessionId: string; stopReason: string; files?: Array<{ filename: string; contentType: string; path: string; content?: string }> }
   | { type: "error"; message: string }
   | { type: "stale_session" };
 

@@ -11,6 +11,7 @@
  *   publishes events to Redis. Session stays alive until abort() is called.
  */
 
+import { readFile } from "node:fs/promises";
 import { ConversationChannel } from "./channel.js";
 import type { WorkerSessionRequest, WorkerEvent } from "./types.js";
 import { runAgentSession } from "./agent.js";
@@ -176,12 +177,37 @@ export class WorkerSession {
       queryRunning = true;
 
       const emit = (ev: WorkerEvent) => {
-        const busEvent = mapToBusEvent(ev, scope, queryCorrelationId);
-        if (!busEvent) return;
         if (ev.type === "started") {
           queryChannel.setSessionId(ev.sessionId);
           currentSessionId = ev.sessionId;
         }
+
+        // For result events with files, embed base64 content so the orchestrator
+        // can deliver them even when the agent runs in a sandboxed container whose
+        // filesystem is not accessible from the host.
+        if (ev.type === "result" && ev.files && ev.files.length > 0) {
+          Promise.all(
+            ev.files.map(async (f) => ({
+              ...f,
+              content: await readFile(f.path).then((buf) => buf.toString("base64")).catch(() => undefined),
+            })),
+          ).then((filesWithContent) => {
+            const busEvent = mapToBusEvent({ ...ev, files: filesWithContent }, scope, queryCorrelationId);
+            if (!busEvent) return;
+            bridge.publishEvent(scope, busEvent).catch((err) => {
+              console.error(`[worker] Failed to publish event for ${scope}:`, err.message);
+            });
+          }).catch(() => {
+            // Fall back to publishing without content on read error
+            const busEvent = mapToBusEvent(ev, scope, queryCorrelationId);
+            if (!busEvent) return;
+            bridge.publishEvent(scope, busEvent).catch(() => {});
+          });
+          return;
+        }
+
+        const busEvent = mapToBusEvent(ev, scope, queryCorrelationId);
+        if (!busEvent) return;
         bridge.publishEvent(scope, busEvent).catch((err) => {
           console.error(`[worker] Failed to publish event for ${scope}:`, err.message);
         });

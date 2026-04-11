@@ -69,7 +69,7 @@ export interface BusEventResult {
   text: string;
   sdkSessionId: string;
   stopReason: string;
-  files?: Array<{ filename: string; contentType: string; path: string }>;
+  files?: Array<{ filename: string; contentType: string; path: string; content?: string }>;
   timestamp: string;
 }
 
