@@ -104,14 +104,24 @@ export class WorkerSession {
    * Subscribes to stockade:msg:{scope} on Redis. For each arriving message,
    * runs one query() call (resuming the SDK session) and publishes the result
    * to stockade:evt:{scope}. Loops until abort() is called.
+   *
+   * Returns a Promise that resolves once the Redis subscription is confirmed,
+   * so the HTTP caller can return its response only after the subscription is
+   * active — preventing a race where the orchestrator publishes the first
+   * message before the worker is listening.
    */
-  startPersistent(request: WorkerSessionRequest, bridge: WorkerRedisBridge): void {
-    void this.runPersistentLoop(request, bridge);
+  startPersistent(request: WorkerSessionRequest, bridge: WorkerRedisBridge): Promise<void> {
+    return new Promise<void>((resolveSubscribed) => {
+      this.runPersistentLoop(request, bridge, resolveSubscribed).catch((err) => {
+        this.emit({ type: "error", message: err instanceof Error ? err.message : String(err) });
+      });
+    });
   }
 
   private async runPersistentLoop(
     request: WorkerSessionRequest,
     bridge: WorkerRedisBridge,
+    resolveSubscribed: () => void,
   ): Promise<void> {
     const scope = request.scope!;
     let currentSessionId: string | null = request.sessionId ?? null;
@@ -147,6 +157,10 @@ export class WorkerSession {
         wake?.();
       }
     });
+
+    // Subscription is confirmed — signal the HTTP caller so it can return its
+    // response before the orchestrator publishes the first message.
+    resolveSubscribed();
 
     console.log(`[worker] Persistent session loop started for scope ${scope.slice(0, 40)}`);
 

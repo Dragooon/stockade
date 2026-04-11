@@ -48,7 +48,10 @@ app.post("/sessions", async (c) => {
 
   // Start session: Redis mode (persistent loop) or SSE mode (one-shot)
   if (request.redisMode && redisBridge) {
-    session.startPersistent(request as any, redisBridge);
+    // Await subscription confirmation — ensures the worker is subscribed to
+    // Redis before the HTTP response returns, so the orchestrator won't publish
+    // the first message before the worker is listening.
+    await session.startPersistent(request as any, redisBridge);
   } else {
     session.start(request as any);
   }
