@@ -99,4 +99,6 @@ export interface ContainerInfo {
   labels: Record<string, string>;
   state: string;
   ports: string;
+  /** Short image ID or tag the container was created from. */
+  image: string;
 }

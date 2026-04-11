@@ -121,6 +121,7 @@ export class ContainerManager implements WorkerManager {
           "agent-id": agentId,
           "container-key": key,
           "host-port": String(port),
+          "image-tag": imageTag,
           isolation: agentConfig.container?.isolation ?? "shared",
         },
         memory: agentConfig.container?.memory ?? this.config.defaults.memory,
@@ -408,7 +409,18 @@ export class ContainerManager implements WorkerManager {
       const key = c.labels["container-key"];
       const agentId = c.labels["agent-id"];
       const portStr = c.labels["host-port"];
+      const imageTag = c.labels["image-tag"];
       if (!key || !agentId || !portStr || this.containers.has(key)) continue;
+
+      // Skip containers whose image no longer matches the current build.
+      // This ensures a docker image rebuild always gets fresh containers.
+      if (imageTag) {
+        const currentId = await this.docker.imageId(imageTag).catch(() => null);
+        if (currentId && c.image && currentId !== c.image) {
+          console.log(`[containers] Skipping stale container ${key} (image ${c.image} ≠ current ${currentId})`);
+          continue;
+        }
+      }
 
       const port = parseInt(portStr, 10);
       if (isNaN(port) || !this.portAllocator.isAvailable(port)) continue;

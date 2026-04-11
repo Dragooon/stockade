@@ -152,6 +152,7 @@ export class DockerClient {
           labels: parseLabels(raw.Labels ?? ""),
           state: raw.State,
           ports: raw.Ports ?? "",
+          image: (raw.ImageID ?? raw.Image ?? "").replace(/^sha256:/, "").slice(0, 12),
         };
       });
   }
@@ -178,6 +179,16 @@ export class DockerClient {
       ]);
       const d = new Date(stdout.trim());
       return isNaN(d.getTime()) ? null : d.getTime();
+    } catch {
+      return null;
+    }
+  }
+
+  /** Return the short 12-char image ID for a tag, or null if not found. */
+  async imageId(tag: string): Promise<string | null> {
+    try {
+      const { stdout } = await this.exec(["image", "inspect", "--format", "{{.Id}}", tag]);
+      return stdout.trim().replace(/^sha256:/, "").slice(0, 12) || null;
     } catch {
       return null;
     }
