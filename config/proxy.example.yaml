@@ -19,15 +19,17 @@ proxy:
     update: "printf '%s' '{value}' > ~/.stockade/secrets/{key}"
     cache_ttl: 60
     overrides:
-      # Claude Code stores its OAuth token in ~/.claude/.credentials.json.
-      # This override reads it directly so agents can call the Anthropic API.
-      - match: "claude-oauth-token"
-        read: "python3 -c \"import json,os; d=json.load(open(os.path.expanduser('~/.claude/.credentials.json'))); print(d['claudeAiOauth']['accessToken'],end='')\""
-        cache_ttl: 0  # OAuth tokens are refreshed by CLI — never cache
-
-      # 1Password example:
+      # 1Password example (with signin — see `signin` + `session_env` below):
       # - match: "op:*"
       #   read: "op read op://{key}"
+
+    # Optional: provider-level signin command for CLIs that require auth.
+    # Runs once; stdout is captured and injected into every subsequent command
+    # as the env var named in `session_env`. Works with any CLI — 1Password,
+    # Vault, custom token endpoints, etc.
+    #
+    # signin: 'echo "$OP_PASSWORD" | op signin --account my --raw'
+    # session_env: OP_SESSION_my
 
   # Network policy — deny by default, allowlist specific hosts.
   # Applies to all container traffic (HTTP and SSH).
@@ -59,11 +61,12 @@ proxy:
       - x-api-key
       - proxy-authorization
     routes:
-      - host: "api.anthropic.com"
-        credential: claude-oauth-token
-        inject:
-          header: authorization
-          format: "Bearer {value}"
+      # No api.anthropic.com route — the SDK handles its own OAuth auth.
+      # Traffic still flows through the MITM for cache injection + audit
+      # logging, but auth headers pass through untouched so the SDK can
+      # refresh tokens normally via platform.claude.com (in NO_PROXY).
+      #
+      # Add routes below for 3rd-party APIs that need credential injection:
 
   ssh:
     port: 10022

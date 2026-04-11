@@ -77,6 +77,10 @@ export class DockerClient {
       }
     }
 
+    if (opts.user) {
+      args.push("--user", opts.user);
+    }
+
     args.push(opts.image);
 
     const { stdout } = await this.exec(args);

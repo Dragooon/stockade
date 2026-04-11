@@ -54,6 +54,7 @@ interface WorkerSessionRequest {
   orchestratorUrl: string;
   callbackToken: string;
   sdkSettings?: Record<string, unknown>;
+  redisMode?: boolean;
 }
 
 type WorkerEvent =
@@ -144,7 +145,8 @@ function buildPlatformInstructions(
     );
   }
 
-  if (hasProxy && agentConfig.credentials?.length) {
+  const proxyCredentials = (agentConfig.credentials ?? []).filter(k => k !== "claude-oauth-token");
+  if (hasProxy && proxyCredentials.length) {
     sections.push(`## Credential Proxy (platform-injected)
 
 Your outbound traffic is routed through a credential proxy. It handles API
@@ -163,7 +165,7 @@ key injection automatically — you never see raw credentials.
   Embed the ref string in your request body. The proxy substitutes it with the real
   value before forwarding. Ref tokens are one-time-use and expire after 5 minutes.
 
-- **Your credential keys:** ${agentConfig.credentials.map(k => `\`${k}\``).join(", ")}
+- **Your credential keys:** ${proxyCredentials.map(k => `\`${k}\``).join(", ")}
 
 - **Available env vars:** HTTP_PROXY, HTTPS_PROXY, NO_PROXY, NODE_EXTRA_CA_CERTS,
   APW_GATEWAY, APW_TOKEN`);
@@ -174,6 +176,18 @@ key injection automatically — you never see raw credentials.
 
 You run in a sandboxed container. Only hosts in the proxy's network policy allowlist
 are reachable. If a request is blocked, ask the parent agent if access is needed.`);
+  }
+
+  // Always inject shared directory path (differs by sandboxing)
+  {
+    const sharedPath = agentConfig.sandboxed ? "`/shared`" : "`$SHARED_DIR` (`~/.stockade/shared/`)";
+    sections.push(`## Shared Directory (platform-injected)
+
+A shared read-write directory is available for file exchange and cross-agent persistence.
+
+Path: ${sharedPath}
+
+Use it to pass files between agents, persist build outputs or reports across sessions, and stage files before moving them. Do not store secrets or credentials here.`);
   }
 
   if (schedulerEnabled) {
@@ -255,6 +269,31 @@ export const SELF_MODIFICATION_DENY_RULES = [
 ];
 
 /**
+ * Extract Skill allow/deny selectors from an agent's permission rules.
+ *
+ * These are passed natively to the SDK so it filters skill descriptions from
+ * the agent's context window — denied skills don't appear at all (0 tokens),
+ * not just blocked at invocation time via PreToolUse.
+ */
+function extractSkillPermissions(rules: string[] | undefined): {
+  allow: string[];
+  deny: string[];
+} {
+  const allow: string[] = [];
+  const deny: string[] = [];
+  for (const rule of rules ?? []) {
+    const colonIdx = rule.indexOf(":");
+    if (colonIdx === -1) continue;
+    const action = rule.slice(0, colonIdx);
+    const selector = rule.slice(colonIdx + 1);
+    if (!selector.startsWith("Skill")) continue;
+    if (action === "allow") allow.push(selector);
+    else if (action === "deny") deny.push(selector);
+  }
+  return { allow, deny };
+}
+
+/**
  * Build SDK settings object for an agent.
  *
  * @param agentConfig  Agent configuration
@@ -269,6 +308,11 @@ export function buildSdkSettings(
 ): Record<string, unknown> {
   const memoryEnabled = !inline && (agentConfig.memory?.enabled ?? true);
 
+  // Extract Skill rules from agent permissions and pass to the SDK natively.
+  // The SDK uses these to filter skill descriptions from context (hiding skills
+  // entirely — 0 tokens — rather than just blocking invocation via PreToolUse).
+  const { allow: skillAllow, deny: skillDeny } = extractSkillPermissions(agentConfig.permissions);
+
   return {
     autoMemoryEnabled: memoryEnabled,
     ...(memoryEnabled && memoryDir ? { autoMemoryDirectory: memoryDir } : {}),
@@ -278,9 +322,11 @@ export function buildSdkSettings(
     // Non-inline agents load only project-level settings (no user-global bleed).
     settingSources: inline ? [] : ["project"],
     permissions: {
+      ...(skillAllow.length ? { allow: skillAllow } : {}),
       deny: [
         "Agent",
         ...SELF_MODIFICATION_DENY_RULES,
+        ...skillDeny,
       ],
     },
   };
@@ -293,7 +339,7 @@ const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image
  * Save attachments to the agent's host workspace.
  * Returns host paths. Caller converts to container paths if needed.
  */
-function saveAttachmentsToDisk(attachments: ChannelAttachment[], agentCwd: string): string[] {
+export function saveAttachmentsToDisk(attachments: ChannelAttachment[], agentCwd: string): string[] {
   const ts = Date.now();
   const dir = join(agentCwd, "tmp", "attachments", String(ts));
   mkdirSync(dir, { recursive: true });
@@ -310,7 +356,7 @@ function saveAttachmentsToDisk(attachments: ChannelAttachment[], agentCwd: strin
  * Build a prompt string that references saved attachment files.
  * All files are saved to disk; text is extended with a file listing.
  */
-function buildPromptWithAttachments(
+export function buildPromptWithAttachments(
   text: string,
   attachments: ChannelAttachment[],
   savedPaths: string[],
@@ -461,11 +507,10 @@ export async function dispatchToWorker(
 
   if (context.proxy) {
     const sid = sessionId ?? "";
-    // Always route through the MITM proxy so cache markers are fixed and requests
-    // are logged — even for agents without credentials. The MITM injects credentials
-    // only when a route matches; otherwise it passes requests through unchanged.
-    // Sandboxed agents run in Docker — the CA cert is mounted at /certs/proxy-ca.crt,
-    // not the host's Windows path. Use the container path for sandboxed agents.
+    // Route through the MITM proxy for cache marker injection and audit logging.
+    // The proxy does NOT handle Anthropic API auth — the SDK manages its own OAuth
+    // token refresh via platform.claude.com (in NO_PROXY, bypasses MITM).
+    // The proxy only injects credentials for 3rd-party routes (GitHub, Tavily, etc).
     const caCertPath = agentConfig.sandboxed ? "/certs/proxy-ca.crt" : context.proxy.caCertPath;
     workerEnv = {
       HTTP_PROXY: `http://${context.proxy.host}:10255`,
@@ -477,14 +522,6 @@ export async function dispatchToWorker(
       SSL_CERT_FILE: caCertPath,
       NODE_TLS_REJECT_UNAUTHORIZED: "0",
       PYTHONIOENCODING: "utf-8",
-      // Don't set CLAUDE_CODE_OAUTH_TOKEN — let the SDK manage its own OAuth
-      // refresh.  Setting it overrides the SDK's built-in credential reading,
-      // so a stale value produces "Not logged in" instead of triggering refresh.
-      // Host workers: SDK reads ~/.claude/.credentials.json and refreshes via
-      //   platform.claude.com (in NO_PROXY, bypasses MITM).
-      // Sandboxed containers: stub credentials mounted by provisionContainer();
-      //   proxy strips the stub token and injects real auth on the wire.
-      //
       // Stockade context headers — injected via Claude Code's custom-headers
       // mechanism so the proxy can tag each API call with session/agent/scope.
       // The proxy strips these before forwarding to Anthropic.
@@ -542,6 +579,7 @@ export async function dispatchToWorker(
     ...workerEnv,
     CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1",
     CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
+    MAX_THINKING_TOKENS: agentConfig.model?.includes("opus") ? "128000" : "64000",
   };
 
   // For inline agents, override AGENT_WORKSPACE so the persistent worker's
@@ -574,7 +612,10 @@ export async function dispatchToWorker(
     prompt: promptText,
     systemPrompt,
     tools: agentConfig.tools?.filter((t) => t !== "Agent"),
-    disallowedTools: PLATFORM_DISALLOWED_TOOLS,
+    disallowedTools: [
+      ...PLATFORM_DISALLOWED_TOOLS,
+      ...(agentConfig.disallowed_tools ?? []),
+    ],
     model: agentConfig.model,
     sessionId: sessionId ?? undefined,
     maxTurns: agentConfig.max_turns ?? 200,

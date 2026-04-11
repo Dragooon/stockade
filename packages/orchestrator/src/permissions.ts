@@ -376,8 +376,20 @@ export async function ruleMatches(
     return matchGlob(command, rule.pattern, false);
   }
 
+  // ── Skill: skill-name matching ──
+  // Matches the pattern against the invoked skill name.
+  // Enables per-agent skill access control:
+  //   deny:Skill(platform-admin)   — hide from context entirely (0 tokens)
+  //   deny:Skill(*)                — block all skills
+  //   allow:Skill(commit)          — explicit allowlist (with deny:Skill(*) after)
+  if (tool === "Skill") {
+    const skillName = String(input.skill ?? input.name ?? input.skill_name ?? "");
+    if (skillName) return matchGlob(skillName, rule.pattern, false);
+    return false;
+  }
+
   // ── Other tools with a pattern: no match ──
-  // Patterns are only meaningful for file tools and Bash.
+  // Patterns are only meaningful for file tools, Bash, and Skill.
   // A rule like `deny:WebSearch(foo)` never matches — use `deny:WebSearch` instead.
   return false;
 }

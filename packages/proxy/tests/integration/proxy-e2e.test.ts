@@ -20,13 +20,40 @@ import {
 } from "../../src/gateway/tokens.js";
 
 // ──────────────────────────────────────────────────────────────────────────
-// Mock the credential provider (execa calls) so we never shell out.
-// We mock at the module level — the real proxy server code will use this.
+// Mock the credential provider (child_process.execFile) so we never shell out.
+// credentials.ts uses `promisify(execFile)(bash, ["-c", cmd])`.
+// The mock must use callback style: execFile(file, args, cb) where
+// cb = (error, stdout, stderr) => void.
 // ──────────────────────────────────────────────────────────────────────────
-const mockExecaCommand = vi.fn();
-vi.mock("execa", () => ({
-  execaCommand: mockExecaCommand,
-}));
+let _mockStdout = "mock-default";
+const mockExecaCommand = vi.fn((...args: any[]) => {
+  // callback-style: execFile(file, args, callback)
+  const cb = args[args.length - 1];
+  if (typeof cb === "function") {
+    cb(null, _mockStdout, "");
+  }
+});
+
+// Node's util.promisify checks for [Symbol.for('nodejs.util.promisify.custom')]
+// on the original execFile to return {stdout, stderr}. Our vi.fn() mock doesn't
+// have that symbol, so promisify would only return the first callback result arg.
+// We attach a custom promisify that delegates to the mock for call tracking.
+import { promisify } from "node:util";
+(mockExecaCommand as any)[promisify.custom] = (...args: any[]) => {
+  // Record the call on the vi.fn() for expect().toHaveBeenCalled()
+  mockExecaCommand(...args, () => {});
+  return Promise.resolve({ stdout: _mockStdout, stderr: "" });
+};
+
+/** Set the stdout value returned by the mock. */
+function setMockStdout(value: string) {
+  _mockStdout = value;
+}
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("node:child_process")>();
+  return { ...orig, execFile: mockExecaCommand };
+});
 
 // Mock node-forge's ensureCA to avoid file-system CA generation during proxy start.
 // We generate a real CA in memory instead.
@@ -218,8 +245,8 @@ describe("HTTP proxy — integration", () => {
     await once(proxyServer, "listening");
     proxyPort = (proxyServer.address() as { port: number }).port;
 
-    // Mock execa to return a known credential value
-    mockExecaCommand.mockResolvedValue({ stdout: "test-secret-42" });
+    // Set mock credential value
+    setMockStdout("test-secret-42");
   });
 
   afterAll(async () => {
@@ -234,7 +261,7 @@ describe("HTTP proxy — integration", () => {
 
   beforeEach(() => {
     mockExecaCommand.mockClear();
-    mockExecaCommand.mockResolvedValue({ stdout: "test-secret-42" });
+    setMockStdout("test-secret-42");
   });
 
   it("forwards an HTTP request through the proxy to upstream", async () => {
@@ -351,7 +378,7 @@ describe("HTTP proxy — integration", () => {
   });
 
   it("injects credential using the resolved value from the provider", async () => {
-    mockExecaCommand.mockResolvedValue({ stdout: "  rotated-key-99  " });
+    setMockStdout("  rotated-key-99  ");
 
     const http = await import("node:http");
 
@@ -606,7 +633,7 @@ describe("Gateway API — integration via Hono app.request()", () => {
   beforeEach(() => {
     clearAllTokens();
     mockExecaCommand.mockClear();
-    mockExecaCommand.mockResolvedValue({ stdout: "" });
+    setMockStdout("");
     const issued = issueToken("test-agent", ["AgentVault/GitHub/token"], ["AgentVault/*"], 3600);
     token = issued.token;
   });

@@ -102,7 +102,7 @@ describe("provisionContainer", () => {
     expect(result.env.APW_TOKEN).toBe("apw-main-abc123");
     expect(result.env.NODE_EXTRA_CA_CERTS).toBe("/certs/proxy-ca.crt");
 
-    // Mock credentials are always mounted
+    // Host credentials are mounted read-only
     const credsVolume = result.volumes.find((v: string) => v.includes(".credentials.json"));
     expect(credsVolume).toBeDefined();
     expect(credsVolume).toContain(":ro");
@@ -111,7 +111,7 @@ describe("provisionContainer", () => {
     expect(result.gatewayToken).toBe("apw-main-abc123");
   });
 
-  it("writes mock credentials, not real ones", async () => {
+  it("mounts host credentials read-only instead of a stub", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -129,15 +129,11 @@ describe("provisionContainer", () => {
       3001
     );
 
-    // Find the mock credentials file on disk
-    const credsVolume = result.volumes.find((v: string) => v.includes(".credentials.json"))!;
-    // On Windows the host path contains "C:" so split on ":/home" or ":/certs" boundary
-    const hostPath = credsVolume.slice(0, credsVolume.indexOf(":/home"));
-    const { readFileSync } = await import("node:fs");
-    const content = JSON.parse(readFileSync(hostPath, "utf-8"));
-
-    // Should be a stub, not a real token
-    expect(content.claudeAiOauth.accessToken).toBe("sk-ant-stub-container-proxy-handles-auth");
+    // Should mount the host's real ~/.claude/.credentials.json read-only
+    const credsVolume = result.volumes.find((v: string) => v.includes(".credentials.json"));
+    expect(credsVolume).toBeDefined();
+    expect(credsVolume).toContain(".claude/.credentials.json");
+    expect(credsVolume).toContain("/home/node/.claude/.credentials.json:ro");
   });
 
   it("mounts agent workspace when agentsDir is provided", async () => {
@@ -240,7 +236,7 @@ describe("provisionContainer", () => {
     expect(result.env.HTTP_PROXY).toBeUndefined();
     expect(result.env.APW_TOKEN).toBeUndefined();
     expect(result.gatewayToken).toBe("");
-    // Mock credentials are always mounted regardless of proxy availability
+    // Host credentials are mounted read-only regardless of proxy availability
     const credsVolume = result.volumes.find((v: string) => v.includes(".credentials.json"));
     expect(credsVolume).toBeDefined();
   });

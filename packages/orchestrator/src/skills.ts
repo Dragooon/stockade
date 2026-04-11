@@ -1,113 +1,93 @@
 import { join, resolve } from "node:path";
-import { homedir } from "node:os";
 import {
   existsSync,
   mkdirSync,
-  cpSync,
-  writeFileSync,
+  rmSync,
   readdirSync,
   lstatSync,
-  rmSync,
 } from "node:fs";
 import type { AgentsConfig } from "./types.js";
 
-const GLOBAL_SKILLS_DIR = join(homedir(), ".claude", "skills");
+/**
+ * Ensure the platform-level skills directory exists.
+ *
+ * Skills now live at <platformRoot>/.claude/skills/ — a single shared directory
+ * that all agents read from. For host agents, sdkCwd = platformRoot so the SDK
+ * picks up skills automatically. For sandboxed agents, the container provisioner
+ * mounts this directory at /workspace/.claude/skills/.
+ *
+ * Agents can edit skills directly in this directory; changes are immediately
+ * visible to all agents on the next dispatch (no restart, no copy).
+ *
+ * Per-agent filtering is done via permission rules:
+ *   deny:Skill(platform-admin)   — hides a skill from context entirely (0 tokens)
+ *   deny:Skill(*)                — hides all skills
+ *   allow:Skill(commit)          — explicit allowlist
+ */
+export function ensurePlatformSkillsDir(platformRoot: string): void {
+  const skillsDir = resolve(platformRoot, ".claude", "skills");
+  mkdirSync(skillsDir, { recursive: true });
+  console.log(`[skills] platform skills dir: ${skillsDir}`);
+}
 
 /**
- * Sync skills from ~/.claude/skills/ into each agent's workspace.
+ * One-time migration: remove old synced skill copies from agent workspaces.
  *
- * For each agent with a `skills` list, recursively copies skill directories
- * from ~/.claude/skills/<name> into ~/.stockade/agents/<id>/.claude/skills/<name>.
- * A marker file `.synced` is written inside each copied directory so that
- * the cleanup pass can distinguish synced copies from agent-specific skills.
- *
- * - Synced skill directories that are no longer in config are removed.
- * - Old symlinks/junctions (from the previous approach) are removed.
- * - Non-synced directories (agent-specific skills) are never touched.
+ * Previous versions copied skills from ~/.claude/skills/ into each agent's
+ * ~/.stockade/agents/<id>/.claude/skills/<name>/ with a .synced marker file.
+ * These copies are now redundant — the platform skills dir is mounted/loaded
+ * centrally. This cleans them up on first run after upgrade.
  */
-export function syncAgentSkills(
-  agents: AgentsConfig,
-  agentsDir: string,
-): void {
-  for (const [agentId, agentConfig] of Object.entries(agents.agents)) {
-    // Always use the local agents directory — workspace_host_path may be a WSL
-    // or Docker path that isn't directly accessible from the host filesystem.
-    const workspaceRoot = resolve(agentsDir, agentId);
-    const targetSkillsDir = resolve(workspaceRoot, ".claude", "skills");
-    const wantedSkills = new Set(agentConfig.skills ?? []);
+export function migrateSyncedCopies(agentsDir: string): void {
+  if (!existsSync(agentsDir)) return;
 
-    // If agent has skills config, ensure the directory exists
-    if (wantedSkills.size > 0) {
-      mkdirSync(targetSkillsDir, { recursive: true });
-    } else if (!existsSync(targetSkillsDir)) {
-      continue;
-    }
+  for (const agentId of readdirSync(agentsDir)) {
+    const agentSkillsDir = join(agentsDir, agentId, ".claude", "skills");
+    if (!existsSync(agentSkillsDir)) continue;
 
-    // Scan existing entries — clean up stale synced copies and old symlinks
-    if (existsSync(targetSkillsDir)) {
-      for (const entry of readdirSync(targetSkillsDir)) {
-        const entryPath = join(targetSkillsDir, entry);
-        let stat;
-        try {
-          stat = lstatSync(entryPath);
-        } catch {
-          // Inaccessible entry (e.g. dangling WSL symlink) — remove it
-          try { rmSync(entryPath, { force: true }); } catch { /* best-effort */ }
-          console.log(`[skills] removed ${agentId}/${entry} (inaccessible)`);
-          continue;
-        }
-
-        if (stat.isSymbolicLink()) {
-          // Old junction/symlink from the previous approach — always remove
-          rmSync(entryPath, { force: true });
-          console.log(`[skills] removed ${agentId}/${entry} (old symlink, migrating to copy)`);
-          continue;
-        }
-
-        if (!stat.isDirectory()) {
-          // Not a directory — leave it alone
-          continue;
-        }
-
-        const isSynced = existsSync(resolve(entryPath, ".synced"));
-        if (!isSynced) {
-          // Agent-specific skill (no marker) — leave it alone
-          continue;
-        }
-
-        if (!wantedSkills.has(entry)) {
-          // Synced copy for a skill no longer in config — remove it
-          rmSync(entryPath, { recursive: true, force: true });
-          console.log(`[skills] removed ${agentId}/${entry} (no longer in config)`);
-        }
-      }
-    }
-
-    // Copy wanted skills into the target directory
-    for (const skillName of wantedSkills) {
-      const source = join(GLOBAL_SKILLS_DIR, skillName);
-      const target = join(targetSkillsDir, skillName);
-
-      if (!existsSync(source)) {
-        console.warn(`[skills] ${agentId}: skill "${skillName}" not found in ${GLOBAL_SKILLS_DIR}`);
-        continue;
-      }
-
-      if (existsSync(target)) {
-        // Already exists — skip (copy is not re-synced on every run)
-        continue;
-      }
-
+    let removed = 0;
+    for (const entry of readdirSync(agentSkillsDir)) {
+      const entryPath = join(agentSkillsDir, entry);
+      let stat;
       try {
-        cpSync(source, target, { recursive: true });
-        writeFileSync(resolve(target, ".synced"), "", "utf-8");
-        console.log(`[skills] ${agentId}/${skillName} copied from ${source}`);
-      } catch (err) {
-        console.error(
-          `[skills] failed to copy ${agentId}/${skillName}:`,
-          err instanceof Error ? err.message : err,
-        );
+        stat = lstatSync(entryPath);
+      } catch {
+        continue;
       }
+
+      if (stat.isSymbolicLink()) {
+        rmSync(entryPath, { force: true });
+        removed++;
+        continue;
+      }
+
+      if (stat.isDirectory() && existsSync(join(entryPath, ".synced"))) {
+        rmSync(entryPath, { recursive: true, force: true });
+        removed++;
+      }
+    }
+
+    if (removed > 0) {
+      console.log(`[skills] migrated ${agentId}: removed ${removed} old synced copy/copies`);
+    }
+  }
+}
+
+/**
+ * @deprecated Skills are no longer synced per-agent. Use ensurePlatformSkillsDir
+ * and configure per-agent access via Skill permission rules instead.
+ *
+ * Kept for backwards compatibility — logs a deprecation warning if any agent
+ * still has a non-empty `skills` list in config.
+ */
+export function syncAgentSkills(agents: AgentsConfig, _agentsDir: string): void {
+  for (const [agentId, agentConfig] of Object.entries(agents.agents)) {
+    if (agentConfig.skills?.length) {
+      console.warn(
+        `[skills] ${agentId}: "skills" config field is deprecated. ` +
+        `Skills now load from the platform skills dir (~/.stockade/.claude/skills/). ` +
+        `Use permission rules (deny:Skill(name)) to restrict per-agent access.`,
+      );
     }
   }
 }

@@ -10,6 +10,8 @@ export const containerConfigSchema = z.object({
   volumes: z.array(z.string()).optional(),
   workspace_path: z.string().optional(),
   workspace_host_path: z.string().optional(),
+  /** Override the container user (e.g. "root" to access Docker socket). Defaults to Dockerfile USER. */
+  user: z.string().optional(),
 });
 
 export type ContainerConfig = z.infer<typeof containerConfigSchema>;
@@ -62,7 +64,8 @@ export interface ContainerState {
   image: string;
   url: string;
   port: number;
-  gatewayToken: string;
+  /** Undefined for containers reconnected after an orchestrator restart. */
+  gatewayToken?: string;
   startedAt: number;
   lastActivity: number;
 }
@@ -80,6 +83,7 @@ export interface CreateContainerOpts {
   memory?: string;
   cpus?: number;
   addHost?: string[];
+  user?: string;
 }
 
 export interface ContainerInspect {

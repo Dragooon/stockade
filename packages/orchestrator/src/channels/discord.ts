@@ -1,5 +1,6 @@
 import {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   Client,
@@ -14,7 +15,7 @@ import {
   type ChatInputCommandInteraction,
 } from "discord.js";
 import { discordScope, discordThreadScope } from "./scope.js";
-import type { ChannelMessage, ChannelAttachment, PlatformConfig, AgentsConfig, ApprovalChannel } from "../types.js";
+import type { ChannelMessage, ChannelAttachment, ChannelFile, ChannelResponse, PlatformConfig, AgentsConfig, ApprovalChannel } from "../types.js";
 import type { GatekeeperReview, RiskLevel } from "../gatekeeper.js";
 
 type DiscordConfig = NonNullable<PlatformConfig["channels"]["discord"]>;
@@ -56,7 +57,7 @@ async function downloadAttachment(
 
 export interface DiscordAdapterOptions {
   /** Called to handle a message and return the agent's response. */
-  onMessage: (msg: ChannelMessage, approvalChannel?: ApprovalChannel) => Promise<string>;
+  onMessage: (msg: ChannelMessage, approvalChannel?: ApprovalChannel) => Promise<ChannelResponse>;
   /** Called to delete a session scope. */
   onSessionReset?: (scope: string) => void;
   /** Agent registry — used to expose agent names in /agent command. */
@@ -132,7 +133,7 @@ export class DiscordAdapter {
    *   discord:<serverId>:<channelId>           → sends to channelId
    *   discord:<serverId>:<channelId>:<threadId> → sends to threadId
    */
-  async send(scope: string, text: string): Promise<void> {
+  async send(scope: string, text: string, files?: ChannelFile[]): Promise<void> {
     const parts = scope.split(":");
     if (parts[0] !== "discord" || parts.length < 3) return;
 
@@ -143,7 +144,9 @@ export class DiscordAdapter {
       const channel = await this.client.channels.fetch(targetId);
       if (!channel || !channel.isSendable()) return;
       const chunks = splitMessage(text, 2000);
-      for (const chunk of chunks) {
+      const attachments = files?.map((f) => new AttachmentBuilder(f.path, { name: f.filename })) ?? [];
+      await (channel as any).send({ content: chunks[0], files: attachments });
+      for (const chunk of chunks.slice(1)) {
         await (channel as any).send(chunk);
       }
     } catch (err) {
@@ -378,17 +381,18 @@ export class DiscordAdapter {
       const askApproval = this.createApprovalChannel(channel, userId);
 
       await interaction.deferReply();
-      try {
-        const response = await this.opts.onMessage(channelMessage, askApproval);
-        const chunks = splitMessage(response, 2000);
-        await interaction.editReply(chunks[0]);
+      this.opts.onMessage(channelMessage, askApproval).then(async (response) => {
+        const { text, files } = response;
+        const chunks = splitMessage(text, 2000);
+        const attachments = files?.map((f) => new AttachmentBuilder(f.path, { name: f.filename })) ?? [];
+        await interaction.editReply({ content: chunks[0], files: attachments });
         for (const chunk of chunks.slice(1)) {
           await interaction.followUp(chunk);
         }
-      } catch (err) {
+      }).catch(async (err) => {
         const errMsg = err instanceof Error ? err.message : String(err);
-        await interaction.editReply(`Error: ${errMsg}`);
-      }
+        await interaction.editReply(`Error: ${errMsg}`).catch(() => {});
+      });
       return;
     }
 
@@ -414,26 +418,30 @@ export class DiscordAdapter {
     const channel = interaction.channel as TextBasedChannel;
     const askApproval = this.createApprovalChannel(channel, userId);
 
-    // Defer — agent might take a while
+    // Defer immediately — agent might take a while. editReply fires when ready.
     await interaction.deferReply();
-
-    try {
-      const response = await this.opts.onMessage(channelMessage, askApproval);
-      const chunks = splitMessage(response, 2000);
-      await interaction.editReply(chunks[0]);
+    this.opts.onMessage(channelMessage, askApproval).then(async (response) => {
+      const { text, files } = response;
+      const chunks = splitMessage(text, 2000);
+      const attachments = files?.map((f) => new AttachmentBuilder(f.path, { name: f.filename })) ?? [];
+      await interaction.editReply({ content: chunks[0], files: attachments });
       for (const chunk of chunks.slice(1)) {
         await interaction.followUp(chunk);
       }
-    } catch (err) {
+    }).catch(async (err) => {
       const errMsg = err instanceof Error ? err.message : String(err);
-      await interaction.editReply(`Error: ${errMsg}`);
-    }
+      await interaction.editReply(`Error: ${errMsg}`).catch(() => {});
+    });
   }
 
   // ── Message handler (processes all messages in bound channels) ──
 
   private async handleMessage(message: Message): Promise<void> {
-    if (message.author.bot) return;
+    // Block external bots; allow the bot's own [TEST] prefixed messages
+    if (message.author.bot) {
+      const isSelf = message.author.id === this.client.user?.id;
+      if (!isSelf || !message.content.startsWith("[TEST]")) return;
+    }
 
     // Dedup: skip if we've already processed this message
     if (this.processedMessages.has(message.id)) return;
@@ -503,29 +511,37 @@ export class DiscordAdapter {
     );
 
     // Keep typing indicator alive throughout dispatch (refreshes every 8s)
-    let typingInterval: ReturnType<typeof setInterval> | undefined;
     const ch = message.channel as any;
     const startTyping = () => {
       try { ch.sendTyping?.(); } catch { /* ignore */ }
     };
     startTyping();
-    typingInterval = setInterval(startTyping, 8_000);
+    const typingInterval = setInterval(startTyping, 8_000);
 
-    try {
-      const response = await this.opts.onMessage(channelMessage, askApproval);
-      // Empty/whitespace-only response = agent chose to stay silent (shared channel filtering)
-      if (!response || !response.trim()) return;
-      const chunks = splitMessage(response, 2000);
-      for (const chunk of chunks) {
-        await ch.send(chunk);
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      await ch.send(`Error: ${errMsg}`);
-    } finally {
+    const cleanup = () => {
       clearInterval(typingInterval);
       this.inFlightMessages.delete(contentKey);
-    }
+    };
+
+    // Fire-and-forget: return immediately, deliver response when agent finishes.
+    // The session persists per-scope; this message is injected into the running
+    // session (or queued for the next turn) without blocking the channel handler.
+    this.opts.onMessage(channelMessage, askApproval).then(async (response) => {
+      cleanup();
+      const { text, files } = response;
+      // Empty/whitespace-only = agent chose to stay silent (shared channel filtering)
+      if (!text?.trim()) return;
+      const chunks = splitMessage(text, 2000);
+      const attachments = files?.map((f) => new AttachmentBuilder(f.path, { name: f.filename })) ?? [];
+      await ch.send({ content: chunks[0], files: attachments });
+      for (const chunk of chunks.slice(1)) {
+        await ch.send(chunk);
+      }
+    }).catch(async (err) => {
+      cleanup();
+      const errMsg = err instanceof Error ? err.message : String(err);
+      await ch.send(`Error: ${errMsg}`).catch(() => {});
+    });
   }
 
   private findBinding(

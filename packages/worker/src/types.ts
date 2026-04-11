@@ -7,7 +7,8 @@ const sdkPresetSchema = z.object({
 });
 
 export const WorkerSessionRequestSchema = z.object({
-  prompt: z.string().min(1, "prompt is required"),
+  // prompt is optional in Redis mode (messages arrive via pub/sub)
+  prompt: z.string().optional().default(""),
   systemPrompt: z.union([z.string(), sdkPresetSchema]).optional(),
   tools: z.array(z.string()).optional(),
   disallowedTools: z.array(z.string()).optional(),
@@ -24,6 +25,8 @@ export const WorkerSessionRequestSchema = z.object({
   orchestratorUrl: z.string(),
   callbackToken: z.string(),
   sdkSettings: z.record(z.string(), z.unknown()).optional(),
+  /** When true: subscribe to Redis for messages, publish events to Redis. */
+  redisMode: z.boolean().optional(),
 });
 
 export interface WorkerSessionRequest {
@@ -43,6 +46,8 @@ export interface WorkerSessionRequest {
   orchestratorUrl: string;
   callbackToken: string;
   sdkSettings?: Record<string, unknown>;
+  /** When true: subscribe to Redis for messages, publish events to Redis. */
+  redisMode?: boolean;
 }
 
 export type WorkerEvent =
@@ -50,7 +55,7 @@ export type WorkerEvent =
   | { type: "turn"; turns: number; input: number; output: number; cacheRead: number; cacheCreate: number }
   | { type: "tool_start"; name: string }
   | { type: "tool_end"; name: string; elapsedMs: number }
-  | { type: "result"; text: string; sessionId: string; stopReason: string }
+  | { type: "result"; text: string; sessionId: string; stopReason: string; files?: Array<{ filename: string; contentType: string; path: string }> }
   | { type: "error"; message: string }
   | { type: "stale_session" };
 

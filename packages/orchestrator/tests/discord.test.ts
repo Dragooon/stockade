@@ -167,7 +167,7 @@ describe("DiscordAdapter", () => {
   });
 
   it("builds correct scope and strips mention for wildcard binding", async () => {
-    onMessage.mockResolvedValue("Response");
+    onMessage.mockResolvedValue({ text: "Response" });
     const adapter = new DiscordAdapter(discordConfig, { onMessage });
     await adapter.start();
     const handler = getMessageHandler();
@@ -185,7 +185,7 @@ describe("DiscordAdapter", () => {
       expect.objectContaining({ askUser: expect.any(Function), notifyAutoApproved: expect.any(Function) }),
     );
 
-    expect((msg.channel as any).send).toHaveBeenCalledWith("Response");
+    expect((msg.channel as any).send).toHaveBeenCalledWith({ content: "Response", files: [] });
   });
 
   it("responds to thread messages without mention", async () => {
@@ -311,7 +311,7 @@ describe("Discord slash commands", () => {
   }
 
   it("/ask dispatches to the agent and replies", async () => {
-    onMessage.mockResolvedValue("Slash response");
+    onMessage.mockResolvedValue({ text: "Slash response" });
     const adapter = new DiscordAdapter(discordConfig, { onMessage, onSessionReset });
     await adapter.start();
     const handler = getInteractionHandler()!;
@@ -329,7 +329,7 @@ describe("Discord slash commands", () => {
       }),
       expect.objectContaining({ askUser: expect.any(Function), notifyAutoApproved: expect.any(Function) }),
     );
-    expect(interaction.editReply).toHaveBeenCalledWith("Slash response");
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: "Slash response", files: [] });
   });
 
   it("/new calls onSessionReset and confirms", async () => {

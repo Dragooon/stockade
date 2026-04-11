@@ -45,3 +45,16 @@ export function getCallbackSession(token: string): CallbackSession | undefined {
 export function deleteCallbackSession(token: string): void {
   registry.delete(token);
 }
+
+export function updateCallbackSession(
+  token: string,
+  fields: Partial<Pick<CallbackSession, "userId" | "userPlatform" | "askApproval" | "workerSessionId" | "workerUrl">>,
+): void {
+  const session = registry.get(token);
+  if (!session) return;
+  if (fields.userId !== undefined) session.userId = fields.userId;
+  if (fields.userPlatform !== undefined) session.userPlatform = fields.userPlatform;
+  if (fields.askApproval !== undefined) session.askApproval = fields.askApproval;
+  if (fields.workerSessionId !== undefined) session.workerSessionId = fields.workerSessionId;
+  if (fields.workerUrl !== undefined) session.workerUrl = fields.workerUrl;
+}

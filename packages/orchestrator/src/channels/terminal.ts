@@ -2,19 +2,19 @@ import { createInterface, type Interface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
 import { terminalScope } from "./scope.js";
-import type { ChannelMessage, ApprovalChannel } from "../types.js";
+import type { ChannelMessage, ChannelResponse, ApprovalChannel } from "../types.js";
 import { formatToolApproval } from "../permissions.js";
 import type { GatekeeperReview } from "../gatekeeper.js";
 
 export class TerminalAdapter {
   private agentName: string;
-  private onMessage: (msg: ChannelMessage, approvalChannel?: ApprovalChannel) => Promise<string>;
+  private onMessage: (msg: ChannelMessage, approvalChannel?: ApprovalChannel) => Promise<ChannelResponse>;
   private rl: Interface | null = null;
   private scope: string;
 
   constructor(
     config: { agent: string },
-    onMessage: (msg: ChannelMessage, approvalChannel?: ApprovalChannel) => Promise<string>,
+    onMessage: (msg: ChannelMessage, approvalChannel?: ApprovalChannel) => Promise<ChannelResponse>,
   ) {
     this.agentName = config.agent;
     this.onMessage = onMessage;
@@ -51,7 +51,7 @@ export class TerminalAdapter {
       try {
         const approvalChannel = this.createApprovalChannel();
         const response = await this.onMessage(msg, approvalChannel);
-        process.stdout.write(`\n${response}\n\n`);
+        process.stdout.write(`\n${response.text}\n\n`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         process.stdout.write(`\nError: ${message}\n\n`);

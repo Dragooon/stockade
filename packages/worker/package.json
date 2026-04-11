@@ -12,6 +12,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.2.92",
     "@hono/node-server": "^1.14.1",
     "hono": "^4.7.10",
+    "ioredis": "^5.4.1",
     "undici": "^7.24.6",
     "zod": "^4.3.6"
   },

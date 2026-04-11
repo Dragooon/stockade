@@ -24,6 +24,11 @@ export class ConversationChannel {
     return this._closed;
   }
 
+  /** Number of messages buffered but not yet consumed by query(). */
+  get bufferedCount(): number {
+    return this.buffer.length;
+  }
+
   /** Update the current SDK session ID so injected messages carry it. */
   setSessionId(id: string): void {
     this._sessionId = id;

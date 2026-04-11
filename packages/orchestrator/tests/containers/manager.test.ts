@@ -335,9 +335,9 @@ describe("ContainerManager", () => {
 
       await manager.shutdownAll();
 
-      // Containers stopped but NOT removed
+      // Containers stopped and removed
       expect(docker.stopContainer).toHaveBeenCalledTimes(2);
-      expect(docker.removeContainer).not.toHaveBeenCalled();
+      expect(docker.removeContainer).toHaveBeenCalledTimes(2);
 
       // Provisioning cleanup ran (tokens revoked, temp files removed)
       expect(cleanup1).toHaveBeenCalled();

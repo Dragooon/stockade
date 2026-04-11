@@ -12,27 +12,33 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { basename } from "node:path";
 import type { ConversationChannel } from "./channel.js";
 import type { WorkerSessionRequest, WorkerEvent } from "./types.js";
 
 /**
- * HTTP POST using node:http/https directly — bypasses undici/fetch and any
+ * HTTP request using node:http/https directly — bypasses undici/fetch and any
  * proxy configuration that may interfere with internal callback traffic.
  */
-function httpPost(url: string, body: string, timeoutMs: number): Promise<{ status: number; text: string }> {
+function httpCallback(
+  method: string,
+  url: string,
+  body: string | null,
+  timeoutMs: number,
+): Promise<{ status: number; text: string }> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const isHttps = parsed.protocol === "https:";
     const requester = isHttps ? httpsRequest : httpRequest;
+    const hasBody = body !== null && body.length > 0;
     const opts = {
       hostname: parsed.hostname,
       port: parsed.port || (isHttps ? 443 : 80),
       path: parsed.pathname + parsed.search,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(body),
-      },
+      method,
+      headers: hasBody
+        ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body!) }
+        : {},
     };
     const req = requester(opts, (res) => {
       let data = "";
@@ -43,9 +49,14 @@ function httpPost(url: string, body: string, timeoutMs: number): Promise<{ statu
       req.destroy(new Error(`HTTP callback timed out after ${timeoutMs}ms`));
     });
     req.on("error", reject);
-    req.write(body);
+    if (hasBody) req.write(body!);
     req.end();
   });
+}
+
+// Keep httpPost as a convenience wrapper used by the PreToolUse hook.
+function httpPost(url: string, body: string, timeoutMs: number): Promise<{ status: number; text: string }> {
+  return httpCallback("POST", url, body, timeoutMs);
 }
 
 const DEFAULT_MODEL = "sonnet";
@@ -97,6 +108,9 @@ export async function runAgentSession(
   const { orchestratorUrl, callbackToken } = request;
   const cbBase = `${orchestratorUrl}/cb/${callbackToken}`;
 
+  /** Files queued by send_file tool calls during this session. */
+  const pendingFiles: Array<{ filename: string; contentType: string; path: string }> = [];
+
   // ── Build agent MCP server: gives the agent mcp__agent__start/stop/message ──
   const agentStartTool = tool(
     "start",
@@ -116,18 +130,14 @@ with full memory and settings, ideal for divide-and-conquer reasoning tasks.`,
     },
     async (args) => {
       try {
-        const res = await fetch(`${cbBase}/agent/start`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(args),
-          // Blocking agents can take a long time; background returns immediately
-          signal: args.background ? AbortSignal.timeout(10_000) : AbortSignal.timeout(3_600_000),
-        });
-        if (!res.ok) {
-          const err = await res.text();
-          return { content: [{ type: "text" as const, text: `Error: ${err}` }] };
+        // Use httpCallback (node:http) to bypass undici ProxyAgent which does not
+        // honour noProxyList for plain HTTP, causing "fetch failed" on the callback server.
+        const timeoutMs = args.background ? 10_000 : 3_600_000;
+        const res = await httpCallback("POST", `${cbBase}/agent/start`, JSON.stringify(args), timeoutMs);
+        if (res.status < 200 || res.status >= 300) {
+          return { content: [{ type: "text" as const, text: `Error: ${res.text}` }] };
         }
-        const data = await res.json() as { runId: string; result?: string };
+        const data = JSON.parse(res.text) as { runId: string; result?: string };
         if (data.result !== undefined) {
           return { content: [{ type: "text" as const, text: data.result }] };
         }
@@ -145,12 +155,7 @@ with full memory and settings, ideal for divide-and-conquer reasoning tasks.`,
     { runId: z.string().describe("runId returned by mcp__agent__start") },
     async (args) => {
       try {
-        await fetch(`${cbBase}/agent/stop`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(args),
-          signal: AbortSignal.timeout(10_000),
-        });
+        await httpCallback("POST", `${cbBase}/agent/stop`, JSON.stringify(args), 10_000);
         return { content: [{ type: "text" as const, text: `Agent ${args.runId} stopped.` }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -168,15 +173,9 @@ with full memory and settings, ideal for divide-and-conquer reasoning tasks.`,
     },
     async (args) => {
       try {
-        const res = await fetch(`${cbBase}/agent/message`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(args),
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!res.ok) {
-          const err = await res.text();
-          return { content: [{ type: "text" as const, text: `Error: ${err}` }] };
+        const res = await httpCallback("POST", `${cbBase}/agent/message`, JSON.stringify(args), 10_000);
+        if (res.status < 200 || res.status >= 300) {
+          return { content: [{ type: "text" as const, text: `Error: ${res.text}` }] };
         }
         return { content: [{ type: "text" as const, text: "Message sent." }] };
       } catch (err) {
@@ -186,10 +185,26 @@ with full memory and settings, ideal for divide-and-conquer reasoning tasks.`,
     },
   );
 
+  const sendFileTool = tool(
+    "send_file",
+    "Queue a file to be delivered as an attachment in the channel response. The file must already exist on disk.",
+    {
+      path: z.string().describe("Absolute path to the file"),
+      filename: z.string().optional().describe("Filename to display (defaults to basename of path)"),
+      content_type: z.string().optional().describe("MIME type (defaults to application/octet-stream)"),
+    },
+    async (args) => {
+      const resolvedFilename = args.filename ?? basename(args.path);
+      const contentType = args.content_type ?? "application/octet-stream";
+      pendingFiles.push({ path: args.path, filename: resolvedFilename, contentType });
+      return { content: [{ type: "text" as const, text: "File queued for delivery" }] };
+    },
+  );
+
   const agentMcpServer = createSdkMcpServer({
     name: "agent",
     version: "1.0.0",
-    tools: [agentStartTool, agentStopTool, agentMessageTool],
+    tools: [agentStartTool, agentStopTool, agentMessageTool, sendFileTool],
   });
 
   // ── Build scheduler MCP server: gives the agent mcp__scheduler__* ──
@@ -214,14 +229,9 @@ schedule_type options:
     },
     async (args) => {
       try {
-        const res = await fetch(`${cbBase}/scheduler/tasks`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(args),
-          signal: AbortSignal.timeout(10_000),
-        });
-        const data = await res.json() as { task?: { id: string; next_run: string | null }; error?: string };
-        if (!res.ok) return { content: [{ type: "text" as const, text: `Error: ${data.error}` }] };
+        const res = await httpCallback("POST", `${cbBase}/scheduler/tasks`, JSON.stringify(args), 10_000);
+        const data = JSON.parse(res.text) as { task?: { id: string; next_run: string | null }; error?: string };
+        if (res.status < 200 || res.status >= 300) return { content: [{ type: "text" as const, text: `Error: ${data.error}` }] };
         return { content: [{ type: "text" as const, text: `Task created (id: ${data.task!.id}). First run: ${data.task!.next_run ?? "N/A"}` }] };
       } catch (err) {
         return { content: [{ type: "text" as const, text: `Failed to create task: ${err instanceof Error ? err.message : String(err)}` }] };
@@ -235,11 +245,9 @@ schedule_type options:
     {},
     async () => {
       try {
-        const res = await fetch(`${cbBase}/scheduler/tasks`, {
-          signal: AbortSignal.timeout(10_000),
-        });
-        const data = await res.json() as { tasks?: Array<Record<string, unknown>>; error?: string };
-        if (!res.ok) return { content: [{ type: "text" as const, text: `Error: ${data.error}` }] };
+        const res = await httpCallback("GET", `${cbBase}/scheduler/tasks`, null, 10_000);
+        const data = JSON.parse(res.text) as { tasks?: Array<Record<string, unknown>>; error?: string };
+        if (res.status < 200 || res.status >= 300) return { content: [{ type: "text" as const, text: `Error: ${data.error}` }] };
         if (!data.tasks?.length) return { content: [{ type: "text" as const, text: "No scheduled tasks." }] };
         const lines = data.tasks.map((t) =>
           `- ${t.id} | ${t.schedule_type} (${t.schedule_value}) | status: ${t.status} | next: ${t.next_run ?? "done"} | prompt: "${String(t.prompt).slice(0, 60)}"`
@@ -257,12 +265,9 @@ schedule_type options:
     { taskId: z.string().describe("Task ID to delete") },
     async (args) => {
       try {
-        const res = await fetch(`${cbBase}/scheduler/tasks/${args.taskId}`, {
-          method: "DELETE",
-          signal: AbortSignal.timeout(10_000),
-        });
-        const data = await res.json() as { ok?: boolean; error?: string };
-        if (!res.ok) return { content: [{ type: "text" as const, text: `Error: ${data.error}` }] };
+        const res = await httpCallback("DELETE", `${cbBase}/scheduler/tasks/${args.taskId}`, null, 10_000);
+        const data = JSON.parse(res.text) as { ok?: boolean; error?: string };
+        if (res.status < 200 || res.status >= 300) return { content: [{ type: "text" as const, text: `Error: ${data.error}` }] };
         return { content: [{ type: "text" as const, text: `Task ${args.taskId} deleted.` }] };
       } catch (err) {
         return { content: [{ type: "text" as const, text: `Failed to delete task: ${err instanceof Error ? err.message : String(err)}` }] };
@@ -279,14 +284,9 @@ schedule_type options:
     },
     async (args) => {
       try {
-        const res = await fetch(`${cbBase}/scheduler/tasks/${args.taskId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: args.status }),
-          signal: AbortSignal.timeout(10_000),
-        });
-        const data = await res.json() as { task?: Record<string, unknown>; error?: string };
-        if (!res.ok) return { content: [{ type: "text" as const, text: `Error: ${data.error}` }] };
+        const res = await httpCallback("PATCH", `${cbBase}/scheduler/tasks/${args.taskId}`, JSON.stringify({ status: args.status }), 10_000);
+        const data = JSON.parse(res.text) as { task?: Record<string, unknown>; error?: string };
+        if (res.status < 200 || res.status >= 300) return { content: [{ type: "text" as const, text: `Error: ${data.error}` }] };
         return { content: [{ type: "text" as const, text: `Task ${args.taskId} is now ${args.status}.` }] };
       } catch (err) {
         return { content: [{ type: "text" as const, text: `Failed to update task: ${err instanceof Error ? err.message : String(err)}` }] };
@@ -449,5 +449,5 @@ schedule_type options:
     throw err;
   }
 
-  emit({ type: "result", text: resultText, sessionId: sdkSessionId, stopReason });
+  emit({ type: "result", text: resultText, sessionId: sdkSessionId, stopReason, files: pendingFiles });
 }

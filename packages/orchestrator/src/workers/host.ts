@@ -37,6 +37,8 @@ export class HostWorkerManager implements WorkerManager {
   constructor(
     private readonly agentsDir: string,
     private readonly logsDir: string,
+    /** Extra environment variables injected into every spawned worker process. */
+    private readonly extraEnv: Record<string, string> = {},
   ) {
     // Health monitor: restart dead workers every 30s
     this.healthTimer = setInterval(() => {
@@ -90,8 +92,10 @@ export class HostWorkerManager implements WorkerManager {
 
     const env = {
       ...process.env,
+      ...this.extraEnv,
       PORT: String(port),
       WORKER_ID: `host-${agentId}`,
+      AGENT_ID: agentId,
       AGENT_WORKSPACE: join(this.agentsDir, agentId),
     };
 

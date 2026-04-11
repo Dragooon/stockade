@@ -27,12 +27,14 @@ import {
 } from "../agent-mcp.js";
 import type { WorkerManager } from "../workers/index.js";
 import type { DispatchContext } from "../dispatcher.js";
+import type { OrchestratorBridge } from "../bus/orchestrator-bridge.js";
 import type { TaskStore, ScheduleType, ContextMode } from "../scheduler/types.js";
 
 export const CALLBACK_PORT = 7420;
 
 export function startCallbackServer(
   workerManager: WorkerManager,
+  bridge: OrchestratorBridge | null,
   buildDispatchContext: (token: string) => DispatchContext | null,
   taskStore?: TaskStore,
 ): () => void {
@@ -93,8 +95,9 @@ export function startCallbackServer(
       inline?: boolean;
     };
 
+    if (!bridge) return c.json({ error: "Redis bridge not initialized" }, 503);
     try {
-      const result = await handleAgentStart(args, ctx, dispatchCtx, workerManager);
+      const result = await handleAgentStart(args, ctx, dispatchCtx, workerManager, bridge);
       return c.json(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -107,9 +110,10 @@ export function startCallbackServer(
     const token = c.req.param("token");
     const ctx = getCallbackSession(token);
     if (!ctx) return c.json({ error: "Unknown callback token" }, 404);
+    if (!bridge) return c.json({ error: "Redis bridge not initialized" }, 503);
 
     const { runId } = await c.req.json() as { runId: string };
-    await handleAgentStop(runId);
+    await handleAgentStop(runId, bridge);
     return c.json({ ok: true });
   });
 
@@ -118,9 +122,10 @@ export function startCallbackServer(
     const token = c.req.param("token");
     const ctx = getCallbackSession(token);
     if (!ctx) return c.json({ error: "Unknown callback token" }, 404);
+    if (!bridge) return c.json({ error: "Redis bridge not initialized" }, 503);
 
     const { target, text } = await c.req.json() as { target: string; text: string };
-    const ok = await handleAgentMessage(target, text);
+    const ok = await handleAgentMessage(target, text, bridge);
     if (!ok) return c.json({ error: `No active agent: ${target}` }, 404);
     return c.json({ ok: true });
   });
@@ -217,6 +222,33 @@ export function startCallbackServer(
 
     taskStore.deleteTask(id);
     return c.json({ ok: true });
+  });
+
+  // ── Direct dispatch (testing / scripting) ──
+  app.post("/dispatch", async (c) => {
+    if (!bridge) return c.json({ error: "Redis bridge not initialized" }, 503);
+
+    const { agentId, prompt, scope: reqScope, userId } = await c.req.json() as {
+      agentId: string;
+      prompt: string;
+      scope?: string;
+      userId?: string;
+    };
+
+    if (!agentId || !prompt) {
+      return c.json({ error: "agentId and prompt are required" }, 400);
+    }
+
+    const scope = reqScope ?? `api:${agentId}:${randomUUID()}`;
+
+    const result = await bridge.sendAndWait(scope, prompt, {
+      agentId,
+      userId: userId ?? "mail",
+      userPlatform: "terminal",
+      noSession: !reqScope, // fresh session unless caller provides a scope to reuse
+    });
+
+    return c.json({ result, scope });
   });
 
   const server = serve({ fetch: app.fetch, port: CALLBACK_PORT }, () => {

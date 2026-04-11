@@ -346,8 +346,9 @@ describe("dispatch — HTTP worker dispatch", () => {
 describe("buildSystemPrompt", () => {
   it("returns plain string in replace mode (default)", () => {
     const agent: AgentConfig = { model: "sonnet", system: "You are helpful." };
-    const result = buildSystemPrompt(agent);
-    expect(result).toBe("You are helpful.");
+    const result = buildSystemPrompt(agent) as string;
+    expect(result).toContain("You are helpful.");
+    expect(result).toContain("Shared Directory");
   });
 
   it("returns preset object in append mode", () => {
@@ -356,18 +357,17 @@ describe("buildSystemPrompt", () => {
       system: "Custom instructions.",
       system_mode: "append",
     };
-    const result = buildSystemPrompt(agent);
-    expect(result).toEqual({
-      type: "preset",
-      preset: "claude_code",
-      append: "Custom instructions.",
-    });
+    const result = buildSystemPrompt(agent) as { type: string; preset: string; append: string };
+    expect(result.type).toBe("preset");
+    expect(result.preset).toBe("claude_code");
+    expect(result.append).toContain("Custom instructions.");
+    expect(result.append).toContain("Shared Directory");
   });
 
-  it("returns undefined when no system prompt", () => {
+  it("returns shared directory section even with no user system prompt", () => {
     const agent: AgentConfig = { model: "sonnet", system: "" };
-    const result = buildSystemPrompt(agent);
-    expect(result).toBeUndefined();
+    const result = buildSystemPrompt(agent) as string;
+    expect(result).toContain("Shared Directory");
   });
 
   it("includes proxy instructions when hasProxy=true and agent has credentials", () => {

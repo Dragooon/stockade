@@ -20,7 +20,7 @@ import { DispatchQueue } from "./containers/queue.js";
 import { HostWorkerManager } from "./workers/host.js";
 import { startCallbackServer, CALLBACK_PORT } from "./api/server.js";
 import { getCallbackSession } from "./api/sessions.js";
-import type { ChannelMessage, ApprovalChannel } from "./types.js";
+import type { ChannelMessage, ChannelResponse, ApprovalChannel } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "../../..");
@@ -49,6 +49,7 @@ const orchestratorCallbackUrl = `http://localhost:${CALLBACK_PORT}`;
 
 const stopCallbackServer = startCallbackServer(
   hostWorkerManager,
+  null, // no Redis bridge in validate mode
   (token) => {
     const ctx = getCallbackSession(token);
     if (!ctx) return null;
@@ -72,7 +73,7 @@ const dispatchQueue = new DispatchQueue({ maxConcurrent: 5 });
 console.log(`[validate] DispatchQueue ready (maxConcurrent=5)`);
 
 // Define handleMessage callback
-async function handleMessage(msg: ChannelMessage, _approvalChannel?: ApprovalChannel): Promise<string> {
+async function handleMessage(msg: ChannelMessage, _approvalChannel?: ApprovalChannel): Promise<ChannelResponse> {
   console.log(`[validate] handleMessage: scope=${msg.scope}, userId=${msg.userId}`);
 
   const agentId = resolveAgent(msg.scope, config.platform);
@@ -80,11 +81,11 @@ async function handleMessage(msg: ChannelMessage, _approvalChannel?: ApprovalCha
 
   if (!checkAccess(msg.userId, msg.platform, agentId, config.platform)) {
     console.log(`[validate] Access DENIED for ${msg.userId}`);
-    return "Access denied.";
+    return { text: "Access denied." };
   }
 
   const agentConfig = config.agents.agents[agentId];
-  if (!agentConfig) return `Unknown agent: ${agentId}`;
+  if (!agentConfig) return { text: `Unknown agent: ${agentId}` };
 
   const sessionId = getSessionId(db, msg.scope);
   console.log(`[validate] Session: ${sessionId ?? "(new)"}`);
@@ -104,7 +105,7 @@ async function handleMessage(msg: ChannelMessage, _approvalChannel?: ApprovalCha
 
   setSessionId(db, msg.scope, result.sessionId);
   console.log(`[validate] Response (${result.result.length} chars), session=${result.sessionId}`);
-  return result.result;
+  return { text: result.result };
 }
 
 // Start terminal channel

@@ -64,7 +64,7 @@ describe("POST /sessions", () => {
     expect(typeof body.workerSessionId).toBe("string");
   });
 
-  it("returns 400 when prompt is missing", async () => {
+  it("returns 200 when prompt is omitted (Redis mode — prompt is optional)", async () => {
     const res = await app.request("/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -74,9 +74,9 @@ describe("POST /sessions", () => {
       }),
     });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toHaveProperty("error");
+    expect(body).toHaveProperty("workerSessionId");
   });
 
   it("returns 400 when orchestratorUrl is missing", async () => {

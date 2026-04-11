@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { DockerClient } from "./docker.js";
-import type { ContainersConfig, ContainerState } from "./types.js";
+import type { ContainersConfig, ContainerState, ContainerInfo } from "./types.js";
 import type { AgentConfig } from "../types.js";
 import type { WorkerManager } from "../workers/index.js";
 import { PortAllocator } from "./ports.js";
@@ -29,6 +29,7 @@ export class ContainerManager implements WorkerManager {
     private readonly dataDir: string,
     private readonly logsDir: string,
     private readonly agentsDir?: string,
+    private readonly redisUrl?: string,
   ) {
     this.portAllocator = new PortAllocator(config.port_range);
   }
@@ -93,7 +94,8 @@ export class ContainerManager implements WorkerManager {
         this.proxyGatewayUrl,
         this.dataDir,
         port,
-        this.agentsDir
+        this.agentsDir,
+        this.redisUrl,
       );
     } catch (err) {
       this.portAllocator.release(port);
@@ -118,10 +120,12 @@ export class ContainerManager implements WorkerManager {
           "stockade": "true",
           "agent-id": agentId,
           "container-key": key,
+          "host-port": String(port),
           isolation: agentConfig.container?.isolation ?? "shared",
         },
         memory: agentConfig.container?.memory ?? this.config.defaults.memory,
         cpus: agentConfig.container?.cpus ?? this.config.defaults.cpus,
+        user: agentConfig.container?.user,
         addHost:
           this.config.proxy_host === "host.docker.internal"
             ? undefined
@@ -217,10 +221,21 @@ export class ContainerManager implements WorkerManager {
   }
 
   /**
-   * Graceful shutdown: stop all managed containers (without removing them),
+   * Graceful shutdown: stop and remove all managed containers,
    * run provisioning cleanup callbacks, and clear internal state.
    */
   async shutdownAll(): Promise<void> {
+    await this.gracefulShutdown(false);
+  }
+
+  /**
+   * Graceful shutdown with optional stop-only mode.
+   *
+   * stopOnly=true  — stops containers without removing them or revoking proxy tokens.
+   *                  Used on orchestrator restart so containers can be reconnected.
+   * stopOnly=false — stops, removes, and runs cleanup (default).
+   */
+  async gracefulShutdown(stopOnly: boolean): Promise<void> {
     // Kill all log followers first
     for (const [key, logProc] of this.logProcs) {
       logProc.kill();
@@ -231,16 +246,25 @@ export class ContainerManager implements WorkerManager {
     await Promise.all(
       entries.map(async ([key, state]) => {
         try {
-          await this.docker.stopContainer(state.containerId, 5);
+          await this.docker.stopContainer(state.containerId, 10);
         } catch {
           // Container may already be stopped
         }
-        this.portAllocator.release(state.port);
-        const cleanup = this.cleanups.get(key);
-        if (cleanup) {
-          await cleanup();
-          this.cleanups.delete(key);
+        if (!stopOnly) {
+          try {
+            await this.docker.removeContainer(state.containerId);
+          } catch {
+            // Best-effort
+          }
+          this.portAllocator.release(state.port);
+          const cleanup = this.cleanups.get(key);
+          if (cleanup) {
+            await cleanup();
+            this.cleanups.delete(key);
+          }
         }
+        // When stopOnly: port stays reserved and cleanup (token revocation) is skipped.
+        // The container is left stopped with its proxy token intact for reconnection.
       }),
     );
     this.containers.clear();
@@ -335,10 +359,15 @@ export class ContainerManager implements WorkerManager {
 
   /**
    * Remove orphaned containers from a previous run.
-   * Scans Docker for containers with our labels and removes any
-   * not tracked in our state map.
+   *
+   * First tries to reconnect containers that were left stopped (or still
+   * running) from a previous orchestrator run. Only removes containers that
+   * cannot be reconnected (e.g., wrong image version, failed health check).
    */
   async cleanupOrphans(): Promise<void> {
+    // Reconnect first — containers left by a graceful stop-only restart
+    await this.reconnectRunning();
+
     const containers = await this.docker.listContainers({
       "stockade": "true",
     });
@@ -353,6 +382,87 @@ export class ContainerManager implements WorkerManager {
           await this.docker.removeContainer(c.id);
         } catch { /* best effort */ }
       }
+    }
+  }
+
+  /**
+   * Reconnect to containers left from a previous orchestrator run.
+   *
+   * On restart with stopOnly=true, containers are stopped but not removed.
+   * This method restarts them and adds them back to the manager's map so
+   * that the next ensure() call reuses them instead of provisioning new ones.
+   *
+   * Stopped containers are restarted; running ones are verified via health check.
+   * Containers that fail to start or pass health checks are left for cleanupOrphans
+   * to remove.
+   */
+  async reconnectRunning(): Promise<void> {
+    let candidates: ContainerInfo[];
+    try {
+      candidates = await this.docker.listContainers({ "stockade": "true" });
+    } catch {
+      return; // Docker unavailable — skip
+    }
+
+    for (const c of candidates) {
+      const key = c.labels["container-key"];
+      const agentId = c.labels["agent-id"];
+      const portStr = c.labels["host-port"];
+      if (!key || !agentId || !portStr || this.containers.has(key)) continue;
+
+      const port = parseInt(portStr, 10);
+      if (isNaN(port) || !this.portAllocator.isAvailable(port)) continue;
+
+      const url = `http://localhost:${port}`;
+
+      if (c.state === "running") {
+        // Verify it's actually healthy before adding
+        try {
+          const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) });
+          if (!res.ok) continue;
+        } catch {
+          continue;
+        }
+      } else if (c.state === "exited" || c.state === "stopped") {
+        // Restart and wait for it to become healthy
+        try {
+          await this.docker.startContainer(c.id);
+          await this.waitForHealth(port);
+        } catch {
+          console.log(`[containers] Failed to restart stopped container ${key} — will remove`);
+          continue;
+        }
+      } else {
+        continue; // created, paused, etc. — skip
+      }
+
+      this.portAllocator.reserve(port);
+
+      const state: ContainerState = {
+        containerId: c.id,
+        key,
+        agentId,
+        scope: undefined,
+        image: "",
+        url,
+        port,
+        // No gatewayToken tracked — container uses its baked-in env var token
+        startedAt: Date.now(),
+        lastActivity: Date.now(),
+      };
+      this.containers.set(key, state);
+
+      // Attach log follower
+      const log = createWorkerLogger(this.logsDir, agentId);
+      const logProc = spawn("docker", ["logs", "--follow", "--since", "0s", c.id], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      logProc.stdout?.on("data", (d: Buffer) => log(d.toString().trimEnd()));
+      logProc.stderr?.on("data", (d: Buffer) => log(`[stderr] ${d.toString().trimEnd()}`));
+      logProc.on("exit", () => this.logProcs.delete(key));
+      this.logProcs.set(key, logProc);
+
+      console.log(`[containers] Reconnected ${c.state} container ${key} on port ${port}`);
     }
   }
 

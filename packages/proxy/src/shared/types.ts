@@ -74,10 +74,21 @@ export const ProviderSchema = z.object({
   write: z.string().optional(),
   /** Shell command to update an existing credential. Only needed for gateway/store. */
   update: z.string().optional(),
+  /**
+   * Shell command to obtain a session token (run once, stdout captured).
+   * The token is injected into every subsequent command via `session_env`.
+   * If the command fails or returns empty, commands run without a session.
+   */
+  signin: z.string().optional(),
+  /** Env var name to inject the signin token as (required when `signin` is set). */
+  session_env: z.string().optional(),
   cache_ttl: z.number().nonnegative().default(300),
   /** Per-key overrides — checked before the default `read` command. */
   overrides: z.array(ProviderOverrideSchema).default([]),
-});
+}).refine(
+  (p) => !p.signin || p.session_env,
+  { message: "session_env is required when signin is set", path: ["session_env"] },
+);
 
 // ─── Gateway ────────────────────────────────────────────────────
 export const GatewaySchema = z.object({

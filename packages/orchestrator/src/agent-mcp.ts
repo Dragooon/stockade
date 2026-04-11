@@ -4,30 +4,30 @@
  * Called by the callback server when workers invoke the agent MCP tools.
  *
  * Agent lifecycle:
- * - start (blocking): dispatches sub-agent, blocks HTTP call until done → returns { runId, result }
- * - start (background): dispatches sub-agent async → returns { runId } immediately,
- *   injects completion into parent worker when done
- * - stop: aborts a running sub-agent's worker session
- * - message: injects a message into a named or background sub-agent
+ * - start (blocking): dispatches sub-agent via Redis bus, waits for result
+ * - start (background): dispatches sub-agent async, injects completion into parent scope
+ * - stop: publishes abort control signal for the sub-agent scope
+ * - message: publishes message to the sub-agent's Redis channel (fire-and-forget)
  */
 
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { CallbackSession } from "./api/sessions.js";
 import type { DispatchContext } from "./dispatcher.js";
-import { dispatchToWorker } from "./dispatcher.js";
 import { checkAccess, buildPermissionHook } from "./rbac.js";
 import { resolveEffectivePermissions } from "./gatekeeper.js";
 import type { WorkerManager } from "./workers/index.js";
+import type { OrchestratorBridge } from "./bus/orchestrator-bridge.js";
+import type { AskApprovalFn } from "./types.js";
 
 interface AgentRun {
   runId: string;
   name?: string;
-  /** Callback token of the parent session (for injection on background completion) */
+  agentId: string;
+  /** Scope of the sub-agent session (for messaging and stop). */
+  scope: string;
+  /** Callback token of the parent session (for context on background completion). */
   parentToken: string;
-  /** Worker URL and session ID for inject/stop */
-  workerUrl?: string;
-  workerSessionId?: string;
   done: boolean;
 }
 
@@ -42,14 +42,13 @@ export async function handleAgentStart(
   parentCtx: CallbackSession,
   dispatchCtx: DispatchContext,
   workerManager: WorkerManager,
+  bridge: OrchestratorBridge,
 ): Promise<{ runId: string; result?: string }> {
   const { task, name, background = false } = args;
 
-  // Self-spawn: no agentId → spawn a parallel copy of the calling agent
   const isSelfSpawn = !args.agentId;
   const agentId = args.agentId ?? parentCtx.agentId;
 
-  // RBAC: check if the originating user can access the target agent
   if (!checkAccess(parentCtx.userId, parentCtx.userPlatform, agentId, parentCtx.platformConfig)) {
     throw new Error(`Access denied: user cannot invoke agent "${agentId}"`);
   }
@@ -59,89 +58,53 @@ export async function handleAgentStart(
     throw new Error(`Unknown agent: ${agentId}`);
   }
 
-  // Apply model override if specified
-  const effectiveConfig = args.model
-    ? { ...targetConfig, model: args.model }
-    : targetConfig;
-
-  // inline logic:
-  // - Self-spawn is always inline (shares parent workspace) but loads settings/memory
-  //   (unlike config-inline agents which suppress settings via forceParentCwd flag)
-  // - Otherwise: explicit arg takes precedence, then agent's config flag
   const inline = isSelfSpawn ? true : (args.inline ?? targetConfig.inline ?? false);
 
   const runId = randomUUID();
+  const subScope = isSelfSpawn
+    ? `self-spawn:${agentId}:${runId}`
+    : `subagent:${agentId}:${parentCtx.callbackToken}`;
+
   const run: AgentRun = {
     runId,
     name: name ?? undefined,
+    agentId,
+    scope: subScope,
     parentToken: parentCtx.callbackToken,
     done: false,
   };
   runs.set(runId, run);
   if (name) namedRuns.set(name, runId);
 
-  // Build sub-agent permission hook (uses original user's identity + target agent's rules)
-  const subAgentCwd = inline
-    ? parentCtx.agentCwd
-    : resolve(parentCtx.agentsDir, agentId);
-  const subEffectivePermissions = resolveEffectivePermissions(
-    effectiveConfig.permissions,
-    parentCtx.platformConfig.gatekeeper,
-  );
-  const subPermissionHook = buildPermissionHook(
-    parentCtx.userId,
-    parentCtx.userPlatform,
-    parentCtx.platformConfig,
-    subEffectivePermissions,
-    subAgentCwd,
-    parentCtx.platformRoot,
-    parentCtx.askApproval,
-  );
-
-  // Self-spawns get unique scopes (fresh session each time, no resume across spawns)
-  // Config sub-agents get stable scopes (session resumes across calls to same agent)
-  const subScope = isSelfSpawn
-    ? `self-spawn:${agentId}:${runId}`
-    : `subagent:${agentId}:${parentCtx.callbackToken}`;
-
-  const subMessage = {
-    scope: subScope,
-    content: task,
+  const meta: Record<string, unknown> = {
     userId: parentCtx.userId,
-    platform: parentCtx.userPlatform,
-  };
-
-  // Build sub-agent dispatch context
-  const subCtx: DispatchContext = {
-    ...dispatchCtx,
-    parentCwd: inline ? parentCtx.agentCwd : undefined,
-    // Self-spawn: force parent cwd but allow settings/memory to load (unlike config-inline)
-    forceParentCwd: isSelfSpawn,
+    userPlatform: parentCtx.userPlatform,
     askApproval: parentCtx.askApproval,
-    parentRunId: runId,
+    agentId,
+    parentCwd: inline ? parentCtx.agentCwd : undefined,
+    forceParentCwd: isSelfSpawn,
   };
 
   if (background) {
-    // Capture what we need from the parent context before the async gap
-    const onComplete = dispatchCtx.onBackgroundComplete;
     const parentScope = parentCtx.scope;
     const parentUserId = parentCtx.userId;
     const parentUserPlatform = parentCtx.userPlatform;
     const parentAskApproval = parentCtx.askApproval;
     const label = `"${name ?? agentId}" (${runId.slice(0, 8)})`;
 
-    dispatchToWorker(agentId, subMessage, effectiveConfig, null, subCtx, subPermissionHook)
-      .then(({ result }) => {
+    bridge.sendAndWait(subScope, task, meta)
+      .then((result) => {
         run.done = true;
         if (name) namedRuns.delete(name);
         runs.delete(runId);
 
         const text = `[Background agent ${label} complete]:\n${result}`;
-        if (onComplete) {
-          onComplete(parentScope, text, { userId: parentUserId, userPlatform: parentUserPlatform, askApproval: parentAskApproval });
-        } else {
-          console.warn(`[agent-mcp] background agent ${label} completed but no onBackgroundComplete handler — result dropped`);
-        }
+        // Re-dispatch via bridge to inject completion into parent scope
+        return bridge.sendAndWait(parentScope, text, {
+          userId: parentUserId,
+          userPlatform: parentUserPlatform,
+          askApproval: parentAskApproval as AskApprovalFn | undefined,
+        });
       })
       .catch((err) => {
         run.done = true;
@@ -151,19 +114,20 @@ export async function handleAgentStart(
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error(`[agent-mcp] background agent ${label} failed: ${errMsg}`);
 
-        const text = `[Background agent ${label} failed]: ${errMsg}`;
-        if (onComplete) {
-          onComplete(parentScope, text, { userId: parentUserId, userPlatform: parentUserPlatform, askApproval: parentAskApproval });
-        }
+        bridge.sendAndWait(parentScope, `[Background agent ${label} failed]: ${errMsg}`, {
+          userId: parentUserId,
+          userPlatform: parentUserPlatform,
+          askApproval: parentAskApproval as AskApprovalFn | undefined,
+        }).catch(() => {});
       });
 
     return { runId };
   }
 
-  // Blocking: dispatch and wait for result
+  // Blocking: dispatch and wait
   try {
-    const { result } = await dispatchToWorker(agentId, subMessage, effectiveConfig, null, subCtx, subPermissionHook);
-    return { runId, result };
+    const response = await bridge.sendAndWait(subScope, task, meta);
+    return { runId, result: response.text };
   } finally {
     run.done = true;
     if (name) namedRuns.delete(name);
@@ -171,47 +135,53 @@ export async function handleAgentStart(
   }
 }
 
-export async function handleAgentStop(runId: string): Promise<void> {
+export async function handleAgentStop(runId: string, bridge: OrchestratorBridge): Promise<void> {
   const run = runs.get(runId);
   if (!run || run.done) return;
 
-  if (run.workerUrl && run.workerSessionId) {
-    await fetch(`${run.workerUrl}/sessions/${run.workerSessionId}`, {
-      method: "DELETE",
-      signal: AbortSignal.timeout(5_000),
-    }).catch(() => {});
-  }
+  // Publish abort control signal to the sub-agent's agent control channel
+  await bridge.bus.publishControl(run.agentId, {
+    kind: "control",
+    action: "abort",
+    scope: run.scope,
+    timestamp: new Date().toISOString(),
+  });
 
   run.done = true;
   if (run.name) namedRuns.delete(run.name);
   runs.delete(runId);
 }
 
-/** Inject a message into a running sub-agent by runId or name. Returns false if not found. */
-export async function handleAgentMessage(target: string, text: string): Promise<boolean> {
-  // Resolve name → runId
+/**
+ * Inject a message into a running sub-agent by runId or name.
+ * Fire-and-forget — publishes to Redis message channel.
+ * Returns false if the run is not found or already done.
+ */
+export async function handleAgentMessage(
+  target: string,
+  text: string,
+  bridge: OrchestratorBridge,
+): Promise<boolean> {
   const runId = namedRuns.has(target) ? namedRuns.get(target)! : target;
   const run = runs.get(runId);
 
-  if (!run || run.done || !run.workerUrl || !run.workerSessionId) {
-    return false;
-  }
+  if (!run || run.done) return false;
 
-  const res = await fetch(`${run.workerUrl}/sessions/${run.workerSessionId}/inject`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-    signal: AbortSignal.timeout(10_000),
+  // Publish to sub-agent's scope message channel (fire-and-forget)
+  await bridge.bus.publishMessage({
+    kind: "user_message",
+    correlationId: randomUUID(), // untracked — result will be silently dropped
+    scope: run.scope,
+    text,
+    userId: "system",
+    userPlatform: "internal",
+    timestamp: new Date().toISOString(),
   });
 
-  return res.ok;
+  return true;
 }
 
-/** Register the worker session ID for a run (called by dispatcher after session creation). */
-export function registerRunSession(runId: string, workerUrl: string, workerSessionId: string): void {
-  const run = runs.get(runId);
-  if (run) {
-    run.workerUrl = workerUrl;
-    run.workerSessionId = workerSessionId;
-  }
+/** No longer needed — scope is tracked in AgentRun directly. Kept for compatibility. */
+export function registerRunSession(_runId: string, _workerUrl: string, _workerSessionId: string): void {
+  // No-op in Redis mode — scope is tracked at session creation time.
 }

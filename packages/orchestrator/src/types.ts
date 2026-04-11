@@ -21,6 +21,10 @@ export interface AgentConfig {
   /** Effort level for reasoning depth: low, medium, high, max. */
   effort?: "low" | "medium" | "high" | "max";
   tools?: string[];
+  /** Tool names to disallow (stripped from SDK, never sent to model). Merged with platform defaults. */
+  disallowed_tools?: string[];
+  /** Maximum turns per dispatch. Default: 200. */
+  max_turns?: number;
   sandboxed?: boolean;
   port?: number;
   url?: string;
@@ -37,7 +41,12 @@ export interface AgentConfig {
    * If defined, implicit deny when no rule matches.
    */
   permissions?: string[];
-  /** Skill names to sync from ~/.claude/skills/ into this agent's workspace. */
+  /**
+   * @deprecated Skills are no longer synced per-agent.
+   * All skills now load from the platform skills dir (~/.stockade/.claude/skills/).
+   * Use permission rules to restrict per-agent access: deny:Skill(name) hides a
+   * skill from context entirely (0 tokens). This field is silently ignored.
+   */
   skills?: string[];
   /**
    * Maximum wall-clock time for a single dispatch, in milliseconds.
@@ -113,6 +122,7 @@ export interface PlatformConfig {
   scheduler?: SchedulerConfig;
   paths?: PathsConfig;
   gatekeeper?: GatekeeperConfig;
+  redis?: { url: string; session_idle_timeout_sec?: number };
 }
 
 /** An attachment from a channel message (e.g., Discord file upload). */
@@ -193,6 +203,20 @@ export interface ApprovalChannel {
     input: Record<string, unknown>,
     review: GatekeeperReview,
   ) => Promise<void>;
+}
+
+/** A file attachment to be delivered through a channel response. */
+export interface ChannelFile {
+  filename: string;
+  contentType: string;
+  /** Absolute path readable by the orchestrator process. */
+  path: string;
+}
+
+/** Structured response from an agent dispatch — text plus optional file attachments. */
+export interface ChannelResponse {
+  text: string;
+  files?: ChannelFile[];
 }
 
 /** Resolved user info from RBAC */

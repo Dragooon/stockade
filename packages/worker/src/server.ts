@@ -13,10 +13,18 @@ import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { WorkerSessionRequestSchema } from "./types.js";
 import { WorkerSession } from "./session.js";
+import type { WorkerRedisBridge } from "./redis-bridge.js";
 
 export const app = new Hono();
 
 const workerId = process.env.WORKER_ID ?? `worker-${process.pid}`;
+
+/** Set by index.ts when REDIS_URL is configured. Shared across all sessions. */
+let redisBridge: WorkerRedisBridge | null = null;
+
+export function setRedisBridge(bridge: WorkerRedisBridge): void {
+  redisBridge = bridge;
+}
 
 /** Active sessions keyed by worker session ID. */
 const sessions = new Map<string, WorkerSession>();
@@ -38,8 +46,12 @@ app.post("/sessions", async (c) => {
 
   sessions.set(workerSessionId, session);
 
-  // Start in background — errors are emitted as WorkerEvent { type: "error" }
-  session.start(request as any);
+  // Start session: Redis mode (persistent loop) or SSE mode (one-shot)
+  if (request.redisMode && redisBridge) {
+    session.startPersistent(request as any, redisBridge);
+  } else {
+    session.start(request as any);
+  }
 
   // Auto-remove session when it finishes (with a delay for late SSE connects)
   const cleanup = () => {

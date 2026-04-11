@@ -32,7 +32,7 @@ packages/
 │       ├── rbac.ts           — User identity + role-based access control
 │       ├── gatekeeper.ts     — AI risk assessment for tool invocations
 │       ├── sessions.ts       — SQLite session persistence
-│       ├── skills.ts         — Skill sync from ~/.claude/skills/ to agent workspaces
+│       ├── skills.ts         — Platform skills directory setup (~/.stockade/.claude/skills/)
 │       ├── watch.ts          — Config hot-reload watcher
 │       ├── agent-mcp.ts      — ask_agent MCP server (sub-agent delegation)
 │       ├── channels/         — Terminal, Discord channel adapters
@@ -80,6 +80,31 @@ permissions:
 
 Path prefixes: `/` = platform root, `~/` = home, `./` = agent cwd, `//` = absolute POSIX.
 
+## Skills
+
+All skills live in one shared directory: `~/.stockade/.claude/skills/`. Changes are immediately visible to all agents — no restart or copy step needed.
+
+- **Host agents** (`sandboxed: false`): pick up skills automatically because `sdkCwd = platformRoot` (`~/.stockade`), so the SDK loads `~/.stockade/.claude/skills/` natively.
+- **Sandboxed agents** (Docker): the skills directory is volume-mounted read-write into the container at `/workspace/.claude/skills`.
+
+**Skill visibility is controlled by permission rules**, not by which skills exist on disk. Use `allow:Skill(name)` / `deny:Skill(*)` in an agent's `permissions:` list:
+
+```yaml
+permissions:
+  - "allow:Skill(tavily-search)"
+  - "allow:Skill(goplaces)"
+  - "deny:Skill(*)"       # hide everything else
+  - "allow:*"
+```
+
+This maps to two enforcement layers:
+1. **SDK-native** (`sdkSettings.permissions.allow/deny`) — denied skills are stripped from the agent's context entirely (0 tokens consumed).
+2. **PreToolUse hook** — blocks invocation at runtime for any skill not explicitly allowed.
+
+Both layers are derived from the same `allow:Skill(name)` rules via `extractSkillPermissions()` in `dispatcher.ts`.
+
+The `skills?: string[]` field on AgentConfig is deprecated — use permission rules instead.
+
 ## Gatekeeper
 
 AI-powered risk classification for tool invocations that hit `ask` rules. Configured in `config.yaml`:
@@ -95,15 +120,23 @@ Risk levels: `low`, `medium`, `high`, `critical`. The gatekeeper agent's system 
 
 ## Credential Proxy
 
-MITM proxy that intercepts agent HTTPS traffic:
-1. Strips auth headers from agent requests
-2. Matches request host to route config
-3. Resolves credential via provider (file, 1Password, OAuth, etc.)
-4. Injects credential into the correct header
-5. Injects Anthropic prompt cache markers (system + conversation history)
-6. Forwards to upstream; writes audit logs if `STOCKADE_AUDIT_LOG=1`
+MITM proxy that intercepts agent HTTPS traffic for two purposes:
 
-Provider overrides route specific keys to different backends (first glob match wins).
+**1. Third-party credential injection** (route-based):
+- Strips auth headers from agent requests matching a configured route
+- Resolves credential via provider (file, 1Password, etc.)
+- Injects credential into the correct header
+- Applies to 3rd-party APIs only (GitHub, Tavily, etc.) — NOT Anthropic API
+
+**2. Anthropic API passthrough** (no route needed):
+- Injects prompt cache markers (system + conversation history)
+- Strips Stockade context headers (X-Stockade-Session/Agent/Scope)
+- Writes audit logs if `STOCKADE_AUDIT_LOG=1`
+- Auth headers pass through untouched — the SDK handles its own OAuth
+
+**Anthropic API auth** is handled entirely by the SDK. The SDK reads `~/.claude/.credentials.json`, refreshes tokens via `platform.claude.com` (in `NO_PROXY`, bypasses MITM), and sends `Authorization: Bearer <token>` which the proxy passes through. Containers mount the host's real credentials file read-only.
+
+Provider overrides route specific keys to different backends (first glob match wins). Providers can optionally define `signin` + `session_env` — the signin command runs once, its stdout is cached, and injected as the named env var into every subsequent command. On auth errors, the session is refreshed automatically.
 
 Ref tokens (`apw-ref:<key>:<nonce>`) let agents pass credentials in request bodies without seeing the real value — the proxy does literal string substitution before forwarding.
 
@@ -134,10 +167,12 @@ Host workers run the **compiled dist** (`packages/worker/dist/`), not TypeScript
 cd ~/.stockade/repo
 pnpm --filter @stockade/worker build                              # Recompile dist/
 docker build -f packages/worker/Dockerfile -t stockade/worker .  # Rebuild image (sandboxed agents)
-echo "restart" > ~/.stockade/restart.signal                       # Restart orchestrator
+echo "restart" > ~/.stockade/restart.signal                       # Signal restart
 ```
 
 All three steps are required: dist rebuild → Docker image → orchestrator restart.
+
+The orchestrator polls `~/.stockade/restart.signal` every 2s. When detected, it tears down all running containers and exits with code 75. The launcher loop (`bin/start-orchestrator` or the nohup wrapper) relaunches automatically. Containers reprovision on first dispatch after restart.
 
 ## SDK Permission Interaction
 
@@ -161,7 +196,7 @@ The permission context (`agentCwd`) still uses the real agent workspace path for
 - Agent workspaces: `~/.stockade/agents/<agent-id>/`
 - Sessions persisted in SQLite: `~/.stockade/sessions.db`
 - Sub-agent sessions use in-memory map (not SQLite); do not persist across restarts
-- Skills synced from `~/.claude/skills/` to agent workspaces on each dispatch (file copy, not symlinks)
+- Skills live at `~/.stockade/.claude/skills/` — one shared directory, no per-agent copying or restart needed to pick up changes. Sandboxed agents get it volume-mounted at `/workspace/.claude/skills`; host agents inherit it via `sdkCwd = platformRoot`
 - Env vars in config via `${VAR_NAME}` syntax, `~/` expansion in string values
 - Logs: `~/.stockade/logs/` (cache-meta.ndjson, requests.ndjson when audit logging enabled)
 
@@ -192,9 +227,39 @@ rbac:
   - Shared channel awareness: agents receive ALL messages, must use judgment on when to respond
   - Bindings map servers/channels to agents
 
+## Shared Directory
+
+All agents — sandboxed and host — share a common read-write directory at `~/.stockade/shared/` on the host.
+
+| Context | Path |
+|---|---|
+| Sandboxed (Docker) | `/shared` (volume-mounted automatically) |
+| Host agent | `$SHARED_DIR` env var (`~/.stockade/shared/`) |
+
+Use it for file exchange between agents, cross-session artifact persistence, and staging outputs. The directory is created on orchestrator startup. Instructions are injected into all agents via `~/.stockade/CLAUDE.md` (the platform-level CLAUDE.md loaded by the SDK for all agents since `sdkCwd = platformRoot`).
+
 ## Container Isolation
 
 Sandboxed agents run in Docker on an internal network (`stockade-net`). The credential proxy is their only route out. Container lifecycle managed by `ContainerManager` — auto-provisioning, health checks, and cleanup.
+
+**Standard volume mounts (automatic):**
+- Agent workspace → `/workspace` (CLAUDE.md, memory, agent-local files)
+- `~/.stockade/.claude/skills/` → `/workspace/.claude/skills` (shared platform skills, read-write)
+- `~/.claude/.credentials.json` → `/home/node/.claude/.credentials.json` (OAuth, read-only; path adjusts to `/root/.claude/.credentials.json` when `user: root`)
+- Proxy CA cert → `/certs/proxy-ca.crt` (when proxy is available)
+
+**Extra volumes** — arbitrary additional mounts via the agent's `container.volumes` list. `~/` and `${VAR}` are expanded:
+```yaml
+container:
+  volumes:
+    - "~/.stockade/repo:/repo"
+```
+
+**Container user override** — set `container.user` to run as a specific user (e.g. `root` for Docker socket access). The credentials mount path adjusts automatically:
+```yaml
+container:
+  user: root
+```
 
 **Workspace path overrides** — when the Docker host filesystem differs from the orchestrator's (e.g. WSL2), set on the agent's `container:` block:
 - `workspace_path` — path relative to `agents_dir` (resolved on the host before passing to Docker)

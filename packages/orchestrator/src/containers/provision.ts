@@ -1,5 +1,6 @@
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { homedir } from "node:os";
 import type { ContainersConfig } from "./types.js";
 import type { AgentConfig } from "../types.js";
 
@@ -29,7 +30,8 @@ export async function provisionContainer(
   proxyGatewayUrl: string,
   dataDir: string,
   port: number,
-  agentsDir?: string
+  agentsDir?: string,
+  redisUrl?: string,
 ): Promise<ProvisionResult> {
   const containerDir = resolve(dataDir, "containers", agentId);
   mkdirSync(containerDir, { recursive: true });
@@ -65,6 +67,11 @@ export async function provisionContainer(
     WORKER_ID: agentId,
   };
 
+  // Redis URL: rewrite localhost → proxy_host so the container can reach the host
+  if (redisUrl) {
+    env.REDIS_URL = redisUrl.replace(/localhost|127\.0\.0\.1/, containersConfig.proxy_host);
+  }
+
   // Pass through ANTHROPIC_API_KEY when proxy isn't handling credential injection
   if (!proxyAvailable && process.env.ANTHROPIC_API_KEY) {
     env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -74,7 +81,7 @@ export async function provisionContainer(
     const proxyHost = containersConfig.proxy_host;
     env.HTTP_PROXY = `http://${proxyHost}:10255`;
     env.HTTPS_PROXY = `http://${proxyHost}:10255`;
-    env.NO_PROXY = "localhost,127.0.0.1,host.docker.internal";
+    env.NO_PROXY = "localhost,127.0.0.1,host.docker.internal,platform.claude.com,console.anthropic.com";
     env.NODE_EXTRA_CA_CERTS = "/certs/proxy-ca.crt";
     env.CURL_CA_BUNDLE = "/certs/proxy-ca.crt";
     env.REQUESTS_CA_BUNDLE = "/certs/proxy-ca.crt";
@@ -112,21 +119,18 @@ export async function provisionContainer(
   // 3. Build volume mounts
   const volumes: string[] = [];
 
-  // The Agent SDK requires ~/.claude/.credentials.json to initialize.
-  // Write a mock credential file that satisfies the SDK's startup check
-  // without leaking real tokens. The proxy handles actual API auth.
-  const mockCredsPath = resolve(containerDir, "credentials.json");
-  writeFileSync(mockCredsPath, JSON.stringify({
-    claudeAiOauth: {
-      accessToken: "sk-ant-stub-container-proxy-handles-auth",
-      refreshToken: "stub",
-      expiresAt: new Date(Date.now() + 86400_000).toISOString(),
-      scopes: "user:inference",
-      subscriptionType: "pro",
-      rateLimitTier: "tier4",
-    },
-  }));
-  volumes.push(`${mockCredsPath}:/home/node/.claude/.credentials.json:ro`);
+  // Mount the host's real OAuth credentials so the SDK can authenticate
+  // and refresh tokens itself (via platform.claude.com). Read-only mount
+  // prevents the container from tampering; refresh write-back fails
+  // silently but the SDK continues with the in-memory refreshed token.
+  const hostCredsPath = resolve(homedir(), ".claude", ".credentials.json");
+  if (existsSync(hostCredsPath)) {
+    const containerUser = agentConfig.container?.user;
+    const credsMountTarget = containerUser === "root"
+      ? "/root/.claude/.credentials.json"
+      : "/home/node/.claude/.credentials.json";
+    volumes.push(`${hostCredsPath}:${credsMountTarget}:ro`);
+  }
 
   if (proxyAvailable) {
     // Proxy CA cert — required for TLS through the MITM proxy
@@ -149,6 +153,22 @@ export async function provisionContainer(
     volumes.push(`${workspaceDir}:/workspace`);
     env.AGENT_WORKSPACE = "/workspace";
   }
+
+  // Platform skills directory — mount shared read-write so agents can edit skills
+  // and changes are immediately visible across all agents (no copy/restart needed).
+  // Per-agent filtering is done via Skill permission rules (deny:Skill(name)).
+  if (agentsDir) {
+    const platformSkillsDir = resolve(dataDir, ".claude", "skills");
+    mkdirSync(platformSkillsDir, { recursive: true });
+    volumes.push(`${platformSkillsDir}:/workspace/.claude/skills`);
+  }
+
+  // Shared directory — common read-write space for all agents (sandboxed and host).
+  // Host agents see it at $SHARED_DIR (~/.stockade/shared); containers at /shared.
+  const sharedDir = resolve(dataDir, "shared");
+  mkdirSync(sharedDir, { recursive: true });
+  volumes.push(`${sharedDir}:/shared`);
+  env.SHARED_DIR = "/shared";
 
   // Agent-specific volumes from config
   if (agentConfig.container?.volumes) {

@@ -37,6 +37,7 @@ const agentConfigSchema = z.object({
   system_mode: z.enum(["append", "replace"]).default("replace"),
   effort: z.enum(["low", "medium", "high", "max"]).optional(),
   tools: z.array(z.string()).optional(),
+  disallowed_tools: z.array(z.string()).optional(),
   sandboxed: z.boolean().default(false),
   port: z.number().optional(),
   url: z.string().optional(),
@@ -46,7 +47,7 @@ const agentConfigSchema = z.object({
   container: containerConfigSchema.optional(),
   memory: memoryConfigSchema.optional(),
   permissions: z.array(z.string()).optional(),
-  /** Skill names to sync from ~/.claude/skills/ into this agent's workspace. */
+  /** @deprecated Silently ignored — skills load from platform dir (~/.stockade/.claude/skills/). Use deny:Skill(name) permission rules to restrict per-agent access. */
   skills: z.array(z.string()).optional(),
   inline: z.boolean().optional(),
   max_turns: z.number().optional(),
@@ -104,6 +105,10 @@ const unifiedConfigSchema = z.object({
   scheduler: schedulerConfigSchema.optional(),
   paths: pathsConfigSchema.optional(),
   gatekeeper: gatekeeperConfigSchema.optional(),
+  redis: z.object({
+    url: z.string(),
+    session_idle_timeout_sec: z.number().int().positive().optional(),
+  }).optional(),
 });
 
 // --- Environment variable substitution ---
@@ -203,6 +208,7 @@ export function loadConfig(configDir: string, projectRoot?: string): {
     containers: parsed.containers,
     scheduler: parsed.scheduler,
     gatekeeper: parsed.gatekeeper,
+    redis: parsed.redis,
   };
 
   // Resolve paths with smart defaults
