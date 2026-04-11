@@ -161,16 +161,34 @@ Dev mode: `pnpm start:orchestrator` uses tsx for direct TypeScript execution.
 
 ### Worker changes require a full rebuild
 
-Host workers run the **compiled dist** (`packages/worker/dist/`), not TypeScript source. Changes to `packages/worker/src/` are not picked up by an orchestrator restart alone. Full sequence:
+There are two worker execution modes with different rebuild requirements:
+
+- **Docker/sandboxed container workers** (e.g. `main`): run the **compiled dist** inside the Docker image. Changes to `packages/worker/src/` require a `pnpm build` + `docker build` + restart.
+- **Host process workers** (e.g. `kleya`, `browse`): spawn via `node --import tsx packages/worker/src/index.ts` directly. They pick up source changes on the next restart — no dist rebuild needed, but a `docker build` is still needed if the Docker image is used by any sandboxed agent.
+
+Full deploy sequence when worker source changes:
 
 ```bash
 cd ~/.stockade/repo
-pnpm --filter @stockade/worker build                              # Recompile dist/
+pnpm --filter @stockade/worker build                              # Recompile dist/ (for Docker image)
+pnpm test                                                         # Full suite — abort if any fail
+git add -A && git commit -m "Deploy: <summary>"                   # Commit exactly what was tested
 docker build -f packages/worker/Dockerfile -t stockade/worker .  # Rebuild image (sandboxed agents)
 echo "restart" > ~/.stockade/restart.signal                       # Signal restart
 ```
 
-All three steps are required: dist rebuild → Docker image → orchestrator restart.
+Ordering matters: dist rebuild → **tests must pass** → **commit** → Docker image → restart.
+
+**Never write the restart signal if `pnpm test` fails.** A broken restart causes a permanent outage — the orchestrator cannot recover on its own. Kleya runs the full test suite (including Docker e2e tests that sandboxed agents cannot access) before committing or restarting.
+
+### E2E test isolation
+
+The e2e tests are fully isolated from the running platform:
+- `docker-real.test.ts` — creates its own network (`stockade-test-net`), containers (labeled `stockade-test`), and image (`stockade-e2e-test:latest`); cleans up in `afterAll`. Never touches production containers.
+- `host-worker.test.ts` — spawns worker processes on random free ports; never connects to the running orchestrator.
+- Unit tests — fully mocked.
+
+Running `pnpm test` on the host is safe at any time and does not affect the live platform.
 
 The orchestrator polls `~/.stockade/restart.signal` every 2s. When detected, it tears down all running containers and exits with code 75. The launcher loop (`bin/start-orchestrator` or the nohup wrapper) relaunches automatically. Containers reprovision on first dispatch after restart.
 

@@ -122,9 +122,12 @@ export function substituteEnvVars(value: unknown): unknown {
     let result = value.replace(/\$\{(\w+)\}/g, (_match, varName: string) => {
       return process.env[varName] ?? "";
     });
-    // Expand ~ prefix to home directory
+    // Expand ~ prefix to home directory.
+    // Use simple concatenation (not path.join) to avoid normalising forward
+    // slashes to backslashes on Windows, which breaks Docker volume specs where
+    // the container path (e.g. ":/repo") must use forward slashes.
     if (result.startsWith("~/") || result === "~") {
-      result = join(homedir(), result.slice(2));
+      result = homedir() + result.slice(1);
     }
     return result;
   }

@@ -555,4 +555,47 @@ describe("Docker E2E (real Docker)", { timeout: 120_000 }, () => {
       await removeNetwork(TEST_NETWORK);
     }
   });
+
+  // ── Test 8: Named volume chown ────────────────────────────────────
+
+  it("Named volume chown — Docker creates volumes as root; runEphemeral chowns to 1000:1000", async ({ skip }) => {
+    if (skipReason) skip(skipReason);
+
+    const { execa } = await import("execa");
+    const VOLUME_NAME = "stockade-e2e-chown-test";
+
+    try {
+      // Docker creates named volumes owned by root (0:0)
+      await execa("docker", ["volume", "create", VOLUME_NAME]);
+
+      const { stdout: before } = await execa("docker", [
+        "run", "--rm", "-v", `${VOLUME_NAME}:/chown_vol_0`,
+        "alpine", "stat", "-c", "%u:%g", "/chown_vol_0",
+      ]);
+      expect(before.trim()).toBe("0:0");
+
+      // DockerClient.runEphemeral() is what ContainerManager.chownNamedVolumes() calls
+      await docker.runEphemeral([
+        "-v", `${VOLUME_NAME}:/chown_vol_0`,
+        "alpine", "sh", "-c", "chown -R 1000:1000 /chown_vol_0",
+      ]);
+
+      // Volume should now be 1000:1000
+      const { stdout: after } = await execa("docker", [
+        "run", "--rm", "-v", `${VOLUME_NAME}:/chown_vol_0`,
+        "alpine", "stat", "-c", "%u:%g", "/chown_vol_0",
+      ]);
+      expect(after.trim()).toBe("1000:1000");
+
+      // A non-root user (UID 1000) should now be able to write to it
+      const { stdout: writeResult } = await execa("docker", [
+        "run", "--rm", "--user", "1000:1000",
+        "-v", `${VOLUME_NAME}:/chown_vol_0`,
+        "alpine", "sh", "-c", "touch /chown_vol_0/canary && echo ok",
+      ]);
+      expect(writeResult.trim()).toBe("ok");
+    } finally {
+      try { await execa("docker", ["volume", "rm", "-f", VOLUME_NAME]); } catch { /* ok */ }
+    }
+  });
 });

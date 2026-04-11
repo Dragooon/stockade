@@ -105,6 +105,11 @@ export class ContainerManager implements WorkerManager {
     // Store cleanup function
     this.cleanups.set(key, provision.cleanup);
 
+    // Chown named volumes so the non-root container user (node, UID 1000) can write to them.
+    // Docker creates named volumes owned by root; this is a no-op for root containers or
+    // bind mounts, and idempotent when volumes already have correct ownership.
+    await this.chownNamedVolumes(provision.volumes, agentConfig.container?.user);
+
     // Create container
     const containerName = `agent-${key.replace(/[^a-zA-Z0-9-]/g, "-")}`;
     let containerId: string;
@@ -484,6 +489,44 @@ export class ContainerManager implements WorkerManager {
   }
 
   // ── Private ──
+
+  /**
+   * Chown named Docker volumes to the UID/GID used by the container.
+   * Docker creates named volumes owned by root; the default container user
+   * (node, UID 1000) cannot write to them without this step.
+   * Runs once per provision via a short-lived Alpine container.
+   */
+  private async chownNamedVolumes(
+    volumes: string[],
+    containerUser: string | undefined,
+  ): Promise<void> {
+    if (containerUser === "root") return; // root can write to root-owned volumes
+
+    const namedVolumes = volumes.filter((v) => {
+      const hostPart = v.split(":")[0];
+      // Named volume: no leading /, ~, ., or Windows drive letter
+      return (
+        !hostPart.startsWith("/") &&
+        !hostPart.startsWith("~") &&
+        !hostPart.startsWith(".") &&
+        !/^[A-Za-z]:[\\/]/.test(hostPart)
+      );
+    }).map((v) => v.split(":")[0]);
+
+    if (namedVolumes.length === 0) return;
+
+    const volumeArgs = namedVolumes.flatMap((vol, i) => ["-v", `${vol}:/chown_vol_${i}`]);
+    const targets = namedVolumes.map((_, i) => `/chown_vol_${i}`).join(" ");
+    try {
+      await this.docker.runEphemeral([
+        ...volumeArgs,
+        "alpine",
+        "sh", "-c", `chown -R 1000:1000 ${targets}`,
+      ]);
+    } catch (err) {
+      console.warn(`[containers] Warning: failed to chown named volumes: ${err}`);
+    }
+  }
 
   private resolveKey(
     agentId: string,

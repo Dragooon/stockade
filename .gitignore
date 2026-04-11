@@ -43,3 +43,9 @@ config/config.yaml
 config/proxy.yaml
 config/resolve-credential.sh
 .pnpm-store/
+
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json
+
+# Scratch workspaces
+explorer-workspace/

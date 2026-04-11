@@ -208,6 +208,14 @@ export class DockerClient {
       opts.context,
     ]);
   }
+
+  /**
+   * Run a short-lived container that exits immediately (`docker run --rm ...`).
+   * Used for one-shot operations like volume chown.
+   */
+  async runEphemeral(args: string[]): Promise<void> {
+    await this.exec(["run", "--rm", ...args]);
+  }
 }
 
 /** Parse Docker label string "key=val,key2=val2" into a Record */

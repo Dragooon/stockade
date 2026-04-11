@@ -16,8 +16,11 @@ import { PortAllocator } from "../containers/ports.js";
 import { createWorkerLogger } from "../log.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// Worker script: src/workers/ → ../../../ → packages/ → worker/dist/index.js
-const WORKER_SCRIPT = resolve(__dirname, "../../../worker/dist/index.js");
+// Workspace root: packages/orchestrator/{src,dist}/workers/ → 4 levels up
+const WORKSPACE_ROOT = resolve(__dirname, "../../../..");
+// Host workers run TypeScript source via tsx to avoid pnpm symlink issues on Windows.
+// Docker containers use the compiled dist; host processes use tsx directly.
+const HOST_WORKER_SCRIPT = resolve(WORKSPACE_ROOT, "packages/worker/src/index.ts");
 const HOST_PORT_RANGE: [number, number] = [4001, 4099];
 
 interface WorkerProcess {
@@ -99,8 +102,9 @@ export class HostWorkerManager implements WorkerManager {
       AGENT_WORKSPACE: join(this.agentsDir, agentId),
     };
 
-    const child = spawn("node", [WORKER_SCRIPT], {
+    const child = spawn("node", ["--import", "tsx", HOST_WORKER_SCRIPT], {
       env,
+      cwd: WORKSPACE_ROOT,
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
     });
