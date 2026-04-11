@@ -189,7 +189,8 @@ export class WorkerSession {
           Promise.all(
             ev.files.map(async (f) => ({
               ...f,
-              content: await readFile(f.path).then((buf) => buf.toString("base64")).catch(() => undefined),
+              // Skip readFile when content is already embedded (e.g. propagated from sub-agent)
+              content: f.content ?? await readFile(f.path).then((buf) => buf.toString("base64")).catch(() => undefined),
             })),
           ).then((filesWithContent) => {
             const busEvent = mapToBusEvent({ ...ev, files: filesWithContent }, scope, queryCorrelationId);

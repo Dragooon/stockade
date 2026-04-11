@@ -109,7 +109,7 @@ export async function runAgentSession(
   const cbBase = `${orchestratorUrl}/cb/${callbackToken}`;
 
   /** Files queued by send_file tool calls during this session. */
-  const pendingFiles: Array<{ filename: string; contentType: string; path: string }> = [];
+  const pendingFiles: Array<{ filename: string; contentType: string; path: string; content?: string }> = [];
 
   // ── Build agent MCP server: gives the agent mcp__agent__start/stop/message ──
   const agentStartTool = tool(
@@ -137,7 +137,11 @@ with full memory and settings, ideal for divide-and-conquer reasoning tasks.`,
         if (res.status < 200 || res.status >= 300) {
           return { content: [{ type: "text" as const, text: `Error: ${res.text}` }] };
         }
-        const data = JSON.parse(res.text) as { runId: string; result?: string };
+        const data = JSON.parse(res.text) as { runId: string; result?: string; files?: Array<{ filename: string; contentType: string; path: string; content?: string }> };
+        // Propagate sub-agent files (already have base64 content embedded) into parent pending queue
+        if (data.files?.length) {
+          pendingFiles.push(...data.files);
+        }
         if (data.result !== undefined) {
           return { content: [{ type: "text" as const, text: data.result }] };
         }

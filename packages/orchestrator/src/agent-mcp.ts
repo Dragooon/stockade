@@ -43,7 +43,7 @@ export async function handleAgentStart(
   dispatchCtx: DispatchContext,
   workerManager: WorkerManager,
   bridge: OrchestratorBridge,
-): Promise<{ runId: string; result?: string }> {
+): Promise<{ runId: string; result?: string; files?: Array<{ filename: string; contentType: string; path: string; content?: string }> }> {
   const { task, name, background = false } = args;
 
   const isSelfSpawn = !args.agentId;
@@ -127,7 +127,7 @@ export async function handleAgentStart(
   // Blocking: dispatch and wait
   try {
     const response = await bridge.sendAndWait(subScope, task, meta);
-    return { runId, result: response.text };
+    return { runId, result: response.text, files: response.files };
   } finally {
     run.done = true;
     if (name) namedRuns.delete(name);
