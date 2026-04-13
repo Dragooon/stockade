@@ -1,5 +1,7 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
+import ssh2 from "ssh2";
+const { Client: SshClient } = ssh2;
 import type { ProxyConfig, GatewayToken } from "../shared/types.js";
 import { resolveCredential, storeCredential, invalidateCache } from "../shared/credentials.js";
 import {
@@ -123,6 +125,77 @@ export function startGateway(getConfig: () => ProxyConfig) {
     }
 
     return c.json({ ok: true, key });
+  });
+
+  // ── POST /gateway/ssh-exec — Run a command on an SSH target via the proxy ──
+  // The proxy resolves the SSH key from the credential provider and authenticates
+  // to the target on behalf of the agent — the key never leaves the proxy.
+  app.post("/gateway/ssh-exec", async (c) => {
+    const body = await c.req.json<{ host: string; command: string }>().catch(() => null);
+    if (!body?.host || !body?.command) {
+      return c.json({ error: "Missing host or command" }, 400);
+    }
+
+    const config = getConfig();
+    const route = config.ssh.routes.find((r) => r.host === body.host);
+    if (!route) {
+      return c.json({ error: `No SSH route configured for ${body.host}` }, 404);
+    }
+
+    const rawToken = c.get("rawToken") as string;
+    if (!checkCredentialScope(rawToken, route.credential)) {
+      console.log(`[gateway] ssh-exec denied: credential="${route.credential}" not in token scope`);
+      return c.json({ error: "Credential scope denied for this route" }, 403);
+    }
+
+    let privateKey: string;
+    try {
+      privateKey = await resolveCredential(config.provider, route.credential);
+    } catch (err: any) {
+      console.error(`[gateway] ssh-exec credential resolution failed: ${err.message}`);
+      return c.json({ error: `Failed to resolve credential: ${err.message}` }, 500);
+    }
+
+    type ExecResult = { stdout: string; stderr: string; exitCode: number } | { error: string };
+    const result = await new Promise<ExecResult>((resolve) => {
+      const client = new SshClient();
+      let stdout = "";
+      let stderr = "";
+
+      client.on("ready", () => {
+        client.exec(body.command, (err, stream) => {
+          if (err) {
+            client.end();
+            resolve({ error: err.message });
+            return;
+          }
+          stream.on("data", (data: Buffer) => { stdout += data.toString(); });
+          stream.stderr.on("data", (data: Buffer) => { stderr += data.toString(); });
+          stream.on("close", (exitCode: number) => {
+            client.end();
+            resolve({ stdout, stderr, exitCode: exitCode ?? 0 });
+          });
+        });
+      });
+
+      client.on("error", (err) => resolve({ error: err.message }));
+
+      client.connect({
+        host: route.host,
+        port: route.port,
+        username: route.user,
+        privateKey,
+        readyTimeout: 10000,
+      });
+    });
+
+    if ("error" in result) {
+      console.error(`[gateway] ssh-exec failed: host=${body.host} error=${result.error}`);
+      return c.json(result, 500);
+    }
+
+    console.log(`[gateway] ssh-exec: host=${body.host} exit=${result.exitCode}`);
+    return c.json(result);
   });
 
   // ── POST /gateway/token — Issue a new token (orchestrator use) ──

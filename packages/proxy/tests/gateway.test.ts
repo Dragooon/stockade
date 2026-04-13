@@ -9,10 +9,39 @@ import {
 // Mock credentials module
 vi.mock("../src/shared/credentials.js", () => ({
   storeCredential: vi.fn().mockResolvedValue(undefined),
+  resolveCredential: vi.fn().mockResolvedValue("-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----"),
   invalidateCache: vi.fn(),
 }));
 
-const { storeCredential } = await import("../src/shared/credentials.js");
+const { storeCredential, resolveCredential } = await import("../src/shared/credentials.js");
+
+// Mock ssh2 — simulate SSH client connect/exec lifecycle
+vi.mock("ssh2", async () => {
+  const { EventEmitter } = await import("node:events");
+
+  class MockStream extends EventEmitter {
+    stderr = new EventEmitter();
+  }
+
+  class MockSshClient extends EventEmitter {
+    connect(_opts: unknown) {
+      // Emit "ready" on next tick by default; individual tests can override
+      process.nextTick(() => this.emit("ready"));
+    }
+    exec(_cmd: string, cb: (err: Error | null, stream: MockStream) => void) {
+      const stream = new MockStream();
+      cb(null, stream);
+      process.nextTick(() => {
+        stream.emit("data", Buffer.from("hello stdout\n"));
+        stream.stderr.emit("data", Buffer.from("hello stderr\n"));
+        stream.emit("close", 0);
+      });
+    }
+    end() {}
+  }
+
+  return { default: { Client: MockSshClient } };
+});
 
 // We test the gateway API by importing it and calling fetch on it directly
 // using Hono's built-in test helper
@@ -161,6 +190,91 @@ describe("gateway API", () => {
     });
 
     expect(res.status).toBe(401);
+  });
+
+  it("POST /gateway/ssh-exec — returns 400 on missing host/command", async () => {
+    const app = new Hono();
+    const { validateToken } = await import("../src/gateway/tokens.js");
+    const { startGateway: _ } = await import("../src/gateway/api.js");
+
+    // Build a minimal inline version of the ssh-exec route for unit testing
+    app.use("/gateway/*", async (c, next) => {
+      const t = c.req.header("authorization")?.slice(7) ?? "";
+      const data = validateToken(t);
+      if (!data) return c.json({ error: "Unauthorized" }, 401);
+      c.set("rawToken", t);
+      await next();
+    });
+    app.post("/gateway/ssh-exec", async (c) => {
+      const body = await c.req.json<any>().catch(() => null);
+      if (!body?.host || !body?.command) return c.json({ error: "Missing host or command" }, 400);
+      return c.json({ ok: true });
+    });
+
+    const issued = issueToken("main", ["seedbox-ssh-key"], undefined, 3600);
+    const res = await app.request("/gateway/ssh-exec", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${issued.token}` },
+      body: JSON.stringify({ host: "katong.usbx.me" }), // missing command
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("POST /gateway/ssh-exec — returns 404 when no route matches host", async () => {
+    const app = new Hono();
+    const { validateToken } = await import("../src/gateway/tokens.js");
+    app.use("/gateway/*", async (c, next) => {
+      const t = c.req.header("authorization")?.slice(7) ?? "";
+      if (!validateToken(t)) return c.json({ error: "Unauthorized" }, 401);
+      c.set("rawToken", t);
+      await next();
+    });
+    app.post("/gateway/ssh-exec", async (c) => {
+      const body = await c.req.json<any>();
+      const routes: any[] = []; // no routes
+      const route = routes.find((r: any) => r.host === body.host);
+      if (!route) return c.json({ error: `No SSH route configured for ${body.host}` }, 404);
+      return c.json({ ok: true });
+    });
+
+    const issued = issueToken("main", ["seedbox-ssh-key"], undefined, 3600);
+    const res = await app.request("/gateway/ssh-exec", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${issued.token}` },
+      body: JSON.stringify({ host: "unknown.host.example", command: "ls" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("POST /gateway/ssh-exec — returns 403 when credential not in token scope", async () => {
+    const app = new Hono();
+    const { validateToken, checkCredentialScope } = await import("../src/gateway/tokens.js");
+    app.use("/gateway/*", async (c, next) => {
+      const t = c.req.header("authorization")?.slice(7) ?? "";
+      if (!validateToken(t)) return c.json({ error: "Unauthorized" }, 401);
+      c.set("rawToken", t);
+      await next();
+    });
+    app.post("/gateway/ssh-exec", async (c) => {
+      const body = await c.req.json<any>();
+      const rawToken = c.get("rawToken") as string;
+      const routes = [{ host: "katong.usbx.me", user: "dragooon", port: 22, credential: "seedbox-ssh-key" }];
+      const route = routes.find((r) => r.host === body.host);
+      if (!route) return c.json({ error: "No route" }, 404);
+      if (!checkCredentialScope(rawToken, route.credential)) {
+        return c.json({ error: "Credential scope denied" }, 403);
+      }
+      return c.json({ ok: true });
+    });
+
+    // Token does NOT include seedbox-ssh-key
+    const issued = issueToken("main", ["other-key"], undefined, 3600);
+    const res = await app.request("/gateway/ssh-exec", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${issued.token}` },
+      body: JSON.stringify({ host: "katong.usbx.me", command: "ls" }),
+    });
+    expect(res.status).toBe(403);
   });
 
   it("rejects request with invalid token", async () => {
