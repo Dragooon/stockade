@@ -184,7 +184,7 @@ export function startGateway(getConfig: () => ProxyConfig) {
         host: route.host,
         port: route.port,
         username: route.user,
-        privateKey,
+        ...(route.auth === "password" ? { password: privateKey } : { privateKey }),
         readyTimeout: 10000,
       });
     });

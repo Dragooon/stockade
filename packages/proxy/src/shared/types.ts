@@ -51,6 +51,8 @@ export const SshRouteSchema = z.object({
   credential: keyFormat,
   user: z.string(),
   port: z.number().int().positive().default(22),
+  /** Authentication method. "key" uses the credential as an SSH private key; "password" uses it as a password. Default: "key". */
+  auth: z.enum(["key", "password"]).default("key"),
 });
 
 export const SshConfigSchema = z.object({
