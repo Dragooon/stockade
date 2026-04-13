@@ -12,6 +12,7 @@ import {
   extractFilePath,
   ruleMatches,
   evaluateAgentPermissions,
+  decomposeCommand,
   FILE_PATH_FIELDS,
   type AgentPermissionRule,
   type PermissionContext,
@@ -375,6 +376,71 @@ describe("matchGlob", () => {
   });
 });
 
+// ── decomposeCommand ───────────────────────────────────────────────────────
+
+describe("decomposeCommand", () => {
+  it("simple command returns single element", () => {
+    expect(decomposeCommand("pnpm test")).toEqual(["pnpm test"]);
+  });
+
+  it("splits on &&", () => {
+    expect(decomposeCommand("cd /repo && pnpm test")).toEqual(["cd /repo", "pnpm test"]);
+  });
+
+  it("splits on ;", () => {
+    // shell-quote unquotes tokens, so 'x' → x in reconstruction
+    expect(decomposeCommand("git add -A; git commit -m 'x'")).toEqual([
+      "git add -A",
+      "git commit -m x",
+    ]);
+  });
+
+  it("splits on ||", () => {
+    expect(decomposeCommand("pnpm test || echo failed")).toEqual(["pnpm test", "echo failed"]);
+  });
+
+  it("splits multi-step compound", () => {
+    expect(decomposeCommand("cd /repo && pnpm build && pnpm test")).toEqual([
+      "cd /repo",
+      "pnpm build",
+      "pnpm test",
+    ]);
+  });
+
+  it("does not split on && inside single quotes (shell-quote unquotes)", () => {
+    // shell-quote returns 'fix && deploy' as a single string token "fix && deploy"
+    // Reconstruction joins tokens: "git commit -m fix && deploy" — no split occurs
+    const result = decomposeCommand("git commit -m 'fix && deploy'");
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatch(/^git commit/);
+  });
+
+  it("does not split on && inside double quotes", () => {
+    const result = decomposeCommand('echo "hello && world"');
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatch(/^echo/);
+  });
+
+  it("strips redirect operators from segment text (harmless for pattern matching)", () => {
+    // 2>&1 is tokenized as "2", op(>&), "1" — the op is dropped in reconstruction
+    const result = decomposeCommand("cd /repo && pnpm test 2>&1");
+    expect(result).toHaveLength(2);
+    expect(result[0]).toBe("cd /repo");
+    expect(result[1]).toMatch(/^pnpm test/); // may have "2 1" appended but starts with pnpm test
+  });
+
+  it("does not split on | (pipe stays within segment)", () => {
+    // | op token is dropped; string tokens stay together as one segment
+    const result = decomposeCommand("pnpm test | grep PASS");
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatch(/^pnpm test/);
+  });
+
+  it("trims whitespace around segments", () => {
+    expect(decomposeCommand("  cd /repo  &&  pnpm test  ")).toEqual(["cd /repo", "pnpm test"]);
+  });
+});
+
 // ── ruleMatches ────────────────────────────────────────────────────────────
 
 describe("ruleMatches", () => {
@@ -730,6 +796,83 @@ describe("evaluateAgentPermissions", () => {
       await evaluateAgentPermissions(
         rules, "Write",
         { file_path: "data/output.txt" },
+        ctx,
+      ),
+    ).toBe("allow");
+  });
+});
+
+// ── Compound Bash command decomposition ───────────────────────────────────
+
+describe("evaluateAgentPermissions — compound Bash commands", () => {
+  const home = resolve("/home/user");
+  const agentCwd = resolve("/workspace/agent");
+  const platformRoot = resolve("/home/user/.stockade");
+  const ctx: PermissionContext = { homeDir: home, agentCwd, platformRoot };
+
+  const rules = [
+    "allow:Bash(cd *)",
+    "allow:Bash(pnpm *)",
+    "allow:Bash(git *)",
+    "allow:Bash(echo *)",
+    "deny:Bash(rm *)",
+    "ask:Bash",
+  ];
+
+  it("simple allowed command passes", async () => {
+    expect(await evaluateAgentPermissions(rules, "Bash", { command: "pnpm test" }, ctx)).toBe("allow");
+  });
+
+  it("compound where all segments are allowed → allow", async () => {
+    expect(
+      await evaluateAgentPermissions(rules, "Bash", { command: "cd /repo && pnpm test" }, ctx),
+    ).toBe("allow");
+  });
+
+  it("compound where one segment is denied → deny (short-circuit)", async () => {
+    expect(
+      await evaluateAgentPermissions(rules, "Bash", { command: "cd /repo && rm -rf /" }, ctx),
+    ).toBe("deny");
+  });
+
+  it("compound where one segment needs approval → ask", async () => {
+    expect(
+      await evaluateAgentPermissions(rules, "Bash", { command: "cd /repo && pnpm test && docker ps" }, ctx),
+    ).toBe("ask"); // docker is not in the allow list
+  });
+
+  it("deny beats ask in compound — deny wins even if another segment needs ask", async () => {
+    expect(
+      await evaluateAgentPermissions(
+        rules, "Bash",
+        { command: "docker ps && rm -rf /" }, // docker→ask, rm→deny
+        ctx,
+      ),
+    ).toBe("deny");
+  });
+
+  it("multi-step all-allowed compound → allow", async () => {
+    expect(
+      await evaluateAgentPermissions(
+        rules, "Bash",
+        { command: "cd /repo && pnpm build && pnpm test && echo done" },
+        ctx,
+      ),
+    ).toBe("allow");
+  });
+
+  it("semicolon-separated compound works too", async () => {
+    expect(
+      await evaluateAgentPermissions(rules, "Bash", { command: "cd /repo; pnpm test" }, ctx),
+    ).toBe("allow");
+  });
+
+  it("redirect in compound segment still resolves correctly", async () => {
+    // 2>&1 gets stripped in reconstruction; pnpm test matches pnpm *
+    expect(
+      await evaluateAgentPermissions(
+        rules, "Bash",
+        { command: "cd /repo && pnpm test 2>&1" },
         ctx,
       ),
     ).toBe("allow");

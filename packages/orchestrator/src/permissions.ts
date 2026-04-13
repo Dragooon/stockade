@@ -34,6 +34,7 @@
 
 import { resolve, normalize, dirname, basename, isAbsolute } from "node:path";
 import { realpath } from "node:fs/promises";
+import { parse as shellParse } from "shell-quote";
 
 // ── Core Platform Tools (always allowed, bypass all permission checks) ────
 
@@ -278,6 +279,58 @@ export async function resolveCanonicalPath(nativePath: string): Promise<string> 
   return toPosixPath(canonical);
 }
 
+// ── Bash Command Decomposition ────────────────────────────────────────────
+
+/** Sequential shell operators that mark a split point between commands. */
+const SEQUENTIAL_OPS = new Set(["&&", ";", "||"]);
+
+/**
+ * Decompose a shell command into its sequential components using shell-quote.
+ *
+ * Splits on `&&`, `||`, and `;` operators. Pipes (`|`) stay within a segment
+ * because the pipeline is a single logical unit. Each segment is reconstructed
+ * by joining its string tokens (operator tokens like `>&` are omitted, which is
+ * fine — our glob patterns only care about the command name and flags, not I/O
+ * redirections).
+ *
+ * Returns a single-element array for simple (non-compound) commands.
+ *
+ * @example decomposeCommand("cd /repo && pnpm test 2>&1") → ["cd /repo", "pnpm test 2 1"]
+ * @example decomposeCommand("git add -A && git commit -m 'fix'") → ["git add -A", "git commit -m fix"]
+ * @example decomposeCommand("pnpm test") → ["pnpm test"]
+ */
+export function decomposeCommand(command: string): string[] {
+  let tokens: ReturnType<typeof shellParse>;
+  try {
+    tokens = shellParse(command);
+  } catch {
+    // Unparseable — treat as single command
+    return [command];
+  }
+
+  const segments: string[] = [];
+  let currentWords: string[] = [];
+
+  for (const token of tokens) {
+    if (typeof token === "object" && "op" in token && SEQUENTIAL_OPS.has(token.op)) {
+      // Sequential operator — flush current segment
+      const seg = currentWords.join(" ").trim();
+      if (seg) segments.push(seg);
+      currentWords = [];
+    } else if (typeof token === "string") {
+      currentWords.push(token);
+    }
+    // Non-sequential operator tokens (|, >, >>, <, >&, etc.) are intentionally
+    // dropped from the reconstructed string. Pattern matching only needs the
+    // command name and arguments, not I/O redirections.
+  }
+
+  const last = currentWords.join(" ").trim();
+  if (last) segments.push(last);
+
+  return segments.length > 0 ? segments : [command];
+}
+
 // ── Glob Matching ──────────────────────────────────────────────────────────
 
 /**
@@ -401,6 +454,10 @@ export async function ruleMatches(
  *
  * Walks rules top-to-bottom; the first matching rule determines the outcome.
  *
+ * For Bash commands, compound commands joined with `&&` or `;` are decomposed
+ * into individual segments. Each segment is evaluated independently against the
+ * full rule list. The most restrictive result wins: deny > ask > allow.
+ *
  * - `undefined` rules → "allow" (no agent-level restrictions, backwards-compatible)
  * - Empty array → "ask" (no rules match = HITL approval required)
  * - Non-empty array → first match wins, implicit "ask" if none match
@@ -416,13 +473,40 @@ export async function evaluateAgentPermissions(
 
   const parsed = rules.map(parseRule);
 
+  // For Bash: decompose compound commands and evaluate each segment independently
+  if (tool === "Bash") {
+    const command = String(input.command ?? "");
+    const segments = decomposeCommand(command);
+
+    if (segments.length > 1) {
+      let result: "allow" | "deny" | "ask" = "allow";
+      for (const seg of segments) {
+        const segResult = await _evaluateRules(parsed, tool, { ...input, command: seg }, ctx);
+        if (segResult === "deny") return "deny"; // Short-circuit — deny wins
+        if (segResult === "ask") result = "ask"; // Escalate; keep checking for deny
+      }
+      return result;
+    }
+  }
+
+  return _evaluateRules(parsed, tool, input, ctx);
+}
+
+/**
+ * Walk pre-parsed rules against a single tool invocation.
+ * Internal helper — does not decompose compound Bash commands.
+ */
+async function _evaluateRules(
+  parsed: AgentPermissionRule[],
+  tool: string,
+  input: Record<string, unknown>,
+  ctx: PermissionContext,
+): Promise<"allow" | "deny" | "ask"> {
   for (const rule of parsed) {
     if (await ruleMatches(rule, tool, input, ctx)) {
       return rule.action;
     }
   }
-
-  // No rule matched → ask (HITL approval required)
   return "ask";
 }
 
