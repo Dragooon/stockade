@@ -72,6 +72,7 @@ export function startCallbackServer(
       ctx.agentCwd,
       ctx.platformRoot,
       ctx.askApproval,
+      ctx.agentId,
     );
 
     const result = await hook({ tool_name, tool_input });

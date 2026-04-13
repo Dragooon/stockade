@@ -226,6 +226,7 @@ export function buildPreToolUseHook(
   agentCwd?: string,
   platformRoot?: string,
   askApproval?: AskApprovalFn,
+  agentId?: string,
 ): (input: { tool_name: string; tool_input: unknown }) => Promise<{
   hookSpecificOutput: PreToolUseHookOutput;
 }> {
@@ -305,7 +306,7 @@ export function buildPreToolUseHook(
       }
       if (agentResult === "ask") {
         if (askApproval) {
-          const approved = await askApproval(tool, input);
+          const approved = await askApproval(tool, input, agentId);
           if (!approved) {
 
             return {

@@ -166,6 +166,8 @@ export interface DispatchResult {
 export type AskApprovalFn = (
   tool: string,
   input: Record<string, unknown>,
+  /** Override the agentId used in approval notifications (for sub-agents). */
+  agentId?: string,
 ) => Promise<boolean>;
 
 /**

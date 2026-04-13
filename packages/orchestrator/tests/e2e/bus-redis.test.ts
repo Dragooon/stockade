@@ -112,11 +112,15 @@ describe("Redis Event Bus E2E", { timeout: 15_000 }, () => {
       timestamp: new Date().toISOString(),
     }));
 
-    // Set up listener on the orchestrator side
+    // Set up listener on the orchestrator side — must await so Redis subscription
+    // is active before we publish (avoids a race where the message arrives before
+    // the subscription is confirmed).
+    let resolveResult!: (event: BusWorkerEvent) => void;
     const resultPromise = new Promise<BusWorkerEvent>((resolve) => {
-      bus.subscribeEvents(scope, (event) => {
-        resolve(event);
-      });
+      resolveResult = resolve;
+    });
+    await bus.subscribeEvents(scope, (event) => {
+      resolveResult(event);
     });
 
     bus.startListening();

@@ -111,7 +111,8 @@ export function buildGatedAskApproval(
 ): AskApprovalFn {
   const threshold = config.auto_approve_risk ?? "low";
 
-  return async (tool: string, input: Record<string, unknown>): Promise<boolean> => {
+  return async (tool: string, input: Record<string, unknown>, callerAgentId?: string): Promise<boolean> => {
+    const effectiveAgentId = callerAgentId ?? agentId;
     let review: GatekeeperReview | undefined;
 
     const reviewStart = Date.now();
@@ -119,7 +120,7 @@ export function buildGatedAskApproval(
       review = await reviewToolInvocation(tool, input, agentConfig, config.budget_tokens);
       const reviewMs = Date.now() - reviewStart;
       console.log(
-        `[gatekeeper] ${review.risk} "${tool}" — ${review.summary} (${(reviewMs / 1000).toFixed(1)}s)`,
+        `[gatekeeper] ${review.risk} "${tool}" (${effectiveAgentId}) — ${review.summary} (${(reviewMs / 1000).toFixed(1)}s)`,
       );
     } catch (err) {
       const reviewMs = Date.now() - reviewStart;
@@ -128,17 +129,12 @@ export function buildGatedAskApproval(
     }
 
     if (review && shouldAutoApprove(review, threshold)) {
-      // Auto-approved — notify channel (informational, no buttons)
-      try {
-        await channel.notifyAutoApproved(tool, input, review, agentId);
-      } catch {
-        // Best-effort notification
-      }
+      // Auto-approved silently — no channel notification to avoid embed noise
       return true;
     }
 
     // Needs user approval — pass review to help them decide
-    return channel.askUser(tool, input, review, agentId);
+    return channel.askUser(tool, input, review, effectiveAgentId);
   };
 }
 
