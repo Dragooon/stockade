@@ -316,10 +316,10 @@ async function handleMessage(msg: ChannelMessage, approvalChannel?: ApprovalChan
   if (approvalChannel) {
     const gk = config.platform.gatekeeper;
     if (gk?.enabled && gatekeeperAgentConfig) {
-      askApproval = buildGatedAskApproval(approvalChannel, gk, gatekeeperAgentConfig);
+      askApproval = buildGatedAskApproval(approvalChannel, gk, gatekeeperAgentConfig, agentId);
     } else {
       // No gatekeeper — channel's askUser is the AskApprovalFn directly
-      askApproval = (tool, input) => approvalChannel.askUser(tool, input);
+      askApproval = (tool, input) => approvalChannel.askUser(tool, input, undefined, agentId);
     }
   }
 

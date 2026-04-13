@@ -189,6 +189,7 @@ export interface ApprovalChannel {
     tool: string,
     input: Record<string, unknown>,
     review?: GatekeeperReview,
+    agentId?: string,
   ) => Promise<boolean>;
 
   /**
@@ -202,6 +203,7 @@ export interface ApprovalChannel {
     tool: string,
     input: Record<string, unknown>,
     review: GatekeeperReview,
+    agentId?: string,
   ) => Promise<void>;
 }
 

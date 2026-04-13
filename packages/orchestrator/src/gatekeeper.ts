@@ -107,6 +107,7 @@ export function buildGatedAskApproval(
   channel: ApprovalChannel,
   config: GatekeeperConfig,
   agentConfig: AgentConfig,
+  agentId?: string,
 ): AskApprovalFn {
   const threshold = config.auto_approve_risk ?? "low";
 
@@ -129,7 +130,7 @@ export function buildGatedAskApproval(
     if (review && shouldAutoApprove(review, threshold)) {
       // Auto-approved — notify channel (informational, no buttons)
       try {
-        await channel.notifyAutoApproved(tool, input, review);
+        await channel.notifyAutoApproved(tool, input, review, agentId);
       } catch {
         // Best-effort notification
       }
@@ -137,7 +138,7 @@ export function buildGatedAskApproval(
     }
 
     // Needs user approval — pass review to help them decide
-    return channel.askUser(tool, input, review);
+    return channel.askUser(tool, input, review, agentId);
   };
 }
 

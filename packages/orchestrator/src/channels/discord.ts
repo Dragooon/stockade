@@ -580,14 +580,15 @@ export class DiscordAdapter {
    * Only the original message sender can approve/deny.
    * Times out after ASK_TIMEOUT_MS → deny.
    */
-  private createApprovalChannel(channel: TextBasedChannel, senderId: string): ApprovalChannel {
+  private createApprovalChannel(channel: TextBasedChannel, senderId: string, agentId?: string): ApprovalChannel {
     return {
-      askUser: async (tool, input, review?) => {
+      askUser: async (tool, input, review?, aid?) => {
+        const agent = aid ?? agentId;
         try {
           const ch = channel as any;
           const embed = review
-            ? buildGatedApprovalEmbed(tool, input, review, ASK_TIMEOUT_MS)
-            : buildApprovalEmbed(tool, input, ASK_TIMEOUT_MS);
+            ? buildGatedApprovalEmbed(tool, input, review, ASK_TIMEOUT_MS, agent)
+            : buildApprovalEmbed(tool, input, ASK_TIMEOUT_MS, agent);
           const row = buildApprovalButtons();
 
           const approvalMsg = await ch.send({
@@ -605,13 +606,12 @@ export class DiscordAdapter {
           const approved = interaction.customId === "approve";
 
           const resultEmbed = review
-            ? buildGatedApprovalResultEmbed(tool, input, review, approved)
-            : buildApprovalResultEmbed(tool, input, approved);
-          const disabledRow = buildApprovalButtons(true);
+            ? buildGatedApprovalResultEmbed(tool, input, review, approved, agent)
+            : buildApprovalResultEmbed(tool, input, approved, agent);
           await interaction.update({
             content: null,
             embeds: [resultEmbed],
-            components: [disabledRow],
+            components: [],
           });
 
           return approved;
@@ -626,13 +626,12 @@ export class DiscordAdapter {
             );
             if (approvalMsg) {
               const resultEmbed = review
-                ? buildGatedApprovalResultEmbed(tool, input, review, false)
-                : buildApprovalResultEmbed(tool, input, false);
-              const disabledRow = buildApprovalButtons(true);
+                ? buildGatedApprovalResultEmbed(tool, input, review, false, agent)
+                : buildApprovalResultEmbed(tool, input, false, agent);
               await approvalMsg.edit({
                 content: null,
                 embeds: [resultEmbed],
-                components: [disabledRow],
+                components: [],
               });
             }
           } catch {
@@ -642,10 +641,11 @@ export class DiscordAdapter {
         }
       },
 
-      notifyAutoApproved: async (tool, input, review) => {
+      notifyAutoApproved: async (tool, input, review, aid?) => {
+        const agent = aid ?? agentId;
         try {
           const ch = channel as any;
-          const embed = buildAutoApprovedEmbed(tool, input, review);
+          const embed = buildAutoApprovedEmbed(tool, input, review, agent);
           await ch.send({ embeds: [embed] });
         } catch {
           // Best effort notification
@@ -741,125 +741,136 @@ function formatTimeout(ms: number): string {
   return `${ms / 1000}s`;
 }
 
+/** One-line summary of a tool invocation — used in compact result/notification embeds. */
+function formatToolOneliner(tool: string, input: Record<string, unknown>): string {
+  const MAX = 120;
+  let val: string;
+  if (tool === "Bash" && input.command) {
+    val = String(input.command);
+  } else if ((tool === "Write" || tool === "Read" || tool === "Edit") && (input.file_path ?? input.path)) {
+    val = String(input.file_path ?? input.path);
+  } else {
+    val = "";
+    for (const key of ["url", "query", "command", "path", "pattern"]) {
+      if (input[key]) { val = String(input[key]); break; }
+    }
+  }
+  if (!val) return `\`${tool}\``;
+  return `\`${val.length > MAX ? val.slice(0, MAX) + "\u2026" : val}\``;
+}
+
+/** Build a title prefix from an optional agent ID. */
+function agentPrefix(agentId?: string): string {
+  return agentId ? `${agentId} \u00b7 ` : "";
+}
+
 function buildApprovalEmbed(
   tool: string,
   input: Record<string, unknown>,
   timeoutMs: number,
+  agentId?: string,
 ): EmbedBuilder {
-  const desc = formatToolDescription(tool, input);
-
   return new EmbedBuilder()
-    .setTitle(`\`${tool}\` \u2014 Approval Required`)
-    .setDescription(desc)
-
+    .setTitle(`${agentPrefix(agentId)}\`${tool}\` \u2014 Approval Required`)
+    .setDescription(formatToolDescription(tool, input))
     .setColor(COLOR_PENDING)
     .setFooter({ text: `Expires in ${formatTimeout(timeoutMs)}` })
     .setTimestamp();
 }
 
-function buildApprovalButtons(disabled = false): ActionRowBuilder<ButtonBuilder> {
+function buildApprovalButtons(): ActionRowBuilder<ButtonBuilder> {
   const allowBtn = new ButtonBuilder()
     .setCustomId("approve")
     .setLabel("Allow")
-    .setStyle(ButtonStyle.Success)
-    .setDisabled(disabled);
+    .setStyle(ButtonStyle.Success);
 
   const denyBtn = new ButtonBuilder()
     .setCustomId("deny")
     .setLabel("Deny")
-    .setStyle(ButtonStyle.Danger)
-    .setDisabled(disabled);
+    .setStyle(ButtonStyle.Danger);
 
   return new ActionRowBuilder<ButtonBuilder>().addComponents(allowBtn, denyBtn);
 }
 
+/** Compact result embed — one-liner description, no buttons needed. */
 function buildApprovalResultEmbed(
   tool: string,
   input: Record<string, unknown>,
   approved: boolean,
+  agentId?: string,
 ): EmbedBuilder {
-  const desc = formatToolDescription(tool, input);
-
+  const icon = approved ? "\u2705" : "\u274c";
+  const decision = approved ? "Approved" : "Denied";
   return new EmbedBuilder()
-    .setTitle(approved ? `\`${tool}\` \u2014 Approved` : `\`${tool}\` \u2014 Denied`)
-    .setDescription(desc)
-
+    .setTitle(`${icon} ${agentPrefix(agentId)}\`${tool}\` \u2014 ${decision}`)
+    .setDescription(formatToolOneliner(tool, input))
     .setColor(approved ? COLOR_APPROVED : COLOR_DENIED)
     .setTimestamp();
 }
 
 // ── Gatekeeper-aware embed builders ──────────────────────────────
 
-/** Format a risk review as a compact embed field value. */
+/** Format a risk review as a compact one-liner (for footer or field value). */
 function formatRiskReview(review: GatekeeperReview): string {
-  return `${RISK_EMOJI[review.risk]} **${review.risk.toUpperCase()}** — ${review.summary}`;
+  return `${RISK_EMOJI[review.risk]} ${review.risk.toUpperCase()} \u2014 ${review.summary}`;
 }
 
 /**
  * Informational embed for auto-approved tool invocations (no buttons).
- * Sent to the channel so users can see what was approved without their input.
+ * Compact: one-liner description + gatekeeper review in footer.
  */
 function buildAutoApprovedEmbed(
   tool: string,
   input: Record<string, unknown>,
   review: GatekeeperReview,
+  agentId?: string,
 ): EmbedBuilder {
-  const desc = formatToolDescription(tool, input);
-
   return new EmbedBuilder()
-    .setTitle(`\`${tool}\` \u2014 Auto-Approved`)
-    .setDescription(desc)
-    .addFields({
-      name: "Gatekeeper Review",
-      value: formatRiskReview(review),
-    })
+    .setTitle(`${agentPrefix(agentId)}\`${tool}\` \u2014 Auto-Approved`)
+    .setDescription(formatToolOneliner(tool, input))
     .setColor(COLOR_AUTO_APPROVED)
+    .setFooter({ text: formatRiskReview(review) })
     .setTimestamp();
 }
 
 /**
  * Approval embed enhanced with gatekeeper risk review.
- * Shows the risk assessment to help the user make an informed decision.
+ * Shows full tool details so the user can make an informed decision.
  */
 function buildGatedApprovalEmbed(
   tool: string,
   input: Record<string, unknown>,
   review: GatekeeperReview,
   timeoutMs: number,
+  agentId?: string,
 ): EmbedBuilder {
-  const desc = formatToolDescription(tool, input);
-
   return new EmbedBuilder()
-    .setTitle(`\`${tool}\` \u2014 Approval Required`)
-    .setDescription(desc)
-    .addFields({
-      name: "Gatekeeper Review",
-      value: formatRiskReview(review),
-    })
+    .setTitle(`${agentPrefix(agentId)}\`${tool}\` \u2014 Approval Required`)
+    .setDescription(formatToolDescription(tool, input))
+    .addFields({ name: "Gatekeeper Review", value: formatRiskReview(review) })
     .setColor(RISK_COLORS[review.risk])
     .setFooter({ text: `Expires in ${formatTimeout(timeoutMs)}` })
     .setTimestamp();
 }
 
 /**
- * Result embed for gatekeeper-reviewed approval (after user clicks Allow/Deny).
+ * Compact result embed for gatekeeper-reviewed approval.
+ * One-liner description + gatekeeper review in footer.
  */
 function buildGatedApprovalResultEmbed(
   tool: string,
   input: Record<string, unknown>,
   review: GatekeeperReview,
   approved: boolean,
+  agentId?: string,
 ): EmbedBuilder {
-  const desc = formatToolDescription(tool, input);
-
+  const icon = approved ? "\u2705" : "\u274c";
+  const decision = approved ? "Approved" : "Denied";
   return new EmbedBuilder()
-    .setTitle(approved ? `\`${tool}\` \u2014 Approved` : `\`${tool}\` \u2014 Denied`)
-    .setDescription(desc)
-    .addFields({
-      name: "Gatekeeper Review",
-      value: formatRiskReview(review),
-    })
+    .setTitle(`${icon} ${agentPrefix(agentId)}\`${tool}\` \u2014 ${decision}`)
+    .setDescription(formatToolOneliner(tool, input))
     .setColor(approved ? COLOR_APPROVED : COLOR_DENIED)
+    .setFooter({ text: formatRiskReview(review) })
     .setTimestamp();
 }
 
