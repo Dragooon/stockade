@@ -205,7 +205,16 @@ Tools:
 Schedule types:
 - \`interval\`: repeat every N milliseconds (e.g. \`120000\` = every 2 min)
 - \`cron\`: cron expression (e.g. \`0 9 * * *\` = daily at 9 AM)
-- \`once\`: ISO datetime for a one-shot run (e.g. \`2026-04-06T09:00:00Z\`)`);
+- \`once\`: ISO datetime for a one-shot run (e.g. \`2026-04-06T09:00:00Z\`)
+
+**Writing effective task prompts:**
+The prompt runs as an agent instruction when the task fires — it is NOT the message sent to the user. Write it as an explicit command, not a reminder label.
+
+For user-facing reminders: instruct the agent to send a message and tag the user by their platform ID.
+- Bad: \`Reminder: Time to do your Coles order!\` — this is a label; the agent may produce no output
+- Good: \`Send a message to this channel: "<@DISCORD_USER_ID> Time to do your Coles order! Don't forget vinegar and drain cleaner."\`
+
+Always include the requesting user's Discord mention (\`<@USER_ID>\`) in reminder messages so they're notified.`);
   }
 
   return sections.join("\n\n");
