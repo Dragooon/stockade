@@ -150,7 +150,7 @@ export function startGateway(getConfig: () => ProxyConfig) {
 
     let privateKey: string;
     try {
-      privateKey = await resolveCredential(config.provider, route.credential);
+      privateKey = (await resolveCredential(config.provider, route.credential)).trim();
     } catch (err: any) {
       console.error(`[gateway] ssh-exec credential resolution failed: ${err.message}`);
       return c.json({ error: `Failed to resolve credential: ${err.message}` }, 500);
