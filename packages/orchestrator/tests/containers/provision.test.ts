@@ -102,16 +102,16 @@ describe("provisionContainer", () => {
     expect(result.env.APW_TOKEN).toBe("apw-main-abc123");
     expect(result.env.NODE_EXTRA_CA_CERTS).toBe("/certs/proxy-ca.crt");
 
-    // Host credentials are mounted read-only
+    // Host credentials are mounted read-write (so SDK can write back rotated refresh tokens)
     const credsVolume = result.volumes.find((v: string) => v.includes(".credentials.json"));
     expect(credsVolume).toBeDefined();
-    expect(credsVolume).toContain(":ro");
+    expect(credsVolume).not.toContain(":ro");
 
     // Gateway token is returned
     expect(result.gatewayToken).toBe("apw-main-abc123");
   });
 
-  it("mounts host credentials read-only instead of a stub", async () => {
+  it("mounts host credentials read-write instead of a stub", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -129,11 +129,12 @@ describe("provisionContainer", () => {
       3001
     );
 
-    // Should mount the host's real ~/.claude/.credentials.json read-only
+    // Should mount the host's real ~/.claude/.credentials.json read-write
     const credsVolume = result.volumes.find((v: string) => v.includes(".credentials.json"));
     expect(credsVolume).toBeDefined();
     expect(credsVolume).toContain(".claude/.credentials.json");
-    expect(credsVolume).toContain("/home/node/.claude/.credentials.json:ro");
+    expect(credsVolume).toContain("/home/node/.claude/.credentials.json");
+    expect(credsVolume).not.toContain(":ro");
   });
 
   it("mounts agent workspace when agentsDir is provided", async () => {

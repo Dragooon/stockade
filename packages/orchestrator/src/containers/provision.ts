@@ -119,17 +119,18 @@ export async function provisionContainer(
   // 3. Build volume mounts
   const volumes: string[] = [];
 
-  // Mount the host's real OAuth credentials so the SDK can authenticate
-  // and refresh tokens itself (via platform.claude.com). Read-only mount
-  // prevents the container from tampering; refresh write-back fails
-  // silently but the SDK continues with the in-memory refreshed token.
+  // Mount the host's real OAuth credentials read-write so the SDK can
+  // write back refreshed tokens (including rotated refresh tokens).
+  // Without write access, refresh token rotation leaves only the old
+  // refresh token on disk — after a container restart the SDK reads
+  // the stale/revoked token and gets a 401.
   const hostCredsPath = resolve(homedir(), ".claude", ".credentials.json");
   if (existsSync(hostCredsPath)) {
     const containerUser = agentConfig.container?.user;
     const credsMountTarget = containerUser === "root"
       ? "/root/.claude/.credentials.json"
       : "/home/node/.claude/.credentials.json";
-    volumes.push(`${hostCredsPath}:${credsMountTarget}:ro`);
+    volumes.push(`${hostCredsPath}:${credsMountTarget}`);
   }
 
   if (proxyAvailable) {
