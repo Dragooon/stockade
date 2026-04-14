@@ -125,12 +125,26 @@ export async function provisionContainer(
   // refresh token on disk — after a container restart the SDK reads
   // the stale/revoked token and gets a 401.
   const hostCredsPath = resolve(homedir(), ".claude", ".credentials.json");
+  const containerUser = agentConfig.container?.user;
   if (existsSync(hostCredsPath)) {
-    const containerUser = agentConfig.container?.user;
     const credsMountTarget = containerUser === "root"
       ? "/root/.claude/.credentials.json"
       : "/home/node/.claude/.credentials.json";
     volumes.push(`${hostCredsPath}:${credsMountTarget}`);
+  }
+
+  // SDK session history — mount a persistent directory so JSONL session transcripts
+  // survive container restarts. The SDK stores history at
+  // ~/.claude/projects/<sanitized-cwd>/<sessionId>.jsonl inside the container.
+  // Without this mount, resume: sessionId hits "No conversation found" on every
+  // container restart and silently starts a fresh session with no prior context.
+  if (agentsDir) {
+    const projectsHostDir = resolve(agentsDir, agentId, ".claude", "projects");
+    mkdirSync(projectsHostDir, { recursive: true });
+    const projectsMountTarget = containerUser === "root"
+      ? "/root/.claude/projects"
+      : "/home/node/.claude/projects";
+    volumes.push(`${projectsHostDir}:${projectsMountTarget}`);
   }
 
   if (proxyAvailable) {

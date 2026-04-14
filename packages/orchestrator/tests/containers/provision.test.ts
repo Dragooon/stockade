@@ -170,6 +170,62 @@ describe("provisionContainer", () => {
     expect(existsSync(resolve(agentsDir, "main"))).toBe(true);
   });
 
+  it("mounts session history projects dir when agentsDir is provided", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        token: "apw-main-proj",
+        expiresAt: Date.now() + 86400000,
+      }),
+    });
+
+    const agentsDir = resolve(tmpBase, "agents");
+    const result = await provisionContainer(
+      "main",
+      agentConfig,
+      containersConfig,
+      "http://localhost:10256",
+      tmpBase,
+      3001,
+      agentsDir
+    );
+
+    const projectsVolume = result.volumes.find((v: string) => v.includes(".claude/projects"));
+    expect(projectsVolume).toBeDefined();
+    expect(projectsVolume).toContain(resolve(agentsDir, "main", ".claude", "projects"));
+    expect(projectsVolume).toContain("/home/node/.claude/projects");
+    expect(projectsVolume).not.toContain(":ro");
+
+    // Directory was created on host
+    expect(existsSync(resolve(agentsDir, "main", ".claude", "projects"))).toBe(true);
+  });
+
+  it("mounts session history to /root/.claude/projects for root containers", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        token: "apw-root-proj",
+        expiresAt: Date.now() + 86400000,
+      }),
+    });
+
+    const rootAgentConfig: AgentConfig = { ...agentConfig, container: { isolation: "shared" as const, user: "root" } };
+    const agentsDir = resolve(tmpBase, "agents-root");
+    const result = await provisionContainer(
+      "main",
+      rootAgentConfig,
+      containersConfig,
+      "http://localhost:10256",
+      tmpBase,
+      3001,
+      agentsDir
+    );
+
+    const projectsVolume = result.volumes.find((v: string) => v.includes(".claude/projects"));
+    expect(projectsVolume).toBeDefined();
+    expect(projectsVolume).toContain("/root/.claude/projects");
+  });
+
   it("omits workspace mount when agentsDir is not provided", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
