@@ -127,8 +127,8 @@ async function handleTunnel(
   }
 
   try {
-    // Resolve the target's SSH private key from the credential provider
-    const privateKey = await resolveCredential(
+    // Resolve the target's credential (SSH private key or password) from the provider
+    const credential = await resolveCredential(
       config.provider,
       route.credential
     );
@@ -161,11 +161,14 @@ async function handleTunnel(
       channel.close();
     });
 
+    const authMethod = route.auth ?? "key";
     targetClient.connect({
       host: targetHost,
       port: targetPort,
       username: route.user,
-      privateKey,
+      ...(authMethod === "password"
+        ? { password: credential }
+        : { privateKey: credential }),
     });
 
     channel.on("close", () => {
