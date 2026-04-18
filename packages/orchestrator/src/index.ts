@@ -459,3 +459,12 @@ async function shutdown() {
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[orchestrator] Unhandled promise rejection:", reason);
+  console.error("[orchestrator] Promise:", promise);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[orchestrator] Uncaught exception:", err);
+});
