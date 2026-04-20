@@ -35,6 +35,7 @@ vi.mock("discord.js", () => {
       MessageContent: 4,
       GuildMessageReactions: 8,
     },
+    MessageFlags: { Ephemeral: 64 },
     REST: vi.fn().mockImplementation(() => ({
       setToken: vi.fn().mockReturnThis(),
     })),
@@ -344,7 +345,7 @@ describe("Discord slash commands", () => {
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining("Session reset"),
-        ephemeral: true,
+        flags: expect.any(Number),
       })
     );
   });
@@ -360,7 +361,7 @@ describe("Discord slash commands", () => {
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining("main"),
-        ephemeral: true,
+        flags: expect.any(Number),
       })
     );
   });
@@ -399,7 +400,7 @@ describe("Discord slash commands", () => {
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: "No agent is bound to this channel.",
-        ephemeral: true,
+        flags: expect.any(Number),
       })
     );
   });

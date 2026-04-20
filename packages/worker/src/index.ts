@@ -21,7 +21,19 @@ if (process.env.HTTP_PROXY || process.env.HTTPS_PROXY) {
 import { serve } from "@hono/node-server";
 import { app, setRedisBridge } from "./server.js";
 
-const port = parseInt(process.env.PORT ?? "3001", 10);
+const portStr = process.env.PORT;
+if (!portStr) {
+  // PORT must be set by the launcher (HostWorkerManager sets 4001-4099 for host workers;
+  // ContainerManager sets 3001+ for Docker workers). Defaulting to a hardcoded port causes
+  // EADDRINUSE conflicts with other services (e.g. Docker port bindings).
+  console.error("[worker] FATAL: PORT environment variable is not set. Workers must be started via HostWorkerManager or ContainerManager.");
+  process.exit(1);
+}
+const port = parseInt(portStr, 10);
+if (isNaN(port) || port < 1 || port > 65535) {
+  console.error(`[worker] FATAL: Invalid PORT value: "${portStr}"`);
+  process.exit(1);
+}
 const workerId = process.env.WORKER_ID ?? `worker-${process.pid}`;
 const agentId = process.env.AGENT_ID ?? workerId;
 

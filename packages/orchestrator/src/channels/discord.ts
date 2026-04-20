@@ -7,6 +7,7 @@ import {
   ComponentType,
   EmbedBuilder,
   GatewayIntentBits,
+  MessageFlags,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -306,7 +307,7 @@ export class DiscordAdapter {
     if (!serverId) {
       await interaction.reply({
         content: "Slash commands only work in a server.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -325,7 +326,7 @@ export class DiscordAdapter {
     if (!binding) {
       await interaction.reply({
         content: "No agent is bound to this channel.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -343,7 +344,7 @@ export class DiscordAdapter {
       }
       await interaction.reply({
         content: "Session reset. Next message starts a fresh conversation.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -357,7 +358,7 @@ export class DiscordAdapter {
           `**Scope:** \`${scope}\``,
           `**Channel:** ${isThread ? "thread" : "channel"} \`${channelId}\``,
         ].join("\n"),
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -406,7 +407,7 @@ export class DiscordAdapter {
 
     await interaction.reply({
       content: `Unknown command: /${commandName}`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
