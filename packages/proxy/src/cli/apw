@@ -31,8 +31,8 @@ case "$COMMAND" in
       -H "Authorization: Bearer $APW_TOKEN" \
       "${APW_GATEWAY}/gateway/ref/${KEY}")
 
-    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-    BODY_RESP=$(echo "$RESPONSE" | sed '$d')
+    HTTP_CODE=$(printf '%s\n' "$RESPONSE" | tail -n1)
+    BODY_RESP=$(printf '%s\n' "$RESPONSE" | sed '$d')
 
     if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
       # Extract the ref token from JSON and print it raw (no newline)
@@ -54,8 +54,8 @@ case "$COMMAND" in
       -H "Authorization: Bearer $APW_TOKEN" \
       "${APW_GATEWAY}/gateway/reveal/${KEY}")
 
-    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-    BODY_RESP=$(echo "$RESPONSE" | sed '$d')
+    HTTP_CODE=$(printf '%s\n' "$RESPONSE" | tail -n1)
+    BODY_RESP=$(printf '%s\n' "$RESPONSE" | sed '$d')
 
     if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
       # Extract the value from JSON and print it raw (no newline)
@@ -116,8 +116,8 @@ case "$COMMAND" in
       -d "$BODY" \
       "${APW_GATEWAY}/gateway/store/${KEY}")
 
-    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-    BODY_RESP=$(echo "$RESPONSE" | sed '$d')
+    HTTP_CODE=$(printf '%s\n' "$RESPONSE" | tail -n1)
+    BODY_RESP=$(printf '%s\n' "$RESPONSE" | sed '$d')
 
     if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
       echo "Stored: $KEY"
@@ -152,11 +152,11 @@ print(json.dumps({'host': sys.argv[1], 'command': sys.argv[2]}))
       -d "$BODY" \
       "${APW_GATEWAY}/gateway/ssh-exec")
 
-    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-    BODY_RESP=$(echo "$RESPONSE" | sed '$d')
+    HTTP_CODE=$(printf '%s\n' "$RESPONSE" | tail -n1)
+    BODY_RESP=$(printf '%s\n' "$RESPONSE" | sed '$d')
 
     if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-      python3 -c "
+      printf '%s' "$BODY_RESP" | python3 -c "
 import json, sys
 d = json.loads(sys.stdin.read())
 if d.get('error'):
@@ -166,9 +166,7 @@ sys.stdout.write(d.get('stdout', ''))
 if d.get('stderr'):
     sys.stderr.write(d['stderr'])
 sys.exit(d.get('exitCode', 0))
-" <<EOF
-$BODY_RESP
-EOF
+"
     else
       echo "Error ($HTTP_CODE): $BODY_RESP" >&2
       exit 1
