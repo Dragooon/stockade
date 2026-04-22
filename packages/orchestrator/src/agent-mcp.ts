@@ -97,6 +97,7 @@ export async function handleAgentStart(
         run.done = true;
         if (name) namedRuns.delete(name);
         runs.delete(runId);
+        bridge.closeSession(subScope, "subagent_done").catch(() => {});
 
         const text = `[Background agent ${label} complete]:\n${result}`;
         // Re-dispatch via bridge to inject completion into parent scope
@@ -110,6 +111,7 @@ export async function handleAgentStart(
         run.done = true;
         if (name) namedRuns.delete(name);
         runs.delete(runId);
+        bridge.closeSession(subScope, "subagent_done").catch(() => {});
 
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error(`[agent-mcp] background agent ${label} failed: ${errMsg}`);
@@ -132,6 +134,7 @@ export async function handleAgentStart(
     run.done = true;
     if (name) namedRuns.delete(name);
     runs.delete(runId);
+    bridge.closeSession(subScope, "subagent_done").catch(() => {});
   }
 }
 
@@ -150,6 +153,7 @@ export async function handleAgentStop(runId: string, bridge: OrchestratorBridge)
   run.done = true;
   if (run.name) namedRuns.delete(run.name);
   runs.delete(runId);
+  bridge.closeSession(run.scope, "subagent_stopped").catch(() => {});
 }
 
 /**

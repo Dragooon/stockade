@@ -135,6 +135,15 @@ export class OrchestratorBridge {
     });
   }
 
+  /**
+   * Close a session by scope. Thin wrapper over SessionManager.closeSession
+   * so callers (e.g. sub-agent lifecycle in agent-mcp) can release a scope
+   * without reaching into the session manager directly.
+   */
+  async closeSession(scope: string, reason: string): Promise<void> {
+    await this.sessionManager.closeSession(scope, reason);
+  }
+
   /** Graceful shutdown — clear pending promises and stop Redis. */
   async shutdown(): Promise<void> {
     for (const [, p] of this.pending) {
