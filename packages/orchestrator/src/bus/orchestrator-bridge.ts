@@ -92,11 +92,17 @@ export class OrchestratorBridge {
     // Ensure session exists (idempotent)
     const session = await this.sessionManager.ensureSession(scope, sessionMeta);
 
-    // Save attachments and rewrite message text if needed
+    // Save attachments and rewrite message text if needed.
+    // Sandboxed agents see their workspace at /workspace (Docker mount), so
+    // host paths under session.agentCwd must be translated before being
+    // referenced in the prompt — otherwise the agent gets a path it cannot read.
     let promptText = text;
     if (attachments?.length) {
       const savedPaths = saveAttachmentsToDisk(attachments, session.agentCwd);
-      promptText = buildPromptWithAttachments(text, attachments, savedPaths);
+      const promptPaths = session.sandboxed
+        ? savedPaths.map((p) => p.replace(session.agentCwd, "/workspace").replace(/\\/g, "/"))
+        : savedPaths;
+      promptText = buildPromptWithAttachments(text, attachments, promptPaths);
     }
 
     const correlationId = randomUUID();

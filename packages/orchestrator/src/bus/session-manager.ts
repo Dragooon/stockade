@@ -86,6 +86,9 @@ export interface ManagedSession {
   workerSessionId: string;
   /** Agent cwd on the host filesystem (for attachment saving). */
   agentCwd: string;
+  /** Whether the agent runs in a Docker sandbox — used to translate
+   * host attachment paths to /workspace paths in prompts. */
+  sandboxed: boolean;
   proxyToken?: string;
   sdkSessionId: string | null;
   idleTimer: ReturnType<typeof setTimeout>;
@@ -411,6 +414,7 @@ export class SessionManager {
         workerUrl,
         workerSessionId,
         agentCwd: hostAgentCwd,
+        sandboxed: agentConfig.sandboxed ?? false,
         proxyToken,
         sdkSessionId: sdkSessionId ?? null,
         idleTimer: this.startIdleTimer(scope),
