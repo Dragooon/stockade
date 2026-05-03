@@ -99,7 +99,7 @@ export async function handleAgentStart(
         runs.delete(runId);
         bridge.closeSession(subScope, "subagent_done").catch(() => {});
 
-        const text = `[Background agent ${label} complete]:\n${result}`;
+        const text = `[Background agent ${label} complete]:\n${result.text}`;
         // Re-dispatch via bridge to inject completion into parent scope
         return bridge.sendAndWait(parentScope, text, {
           userId: parentUserId,
