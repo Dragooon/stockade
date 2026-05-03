@@ -191,6 +191,11 @@ export async function provisionContainer(
     volumes.push(...agentConfig.container.volumes);
   }
 
+  // Agent-specific env vars from config (after credential injection so config wins on conflict)
+  if (agentConfig.container?.env) {
+    Object.assign(env, agentConfig.container.env);
+  }
+
   // 4. Build cleanup function
   const cleanup = async () => {
     // Revoke gateway token (if we got one)

@@ -8,6 +8,7 @@ export const containerConfigSchema = z.object({
   memory: z.string().optional(),
   cpus: z.number().optional(),
   volumes: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   workspace_path: z.string().optional(),
   workspace_host_path: z.string().optional(),
   /** Override the container user (e.g. "root" to access Docker socket). Defaults to Dockerfile USER. */
