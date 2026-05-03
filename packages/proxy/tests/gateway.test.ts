@@ -170,6 +170,76 @@ describe("gateway API", () => {
     expect(res.status).toBe(403);
   });
 
+  it("GET /gateway/list — returns scoped key names without revealing values", async () => {
+    const app = new Hono();
+    const { validateToken } = await import("../src/gateway/tokens.js");
+
+    app.use("/gateway/*", async (c, next) => {
+      const authHeader = c.req.header("authorization");
+      if (!authHeader?.startsWith("Bearer ")) return c.json({ error: "no" }, 401);
+      const t = authHeader.slice(7);
+      const data = validateToken(t);
+      if (!data) return c.json({ error: "bad" }, 401);
+      // @ts-expect-error — same shape as production
+      c.set("tokenData", data);
+      await next();
+    });
+
+    app.get("/gateway/list", async (c) => {
+      // @ts-expect-error — set above
+      const tokenData = c.get("tokenData");
+      return c.json({
+        keys: tokenData.credentials,
+        storeKeys: tokenData.storeKeys ?? [],
+      });
+    });
+
+    const res = await app.request("/gateway/list", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.keys).toEqual(["AgentVault/GitHub/token"]);
+    expect(json.storeKeys).toEqual(["AgentVault/*"]);
+    // Crucially, no value/secret field is present
+    expect(json.value).toBeUndefined();
+    expect(json.values).toBeUndefined();
+  });
+
+  it("GET /gateway/list — empty arrays for token with no scope", async () => {
+    const app = new Hono();
+    const { validateToken } = await import("../src/gateway/tokens.js");
+
+    app.use("/gateway/*", async (c, next) => {
+      const t = c.req.header("authorization")?.slice(7) ?? "";
+      const data = validateToken(t);
+      if (!data) return c.json({ error: "Unauthorized" }, 401);
+      // @ts-expect-error — same shape as production
+      c.set("tokenData", data);
+      await next();
+    });
+
+    app.get("/gateway/list", async (c) => {
+      // @ts-expect-error — set above
+      const tokenData = c.get("tokenData");
+      return c.json({
+        keys: tokenData.credentials,
+        storeKeys: tokenData.storeKeys ?? [],
+      });
+    });
+
+    const restricted = issueToken("blank", [], undefined, 3600);
+    const res = await app.request("/gateway/list", {
+      headers: { Authorization: `Bearer ${restricted.token}` },
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.keys).toEqual([]);
+    expect(json.storeKeys).toEqual([]);
+  });
+
   it("rejects request with no auth header", async () => {
     const app = new Hono();
     const { validateToken } = await import("../src/gateway/tokens.js");

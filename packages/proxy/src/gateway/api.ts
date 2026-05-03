@@ -47,6 +47,18 @@ export function startGateway(getConfig: () => ProxyConfig) {
     await next();
   });
 
+  // ── GET /gateway/list — List credential keys this token can access ──
+  // Returns the names only (never values) of the credentials and store-key
+  // patterns scoped to the caller's token. Lets an agent discover what's
+  // available without revealing secrets or leaking the global catalog.
+  app.get("/gateway/list", async (c) => {
+    const tokenData = c.get("tokenData");
+    return c.json({
+      keys: tokenData.credentials,
+      storeKeys: tokenData.storeKeys ?? [],
+    });
+  });
+
   // ── GET /gateway/ref/* — Issue a credential reference token ──
   // Returns an opaque ref string the agent can place in request bodies.
   // The proxy substitutes it with the real credential on the wire.
