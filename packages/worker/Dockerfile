@@ -28,6 +28,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install tavily-cli for search capabilities
 RUN pip3 install --break-system-packages tavily-cli
 
+# Install agentmail-cli for programmatic email
+RUN npm install -g agentmail-cli@0.7.11
+
+# Install gogcli (Google CLI: Gmail, Calendar, Drive, etc.) — linux amd64 binary
+RUN curl -fsSL https://github.com/steipete/gogcli/releases/download/v0.14.0/gogcli_0.14.0_linux_amd64.tar.gz \
+    | tar -xz -C /tmp \
+    && mv /tmp/gog /usr/local/bin/gog \
+    && chmod +x /usr/local/bin/gog \
+    && rm -rf /tmp/LICENSE /tmp/README.md /tmp/CHANGELOG.md 2>/dev/null || true
+
 WORKDIR /app
 
 # Copy monorepo root files

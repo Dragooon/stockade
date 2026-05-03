@@ -93,6 +93,7 @@ export async function provisionContainer(
     // Resolve credential env vars for CLI tools (e.g. tavily CLI)
     const credentialEnvMap: Record<string, string> = {
       "tavily-api-key": "TAVILY_API_KEY",
+      "agentmail-api-key": "AGENTMAIL_API_KEY",
     };
     for (const credKey of agentConfig.credentials ?? []) {
       const envVar = credentialEnvMap[credKey];
