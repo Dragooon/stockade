@@ -441,6 +441,8 @@ schedule_type options:
         if (modelUsage) {
           console.log(`[worker] usage: ${formatModelUsage(modelUsage)}`);
         }
+        const emptyMark = resultText.length === 0 ? " ⚠ EMPTY" : "";
+        console.log(`[worker] result: turns=${turns} stop_reason=${stopReason} text_len=${resultText.length}${emptyMark}`);
         break; // result is the terminal SDK event — exit the loop
       }
     }

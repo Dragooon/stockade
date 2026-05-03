@@ -537,9 +537,16 @@ export class DiscordAdapter {
     // session (or queued for the next turn) without blocking the channel handler.
     this.opts.onMessage(channelMessage, askApproval).then(async (response) => {
       cleanup();
-      const { text, files } = response;
-      // Empty/whitespace-only = agent chose to stay silent (shared channel filtering)
-      if (!text?.trim()) return;
+      const { text, files, stopReason } = response;
+      if (!text?.trim()) {
+        // end_turn = agent chose to stay silent (shared channel filtering, intentional no-op).
+        // Anything else (max_turns, error, error_max_turns, …) is a silent failure — surface it.
+        const normalSilent = !stopReason || stopReason === "end_turn";
+        if (!normalSilent) {
+          await ch.send(`⚠ Agent finished with no message (stop_reason: \`${stopReason}\`). Re-prompt or increase \`max_turns\`.`).catch(() => {});
+        }
+        return;
+      }
       const chunks = splitMessage(text, 2000);
       const attachments = files?.map(toAttachment) ?? [];
       await ch.send({ content: chunks[0], files: attachments });
@@ -875,13 +882,53 @@ function buildGatedApprovalResultEmbed(
     .setTimestamp();
 }
 
+/**
+ * Split text into Discord-sized chunks at the cleanest available boundary
+ * within [maxLength*0.6, maxLength]. Order of preference:
+ *   1. Double newline (paragraph break)
+ *   2. Single newline (line break)
+ *   3. Sentence end (`. `, `! `, `? `)
+ *   4. Word boundary (space)
+ *   5. Hard slice (last resort)
+ *
+ * Re-opens fenced code blocks across chunks so ```mermaid blocks etc. don't
+ * lose syntax mid-stream.
+ */
 function splitMessage(text: string, maxLength: number): string[] {
   if (text.length <= maxLength) return [text];
   const chunks: string[] = [];
   let remaining = text;
-  while (remaining.length > 0) {
-    chunks.push(remaining.slice(0, maxLength));
-    remaining = remaining.slice(maxLength);
+  let openFence = ""; // language tag of the currently-open code fence, if any
+
+  while (remaining.length > maxLength) {
+    const window = remaining.slice(0, maxLength);
+    const minSplit = Math.floor(maxLength * 0.6);
+
+    let cut = -1;
+    for (const sep of ["\n\n", "\n", ". ", "! ", "? ", " "]) {
+      const idx = window.lastIndexOf(sep);
+      if (idx >= minSplit) {
+        cut = idx + sep.length;
+        break;
+      }
+    }
+    if (cut === -1) cut = maxLength; // hard slice
+
+    let chunk = remaining.slice(0, cut);
+    remaining = remaining.slice(cut);
+
+    // Track and patch fenced code blocks so chunks remain syntactically valid.
+    const fences = chunk.match(/```(\w*)/g) ?? [];
+    for (const f of fences) {
+      if (openFence === "") openFence = f.slice(3); // opening fence
+      else openFence = ""; // closing fence
+    }
+    if (openFence !== "") {
+      chunk += "\n```";
+      remaining = "```" + openFence + "\n" + remaining;
+    }
+    chunks.push(chunk);
   }
+  if (remaining.length > 0) chunks.push(remaining);
   return chunks;
 }

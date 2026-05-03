@@ -233,23 +233,26 @@ export class OrchestratorBridge {
       case "evt:result": {
         const p = this.pending.get(event.correlationId);
         const preview = event.text.slice(0, 100).replace(/\n/g, " ");
-        log(`[bus] ← ${scope.slice(0, 30)} | session=${event.sdkSessionId.slice(0, 12)} | "${preview}${event.text.length > 100 ? "…" : ""}"`);
+        const emptyMark = event.text.length === 0 ? " ⚠ EMPTY" : "";
+        log(`[bus] ← ${scope.slice(0, 30)} | session=${event.sdkSessionId.slice(0, 12)} | stop=${event.stopReason} | "${preview}${event.text.length > 100 ? "…" : ""}"${emptyMark}`);
 
         // Coalesce injected messages: any other pending promises for the same
         // scope were mid-turn injections. The agent addressed them all in one
-        // reply, so resolve them with the same text.
+        // reply, so resolve the coalesced ones with empty text — the channel
+        // adapter posts the reply for the original correlationId only,
+        // avoiding N duplicate Discord messages for N injected user messages.
         for (const [cid, op] of this.pending) {
           if (op.scope === scope && cid !== event.correlationId) {
             clearTimeout(op.timeoutHandle);
             this.pending.delete(cid);
-            op.resolve({ text: event.text, files: event.files });
+            op.resolve({ text: "", stopReason: event.stopReason });
           }
         }
 
         if (!p) break;
         clearTimeout(p.timeoutHandle);
         this.pending.delete(event.correlationId);
-        p.resolve({ text: event.text, files: event.files });
+        p.resolve({ text: event.text, files: event.files, stopReason: event.stopReason });
         break;
       }
 

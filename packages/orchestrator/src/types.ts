@@ -225,6 +225,8 @@ export interface ChannelFile {
 export interface ChannelResponse {
   text: string;
   files?: ChannelFile[];
+  /** SDK stop_reason from the terminal result event ("end_turn", "max_turns", "error_max_turns", etc). */
+  stopReason?: string;
 }
 
 /** Resolved user info from RBAC */
