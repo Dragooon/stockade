@@ -6,7 +6,7 @@
  * A health monitor polls each worker every 30s and restarts it if it goes down.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -71,6 +71,20 @@ export class HostWorkerManager implements WorkerManager {
     console.log(`[host-workers] ${agentId} stopped — will re-start on next request`);
   }
 
+  /**
+   * Best-effort cleanup of agent-browser's daemon and Chrome before browse spawns
+   * or after it stops. Without this, Chrome can outlive the worker process,
+   * lock the persistent profile, and force the next session into a fresh window.
+   */
+  private cleanupAgentBrowser(): void {
+    try {
+      const cmd = process.platform === "win32" ? "agent-browser.cmd" : "agent-browser";
+      spawnSync(cmd, ["close"], { stdio: "ignore", shell: true, timeout: 5_000 });
+    } catch {
+      // best-effort
+    }
+  }
+
   async shutdownAll(): Promise<void> {
     if (this.healthTimer) {
       clearInterval(this.healthTimer);
@@ -90,12 +104,20 @@ export class HostWorkerManager implements WorkerManager {
 
   // ── Private ──
 
-  private async startWorker(agentId: string, _agentConfig: AgentConfig): Promise<string> {
+  private async startWorker(agentId: string, agentConfig: AgentConfig): Promise<string> {
     const port = this.portAllocator.allocate();
+
+    // browse parents an agent-browser daemon + Chrome. If a previous worker died
+    // without taking them down, the old Chrome holds the profile lock and the new
+    // session ends up in a stale or duplicate window. Sweep before spawning.
+    if (agentId === "browse") {
+      this.cleanupAgentBrowser();
+    }
 
     const env = {
       ...process.env,
       ...this.extraEnv,
+      ...(agentConfig.host?.env ?? {}),
       PORT: String(port),
       WORKER_ID: `host-${agentId}`,
       AGENT_ID: agentId,
@@ -171,6 +193,10 @@ export class HostWorkerManager implements WorkerManager {
       });
     } catch {
       // Best-effort
+    }
+
+    if (agentId === "browse") {
+      this.cleanupAgentBrowser();
     }
   }
 

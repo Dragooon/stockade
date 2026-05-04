@@ -32,6 +32,11 @@ export interface AgentConfig {
   credentials?: string[];
   store_keys?: string[];
   container?: ContainerConfig;
+  /** Settings for host-mode workers (sandboxed: false). */
+  host?: {
+    /** Extra env vars merged into the spawned worker process. */
+    env?: Record<string, string>;
+  };
   /** Memory configuration. Default: enabled with no autoDream. */
   memory?: MemoryConfig;
   /**

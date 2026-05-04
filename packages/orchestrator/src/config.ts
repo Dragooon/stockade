@@ -45,6 +45,9 @@ const agentConfigSchema = z.object({
   credentials: z.array(z.string()).optional(),
   store_keys: z.array(z.string()).optional(),
   container: containerConfigSchema.optional(),
+  host: z.object({
+    env: z.record(z.string(), z.string()).optional(),
+  }).optional(),
   memory: memoryConfigSchema.optional(),
   permissions: z.array(z.string()).optional(),
   /** @deprecated Silently ignored — skills load from platform dir (~/.stockade/.claude/skills/). Use deny:Skill(name) permission rules to restrict per-agent access. */
