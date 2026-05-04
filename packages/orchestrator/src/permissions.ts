@@ -407,10 +407,16 @@ export async function ruleMatches(
   input: Record<string, unknown>,
   ctx: PermissionContext,
 ): Promise<boolean> {
-  // Tool name check — "*" matches all tools, tool groups expand matches
+  // Tool name check — "*" matches all tools, tool groups expand matches,
+  // and a trailing "*" enables prefix matching (e.g. "mcp__chrome__*").
   if (rule.tool !== "*" && rule.tool !== tool) {
-    const group = TOOL_GROUPS[rule.tool];
-    if (!group || !group.includes(tool)) return false;
+    if (rule.tool.endsWith("*")) {
+      const prefix = rule.tool.slice(0, -1);
+      if (!tool.startsWith(prefix)) return false;
+    } else {
+      const group = TOOL_GROUPS[rule.tool];
+      if (!group || !group.includes(tool)) return false;
+    }
   }
 
   // No pattern → matches all invocations of this tool (or all tools if *)

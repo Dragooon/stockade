@@ -72,14 +72,30 @@ export class HostWorkerManager implements WorkerManager {
   }
 
   /**
-   * Best-effort cleanup of agent-browser's daemon and Chrome before browse spawns
-   * or after it stops. Without this, Chrome can outlive the worker process,
-   * lock the persistent profile, and force the next session into a fresh window.
+   * Best-effort cleanup of any Chrome holding the Madge browser profile before
+   * browse spawns or after it stops. chrome-devtools-mcp launches Chrome on the
+   * persistent profile but doesn't tear it down when its stdio closes — so each
+   * dispatch leaves a Chrome alive that locks the profile against the next launch.
+   * We kill those zombies here. Matches anything with --user-data-dir pointing at
+   * the Madge profile (covers both old agent-browser bundled Chromium and the new
+   * local Google Chrome). User Chrome windows are unaffected.
    */
-  private cleanupAgentBrowser(): void {
+  private cleanupBrowseChrome(): void {
     try {
-      const cmd = process.platform === "win32" ? "agent-browser.cmd" : "agent-browser";
-      spawnSync(cmd, ["close"], { stdio: "ignore", shell: true, timeout: 5_000 });
+      if (process.platform === "win32") {
+        // PowerShell: WMI filter on cmdline, force-kill matching chromes.
+        const ps = `Get-WmiObject Win32_Process -Filter "Name='chrome.exe'" | Where-Object {$_.CommandLine -like '*--user-data-dir=*madge*'} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+        spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], {
+          stdio: "ignore",
+          timeout: 8_000,
+        });
+      } else {
+        // Unix: pkill matching the profile path.
+        spawnSync("pkill", ["-f", "--user-data-dir=.*madge"], {
+          stdio: "ignore",
+          timeout: 5_000,
+        });
+      }
     } catch {
       // best-effort
     }
@@ -111,7 +127,7 @@ export class HostWorkerManager implements WorkerManager {
     // without taking them down, the old Chrome holds the profile lock and the new
     // session ends up in a stale or duplicate window. Sweep before spawning.
     if (agentId === "browse") {
-      this.cleanupAgentBrowser();
+      this.cleanupBrowseChrome();
     }
 
     const env = {
@@ -196,7 +212,7 @@ export class HostWorkerManager implements WorkerManager {
     }
 
     if (agentId === "browse") {
-      this.cleanupAgentBrowser();
+      this.cleanupBrowseChrome();
     }
   }
 
