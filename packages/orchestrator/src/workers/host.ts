@@ -7,6 +7,8 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -72,30 +74,30 @@ export class HostWorkerManager implements WorkerManager {
   }
 
   /**
-   * Best-effort cleanup of any Chrome holding the Madge browser profile before
-   * browse spawns or after it stops. chrome-devtools-mcp launches Chrome on the
-   * persistent profile but doesn't tear it down when its stdio closes — so each
-   * dispatch leaves a Chrome alive that locks the profile against the next launch.
-   * We kill those zombies here. Matches anything with --user-data-dir pointing at
-   * the Madge profile (covers both old agent-browser bundled Chromium and the new
-   * local Google Chrome). User Chrome windows are unaffected.
+   * Dispatch-boundary cleanup for the Madge Chrome profile. Defense-in-depth
+   * companion to the worker-side cleanup in `packages/worker/src/browse-cleanup.ts`
+   * — runs at browse-worker spawn/stop (rare) to catch crash-recovery cases the
+   * worker couldn't clean itself. Keep this in sync with the worker version.
    */
   private cleanupBrowseChrome(): void {
     try {
       if (process.platform === "win32") {
-        // PowerShell: WMI filter on cmdline, force-kill matching chromes.
-        const ps = `Get-WmiObject Win32_Process -Filter "Name='chrome.exe'" | Where-Object {$_.CommandLine -like '*--user-data-dir=*madge*'} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+        const ps =
+          "Get-WmiObject Win32_Process -Filter \"Name='chrome.exe'\" | " +
+          "Where-Object {$_.CommandLine -like '*--user-data-dir=*madge*'} | " +
+          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; " +
+          "Get-WmiObject Win32_Process -Filter \"Name='node.exe'\" | " +
+          "Where-Object {$_.CommandLine -like '*chrome-devtools-mcp*'} | " +
+          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
         spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], {
           stdio: "ignore",
           timeout: 8_000,
         });
       } else {
-        // Unix: pkill matching the profile path.
-        spawnSync("pkill", ["-f", "--user-data-dir=.*madge"], {
-          stdio: "ignore",
-          timeout: 5_000,
-        });
+        spawnSync("pkill", ["-f", "--user-data-dir=.*madge"], { stdio: "ignore", timeout: 5_000 });
+        spawnSync("pkill", ["-f", "chrome-devtools-mcp"], { stdio: "ignore", timeout: 5_000 });
       }
+      rmSync(join(homedir(), ".agent-browser", "profiles", "madge", "lockfile"), { force: true });
     } catch {
       // best-effort
     }

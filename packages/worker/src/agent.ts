@@ -15,6 +15,7 @@ import { request as httpsRequest } from "node:https";
 import { basename } from "node:path";
 import type { ConversationChannel } from "./channel.js";
 import type { WorkerSessionRequest, WorkerEvent } from "./types.js";
+import { cleanupBrowseChrome } from "./browse-cleanup.js";
 
 /**
  * HTTP request using node:http/https directly — bypasses undici/fetch and any
@@ -390,6 +391,13 @@ schedule_type options:
   let prevUsage = { input: -1, output: -1, cacheRead: -1, cacheCreate: -1 };
   let emittedStarted = false;
 
+  // Browse worker leaks Chrome + chrome-devtools-mcp Node processes per query
+  // because Puppeteer-on-Windows doesn't propagate stdio close to Chrome.
+  // Sweep before and after every query — pre-clears any orphan from a prior
+  // session, post-tears-down whatever this session leaked.
+  const isBrowse = process.env.AGENT_ID === "browse";
+  if (isBrowse) cleanupBrowseChrome();
+
   try {
     for await (const message of query({ prompt: channel as any, options: options as any })) {
       const m = message as Record<string, unknown>;
@@ -450,10 +458,14 @@ schedule_type options:
     if (isStaleSessionError(err) && request.sessionId && !request.forceNewSession) {
       console.log(`[worker] Stale session ${request.sessionId} — signalling orchestrator to retry`);
       emit({ type: "stale_session" });
+      if (isBrowse) cleanupBrowseChrome();
       return;
     }
+    if (isBrowse) cleanupBrowseChrome();
     throw err;
   }
+
+  if (isBrowse) cleanupBrowseChrome();
 
   emit({ type: "result", text: resultText, sessionId: sdkSessionId, stopReason, files: pendingFiles });
 }
