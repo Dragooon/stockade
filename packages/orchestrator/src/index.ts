@@ -277,19 +277,21 @@ async function executeTask(task: ScheduledTask): Promise<string> {
     noSession: task.context_mode === "isolated",
   });
 
-  // Deliver result back to the originating channel.
-  // If the agent returned empty text, fall back to the raw prompt so the user
-  // at least receives the reminder rather than nothing.
+  // Deliver result back to the originating channel. Empty responses are
+  // dropped (not echoed as the raw prompt) — empties usually mean the dispatch
+  // was coalesced as a mid-turn injection by the bus, in which case the real
+  // reply already went out under another correlationId.
   const platform = task.scope.split(":")[0];
   const sender = channelSenders.get(platform);
   if (sender) {
-    const text = response.text.trim() || task.prompt;
-    if (!response.text.trim()) {
-      console.warn(`[scheduler] Task ${task.id} returned empty response — delivering raw prompt`);
+    const text = response.text.trim();
+    if (!text) {
+      console.warn(`[scheduler] Task ${task.id} returned empty response — skipping channel delivery`);
+    } else {
+      sender(task.scope, text, response.files).catch((err: unknown) =>
+        console.error(`[scheduler] Failed to deliver result for task ${task.id}:`, err)
+      );
     }
-    sender(task.scope, text, response.files).catch((err: unknown) =>
-      console.error(`[scheduler] Failed to deliver result for task ${task.id}:`, err)
-    );
   }
 
   return response.text;

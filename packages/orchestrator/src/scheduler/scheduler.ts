@@ -81,6 +81,14 @@ export function checkDueTasks(deps: SchedulerDependencies): number {
     const current = deps.store.getTaskById(task.id);
     if (!current || current.status !== "active") continue;
 
+    // Claim the task by advancing next_run BEFORE dispatch. Without this, a
+    // task whose execution exceeds poll_interval_ms gets re-picked by the next
+    // poll tick and fires twice. computeNextRun is deterministic from the
+    // task's schedule, so runScheduledTask's later update with the same value
+    // is idempotent.
+    const claimedNextRun = computeNextRun(current, deps.config);
+    deps.store.updateTask(current.id, { next_run: claimedNextRun });
+
     if (deps.enqueueTask) {
       // Dispatch via queue (respects concurrency + per-agent serialization)
       deps.enqueueTask(current.agentId, current.id, () =>

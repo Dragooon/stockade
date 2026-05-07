@@ -259,6 +259,43 @@ describe("checkDueTasks", () => {
     expect(count).toBe(2);
     expect(enqueued).toEqual(["t1", "t2"]);
   });
+
+  it("advances next_run before dispatch so a long-running task isn't re-picked", () => {
+    // Regression: a task whose execution exceeds poll_interval_ms used to be
+    // dispatched again on the next poll because next_run only moved forward
+    // after runScheduledTask completed.
+    const task = makeTask({
+      schedule_type: "interval",
+      schedule_value: "60000",
+      next_run: new Date(Date.now() - 1000).toISOString(),
+    });
+    const store = makeMockStore([task]);
+    const enqueued: string[] = [];
+
+    // First poll picks up the due task and dispatches.
+    checkDueTasks({
+      store,
+      config,
+      executeTask: async () => "ok",
+      enqueueTask: (_agentKey, taskId, _fn) => {
+        enqueued.push(taskId);
+        // Intentionally never invoke fn — simulates a long-running dispatch
+        // that hasn't completed yet.
+      },
+    });
+    expect(enqueued).toEqual(["t1"]);
+
+    // Second poll while the dispatch is still in-flight must NOT re-pick it.
+    checkDueTasks({
+      store,
+      config,
+      executeTask: async () => "ok",
+      enqueueTask: (_agentKey, taskId, _fn) => {
+        enqueued.push(taskId);
+      },
+    });
+    expect(enqueued).toEqual(["t1"]);
+  });
 });
 
 // ── startSchedulerLoop ──

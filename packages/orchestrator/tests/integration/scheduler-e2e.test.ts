@@ -631,8 +631,15 @@ describe("checkDueTasks", () => {
 
 describe("startSchedulerLoop", () => {
   it("28. polls at configured interval", () => {
-    const task = makeTask({ id: "t1" });
-    const store = makeMockStore([task]);
+    // Use two tasks so the second poll has something to dispatch.
+    // (A single task whose dispatch advances next_run wouldn't be due again
+    // on the next tick — that's the deliberate post-claim behavior.)
+    const t1 = makeTask({ id: "t1" });
+    const t2 = makeTask({
+      id: "t2",
+      next_run: new Date(Date.now() + 500).toISOString(), // due after first poll
+    });
+    const store = makeMockStore([t1, t2]);
     const dispatched: string[] = [];
 
     startSchedulerLoop({
@@ -642,13 +649,15 @@ describe("startSchedulerLoop", () => {
       enqueueTask: (_agentKey, taskId) => dispatched.push(taskId),
     });
 
-    // First poll fires immediately — t1 is due
+    // First poll fires immediately — t1 is due, t2 is not yet
     const afterFirstPoll = dispatched.length;
     expect(afterFirstPoll).toBeGreaterThanOrEqual(1);
+    expect(dispatched).toEqual(["t1"]);
 
-    // Advance past poll interval — should have polled again
+    // Advance past poll interval — t2 is now due
     vi.advanceTimersByTime(1_000);
     expect(dispatched.length).toBeGreaterThan(afterFirstPoll);
+    expect(dispatched).toContain("t2");
   });
 
   it("29. idempotent — second call is a no-op", () => {
