@@ -1,36 +1,58 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { promisify } from "node:util";
+import { EventEmitter } from "node:events";
 import type { Provider } from "../src/shared/types.js";
 
 // ──────────────────────────────────────────────────────────────────────────
-// Mock child_process.execFile — credentials.ts uses promisify(execFile).
-// The mock must work with util.promisify, which checks for a custom symbol.
+// Mock child_process.spawn — credentials.ts uses spawn(bash, ["-c", cmd], opts)
+// and reads stdout/stderr from the returned ChildProcess. Each invocation
+// returns an event-emitter that emits one stdout chunk and an "exit" event,
+// optionally with a non-zero code to simulate failure.
 // ──────────────────────────────────────────────────────────────────────────
 let _mockStdout = "";
 let _mockShouldReject = false;
 let _mockRejectError: Error | null = null;
 let _mockRejectOnce: Error[] = [];
+// Optional per-call handler. If set, it overrides _mockStdout for each invocation.
+// Receives the spawn args (file, args, opts) and returns { stdout, stderr?, code? }.
+let _mockHandler: ((args: any[]) => { stdout: string; stderr?: string; code?: number }) | null = null;
 
-// We track calls separately since the promisify.custom path bypasses the callback.
-const mockExecFile = vi.fn();
+const mockExecFile = vi.fn((..._args: any[]) => {
+  const child: any = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  let stdout = _mockStdout;
+  let stderr = "";
+  let exitCode = 0;
+  if (_mockHandler) {
+    const result = _mockHandler(_args);
+    stdout = result.stdout;
+    stderr = result.stderr ?? "";
+    exitCode = result.code ?? 0;
+  } else if (_mockRejectOnce.length > 0) {
+    const err = _mockRejectOnce.shift()!;
+    stderr = (err as any).stderr ?? err.message ?? "";
+    exitCode = 1;
+    stdout = "";
+  } else if (_mockShouldReject && _mockRejectError) {
+    stderr = (_mockRejectError as any).stderr ?? _mockRejectError.message ?? "";
+    exitCode = 1;
+    stdout = "";
+  }
+  setImmediate(() => {
+    if (stdout) child.stdout.emit("data", Buffer.from(stdout));
+    if (stderr) child.stderr.emit("data", Buffer.from(stderr));
+    child.emit("exit", exitCode, null);
+  });
+  return child;
+});
 
-// Custom promisify so util.promisify(execFile) returns {stdout, stderr}
-const defaultPromisifyCustom = (...args: any[]) => {
-  // Track the call on the vi.fn for toHaveBeenCalled / toHaveBeenCalledTimes
-  mockExecFile(...args);
-  if (_mockRejectOnce.length > 0) {
-    return Promise.reject(_mockRejectOnce.shift());
-  }
-  if (_mockShouldReject && _mockRejectError) {
-    return Promise.reject(_mockRejectError);
-  }
-  return Promise.resolve({ stdout: _mockStdout, stderr: "" });
-};
-(mockExecFile as any)[promisify.custom] = defaultPromisifyCustom;
+function setMockHandler(handler: ((args: any[]) => { stdout: string; stderr?: string; code?: number }) | null) {
+  _mockHandler = handler;
+}
 
 vi.mock("node:child_process", async (importOriginal) => {
   const orig = await importOriginal<typeof import("node:child_process")>();
-  return { ...orig, execFile: mockExecFile };
+  return { ...orig, spawn: mockExecFile };
 });
 
 function mockResolve(stdout: string) {
@@ -50,11 +72,11 @@ function mockRejectOnce(err: Error) {
 
 function mockClearAll() {
   mockExecFile.mockClear();
-  (mockExecFile as any)[promisify.custom] = defaultPromisifyCustom;
   _mockStdout = "";
   _mockShouldReject = false;
   _mockRejectError = null;
   _mockRejectOnce = [];
+  _mockHandler = null;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -300,15 +322,13 @@ describe("provider session management", () => {
 
   it("runs signin once then reuses session for subsequent commands", async () => {
     let callCount = 0;
-    (mockExecFile as any)[promisify.custom] = (...args: any[]) => {
-      mockExecFile(...args);
+    setMockHandler(() => {
       callCount++;
       if (callCount === 1) {
-        // signin call
-        return Promise.resolve({ stdout: "session-token-abc\n", stderr: "" });
+        return { stdout: "session-token-abc\n" };
       }
-      return Promise.resolve({ stdout: "secret-value\n", stderr: "" });
-    };
+      return { stdout: "secret-value\n" };
+    });
 
     const result = await resolveCredential(signinProvider, "Vault/Item/field");
     expect(result).toBe("secret-value");
@@ -326,15 +346,14 @@ describe("provider session management", () => {
   it("injects session_env into child process environment", async () => {
     let capturedEnv: NodeJS.ProcessEnv | undefined;
     let callCount = 0;
-    (mockExecFile as any)[promisify.custom] = (...args: any[]) => {
-      mockExecFile(...args);
+    setMockHandler((args) => {
       callCount++;
       if (callCount === 1) {
-        return Promise.resolve({ stdout: "my-session-token\n", stderr: "" });
+        return { stdout: "my-session-token\n" };
       }
       capturedEnv = args[2]?.env;
-      return Promise.resolve({ stdout: "value\n", stderr: "" });
-    };
+      return { stdout: "value\n" };
+    });
 
     await resolveCredential(signinProvider, "Vault/Key/field");
 
@@ -344,14 +363,13 @@ describe("provider session management", () => {
 
   it("re-signs in after invalidateSession", async () => {
     let callCount = 0;
-    (mockExecFile as any)[promisify.custom] = (...args: any[]) => {
-      mockExecFile(...args);
+    setMockHandler(() => {
       callCount++;
       if (callCount % 2 === 1) {
-        return Promise.resolve({ stdout: `token-${callCount}\n`, stderr: "" });
+        return { stdout: `token-${callCount}\n` };
       }
-      return Promise.resolve({ stdout: "value\n", stderr: "" });
-    };
+      return { stdout: "value\n" };
+    });
 
     await resolveCredential(signinProvider, "Vault/A/field");
     expect(mockExecFile).toHaveBeenCalledTimes(2); // signin + read

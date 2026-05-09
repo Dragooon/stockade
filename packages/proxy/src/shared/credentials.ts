@@ -147,15 +147,35 @@ export function invalidateSession(): void {
  * Execute a shell command and return trimmed stdout. Throws on non-zero exit.
  */
 async function execShell(cmd: string, env?: NodeJS.ProcessEnv): Promise<string> {
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
-  const execFileAsync = promisify(execFile);
+  const { spawn } = await import("node:child_process");
   const bash = process.platform === "win32"
     ? "C:\\Program Files\\Git\\usr\\bin\\bash.exe"
     : "bash";
-  const opts = env ? { env } : undefined;
-  const { stdout } = await execFileAsync(bash, ["-c", cmd], opts);
-  return String(stdout).trim();
+  // Stdin must be ignored (not the default pipe). Some provider CLIs (notably
+  // `op item edit`) probe stdin for a JSON template; with a connected-but-empty
+  // pipe they hang or error. Closing fd 0 makes them fall back to positional
+  // arguments. We use spawn (not execFile) because execFile silently overrides
+  // stdio:["ignore", ...] and connects stdin anyway on Windows.
+  return await new Promise<string>((resolve, reject) => {
+    const opts: any = { stdio: ["ignore", "pipe", "pipe"] };
+    if (env) opts.env = env;
+    const child = spawn(bash, ["-c", cmd], opts);
+    let stdout = "";
+    let stderr = "";
+    child.stdout!.on("data", (d) => { stdout += d.toString(); });
+    child.stderr!.on("data", (d) => { stderr += d.toString(); });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve(stdout.trim());
+      } else {
+        const err: any = new Error(`Command failed (exit ${code}): ${cmd}\n${stderr}`);
+        err.stderr = stderr;
+        err.exitCode = code;
+        reject(err);
+      }
+    });
+  });
 }
 
 /**

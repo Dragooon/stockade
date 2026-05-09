@@ -132,14 +132,18 @@ export function startGateway(getConfig: () => ProxyConfig) {
         header: string;
         format?: string;
       };
-    }>();
+    }>().catch(() => null);
 
-    if (!body.value) {
+    if (!body || !body.value) {
       return c.json({ error: "Missing value" }, 400);
     }
 
-    // Write to provider
-    await storeCredential(getConfig().provider, key, body.value);
+    try {
+      await storeCredential(getConfig().provider, key, body.value);
+    } catch (err: any) {
+      console.error(`[gateway] store failed: key="${key}" — ${err?.message ?? err}`);
+      return c.json({ error: `Store failed: ${err?.message ?? err}` }, 500);
+    }
     console.log(`[gateway] stored credential: ${key}`);
 
     // If route metadata provided, log it (actual config update is a future enhancement)

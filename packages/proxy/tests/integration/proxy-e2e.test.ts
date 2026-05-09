@@ -20,30 +20,23 @@ import {
 } from "../../src/gateway/tokens.js";
 
 // ──────────────────────────────────────────────────────────────────────────
-// Mock the credential provider (child_process.execFile) so we never shell out.
-// credentials.ts uses `promisify(execFile)(bash, ["-c", cmd])`.
-// The mock must use callback style: execFile(file, args, cb) where
-// cb = (error, stdout, stderr) => void.
+// Mock the credential provider (child_process.spawn) so we never shell out.
+// credentials.ts uses `spawn(bash, ["-c", cmd], { stdio: ["ignore","pipe","pipe"] })`
+// and reads stdout/stderr off the returned ChildProcess.
 // ──────────────────────────────────────────────────────────────────────────
+import { EventEmitter } from "node:events";
 let _mockStdout = "mock-default";
-const mockExecaCommand = vi.fn((...args: any[]) => {
-  // callback-style: execFile(file, args, callback)
-  const cb = args[args.length - 1];
-  if (typeof cb === "function") {
-    cb(null, _mockStdout, "");
-  }
+const mockExecaCommand = vi.fn((..._args: any[]) => {
+  const child: any = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  // Emit asynchronously so listeners attach first (matches real spawn).
+  setImmediate(() => {
+    child.stdout.emit("data", Buffer.from(_mockStdout));
+    child.emit("exit", 0, null);
+  });
+  return child;
 });
-
-// Node's util.promisify checks for [Symbol.for('nodejs.util.promisify.custom')]
-// on the original execFile to return {stdout, stderr}. Our vi.fn() mock doesn't
-// have that symbol, so promisify would only return the first callback result arg.
-// We attach a custom promisify that delegates to the mock for call tracking.
-import { promisify } from "node:util";
-(mockExecaCommand as any)[promisify.custom] = (...args: any[]) => {
-  // Record the call on the vi.fn() for expect().toHaveBeenCalled()
-  mockExecaCommand(...args, () => {});
-  return Promise.resolve({ stdout: _mockStdout, stderr: "" });
-};
 
 /** Set the stdout value returned by the mock. */
 function setMockStdout(value: string) {
@@ -52,7 +45,7 @@ function setMockStdout(value: string) {
 
 vi.mock("node:child_process", async (importOriginal) => {
   const orig = await importOriginal<typeof import("node:child_process")>();
-  return { ...orig, execFile: mockExecaCommand };
+  return { ...orig, spawn: mockExecaCommand };
 });
 
 // Mock node-forge's ensureCA to avoid file-system CA generation during proxy start.
