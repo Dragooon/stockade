@@ -58,7 +58,10 @@ export function checkCredentialScope(
 
 /**
  * Check if a token allows storing a credential under the given key.
- * Uses glob matching against the token's storeKeys patterns.
+ * Omitted/empty storeKeys = unrestricted (write any key). Non-empty = glob
+ * match against the patterns. The threat model for write is weaker than
+ * read — an agent supplying a value can't exfiltrate something it didn't
+ * already have — so the default is permissive.
  */
 export function checkStoreScope(
   token: string,
@@ -66,7 +69,7 @@ export function checkStoreScope(
 ): boolean {
   const entry = tokens.get(token);
   if (!entry || entry.expiresAt <= Date.now()) return false;
-  if (!entry.storeKeys?.length) return false;
+  if (!entry.storeKeys?.length) return true;
   return entry.storeKeys.some((pattern) => globMatch(pattern, key));
 }
 

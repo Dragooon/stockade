@@ -51,8 +51,8 @@ const config: ProxyConfig = {
   host: "127.0.0.1",
   provider: {
     read: "op read op://{key}",
-    write: "op item create --title {key} password={value}",
-    update: "op item edit {key} password={value}",
+    write: 'op item create --title {key} "password=$APW_STORE_VALUE"',
+    update: 'op item edit {key} "password=$APW_STORE_VALUE"',
     cache_ttl: 300,
   },
   policy: { default: "deny", rules: [] },
@@ -133,7 +133,7 @@ describe("gateway API", () => {
     );
   });
 
-  it("POST /gateway/store/:key — denies out-of-scope key", async () => {
+  it("POST /gateway/store/:key — denies key outside an explicit storeKeys pattern", async () => {
     const app = new Hono();
     const { validateToken, checkStoreScope } = await import("../src/gateway/tokens.js");
 
@@ -155,8 +155,8 @@ describe("gateway API", () => {
       return c.json({ ok: true });
     });
 
-    // Issue a token WITHOUT store scope
-    const restricted = issueToken("researcher", ["key1"], undefined, 3600);
+    // Token with an explicit, non-matching storeKeys pattern — out of scope.
+    const restricted = issueToken("researcher", ["key1"], ["AgentVault/Allowed/*"], 3600);
 
     const res = await app.request("/gateway/store/AgentVault/Something", {
       method: "POST",
@@ -188,9 +188,10 @@ describe("gateway API", () => {
     app.get("/gateway/list", async (c) => {
       // @ts-expect-error — set above
       const tokenData = c.get("tokenData");
+      const storeKeys = tokenData.storeKeys?.length ? tokenData.storeKeys : ["*"];
       return c.json({
         keys: tokenData.credentials,
-        storeKeys: tokenData.storeKeys ?? [],
+        storeKeys,
       });
     });
 
@@ -207,7 +208,7 @@ describe("gateway API", () => {
     expect(json.values).toBeUndefined();
   });
 
-  it("GET /gateway/list — empty arrays for token with no scope", async () => {
+  it("GET /gateway/list — token with no storeKeys advertises ['*'] (unrestricted)", async () => {
     const app = new Hono();
     const { validateToken } = await import("../src/gateway/tokens.js");
 
@@ -223,21 +224,22 @@ describe("gateway API", () => {
     app.get("/gateway/list", async (c) => {
       // @ts-expect-error — set above
       const tokenData = c.get("tokenData");
+      const storeKeys = tokenData.storeKeys?.length ? tokenData.storeKeys : ["*"];
       return c.json({
         keys: tokenData.credentials,
-        storeKeys: tokenData.storeKeys ?? [],
+        storeKeys,
       });
     });
 
-    const restricted = issueToken("blank", [], undefined, 3600);
+    const unrestricted = issueToken("blank", [], undefined, 3600);
     const res = await app.request("/gateway/list", {
-      headers: { Authorization: `Bearer ${restricted.token}` },
+      headers: { Authorization: `Bearer ${unrestricted.token}` },
     });
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.keys).toEqual([]);
-    expect(json.storeKeys).toEqual([]);
+    expect(json.storeKeys).toEqual(["*"]);
   });
 
   it("rejects request with no auth header", async () => {

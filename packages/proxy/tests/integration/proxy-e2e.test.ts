@@ -135,8 +135,8 @@ function buildTestConfig(overrides?: Partial<ProxyConfig>): ProxyConfig {
     host: "127.0.0.1",
     provider: {
       read: "echo {key}",
-      write: "echo write {key} {value}",
-      update: "echo update {key} {value}",
+      write: 'echo write {key} "$APW_STORE_VALUE"',
+      update: 'echo update {key} "$APW_STORE_VALUE"',
       cache_ttl: 0,
     },
     policy: {
@@ -713,9 +713,10 @@ describe("Gateway API — integration via Hono app.request()", () => {
     expect(json.error).toContain("scope denied");
   });
 
-  it("denies store when token has no storeKeys at all (403)", async () => {
-    // Issue a token with no store scope
-    const noStore = issueToken("readonly-agent", ["AgentVault/Read/key"], undefined, 3600);
+  it("allows store when token has no storeKeys (unrestricted by default)", async () => {
+    // Omitted storeKeys = unrestricted. Write is permissive by default because
+    // an agent supplying a value can't exfiltrate something it didn't have.
+    const noStore = issueToken("agent", ["AgentVault/Read/key"], undefined, 3600);
 
     const app = buildGatewayApp();
     const res = await app.request("/gateway/store/AgentVault/Test/key", {
@@ -727,7 +728,7 @@ describe("Gateway API — integration via Hono app.request()", () => {
       body: JSON.stringify({ value: "secret" }),
     });
 
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
   });
 
   it("issues a token via POST /token", async () => {

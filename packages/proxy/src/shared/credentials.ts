@@ -54,6 +54,14 @@ function globMatch(pattern: string, value: string): boolean {
  * Store a credential via the provider's `update` command.
  * Falls back to `write` if update fails (key doesn't exist yet).
  * Invalidates the cache entry on success.
+ *
+ * The agent-supplied value is passed via the APW_STORE_VALUE env var rather
+ * than substituted into the command text, so a value containing shell metas
+ * (`;`, backticks, `$(...)`, etc.) cannot escape into command position.
+ * Templates reference it as `"$APW_STORE_VALUE"`.
+ *
+ * The key IS substituted as text — the gateway endpoint validates the key
+ * against a safe charset before reaching here.
  */
 export async function storeCredential(
   provider: Provider,
@@ -64,28 +72,22 @@ export async function storeCredential(
     throw new Error("Provider has no write or update command configured");
   }
 
-  if (provider.update) {
-    const updateCmd = provider.update
-      .replace(/\{key\}/g, key)
-      .replace(/\{value\}/g, value);
+  const extraEnv = { APW_STORE_VALUE: value };
 
+  if (provider.update) {
+    const updateCmd = provider.update.replace(/\{key\}/g, key);
     try {
-      await execProviderCommand(updateCmd, provider);
+      await execProviderCommand(updateCmd, provider, extraEnv);
     } catch {
       if (!provider.write) throw new Error("Provider update failed and no write command configured");
-      const writeCmd = provider.write
-        .replace(/\{key\}/g, key)
-        .replace(/\{value\}/g, value);
-      await execProviderCommand(writeCmd, provider);
+      const writeCmd = provider.write.replace(/\{key\}/g, key);
+      await execProviderCommand(writeCmd, provider, extraEnv);
     }
   } else {
-    const writeCmd = provider.write!
-      .replace(/\{key\}/g, key)
-      .replace(/\{value\}/g, value);
-    await execProviderCommand(writeCmd, provider);
+    const writeCmd = provider.write!.replace(/\{key\}/g, key);
+    await execProviderCommand(writeCmd, provider, extraEnv);
   }
 
-  // Invalidate cache
   cache.delete(key);
 }
 
@@ -163,29 +165,35 @@ async function execShell(cmd: string, env?: NodeJS.ProcessEnv): Promise<string> 
  * is obtained once and injected into every child process.  On auth-like errors,
  * the session is refreshed and the command retried once.
  */
-async function execProviderCommand(cmd: string, provider: Provider): Promise<string> {
+async function execProviderCommand(
+  cmd: string,
+  provider: Provider,
+  extraEnv?: NodeJS.ProcessEnv
+): Promise<string> {
   const hasSignin = provider.signin && provider.session_env;
 
   let env: NodeJS.ProcessEnv | undefined;
-  if (hasSignin) {
-    try {
-      const token = await ensureSession(provider);
-      env = { ...process.env, [provider.session_env!]: token };
-    } catch (err) {
-      console.warn(`[credentials] signin failed, running command without session: ${err instanceof Error ? err.message : err}`);
+  if (hasSignin || extraEnv) {
+    env = { ...process.env, ...extraEnv };
+    if (hasSignin) {
+      try {
+        const token = await ensureSession(provider);
+        env[provider.session_env!] = token;
+      } catch (err) {
+        console.warn(`[credentials] signin failed, running command without session: ${err instanceof Error ? err.message : err}`);
+      }
     }
   }
 
   try {
     return await execShell(cmd, env);
   } catch (err: any) {
-    // On auth errors, refresh session and retry once
     if (hasSignin) {
       const msg = err?.stderr ?? err?.message ?? "";
       if (/not.*sign|session.*expir|401|auth/i.test(msg)) {
         invalidateSession();
         const token = await ensureSession(provider);
-        const retryEnv = { ...process.env, [provider.session_env!]: token };
+        const retryEnv = { ...process.env, ...extraEnv, [provider.session_env!]: token };
         return execShell(cmd, retryEnv);
       }
     }

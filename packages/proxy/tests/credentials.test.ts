@@ -69,8 +69,9 @@ const {
 
 const provider: Provider = {
   read: "op read op://{key}",
-  write: "op item create --vault AgentVault --title {key} --category password password={value}",
-  update: "op item edit {key} --vault AgentVault password={value}",
+  // Value passed via APW_STORE_VALUE env var, not inlined into the command.
+  write: 'op item create --vault AgentVault --title {key} --category password "password=$APW_STORE_VALUE"',
+  update: 'op item edit {key} --vault AgentVault "password=$APW_STORE_VALUE"',
   cache_ttl: 60,
   overrides: [],
 };
@@ -220,15 +221,19 @@ describe("storeCredential", () => {
     invalidateCache();
   });
 
-  it("executes update command first", async () => {
+  it("executes update command first with value passed via env var", async () => {
     mockResolve("");
 
     await storeCredential(provider, "AgentVault/New/key", "new-secret");
 
     expect(mockExecFile).toHaveBeenCalled();
+    // {key} is substituted; the value is NOT inlined — it stays as literal
+    // $APW_STORE_VALUE in the command and is passed via env.
     expect(getLastCommand()).toBe(
-      "op item edit AgentVault/New/key --vault AgentVault password=new-secret"
+      'op item edit AgentVault/New/key --vault AgentVault "password=$APW_STORE_VALUE"'
     );
+    const lastCallEnv = mockExecFile.mock.calls.at(-1)?.[2]?.env;
+    expect(lastCallEnv?.APW_STORE_VALUE).toBe("new-secret");
   });
 
   it("falls back to write if update fails", async () => {
@@ -238,10 +243,27 @@ describe("storeCredential", () => {
     await storeCredential(provider, "AgentVault/New/key2", "secret2");
 
     expect(mockExecFile).toHaveBeenCalledTimes(2);
-    // Second call should be the write command
     expect(getCommandAt(1)).toBe(
-      "op item create --vault AgentVault --title AgentVault/New/key2 --category password password=secret2"
+      'op item create --vault AgentVault --title AgentVault/New/key2 --category password "password=$APW_STORE_VALUE"'
     );
+    const writeCallEnv = mockExecFile.mock.calls[1]?.[2]?.env;
+    expect(writeCallEnv?.APW_STORE_VALUE).toBe("secret2");
+  });
+
+  it("does not interpret shell metacharacters in value", async () => {
+    // The injection-test value: if the value were inlined into the command,
+    // these chars would break the shell. With env-var passing, they're inert.
+    mockResolve("");
+    const evilValue = '"; rm -rf $HOME; echo "';
+
+    await storeCredential(provider, "AgentVault/Evil/key", evilValue);
+
+    // Command text contains no part of the value — only $APW_STORE_VALUE.
+    const cmd = getLastCommand();
+    expect(cmd).not.toContain("rm -rf");
+    expect(cmd).toContain("$APW_STORE_VALUE");
+    const env = mockExecFile.mock.calls.at(-1)?.[2]?.env;
+    expect(env?.APW_STORE_VALUE).toBe(evilValue);
   });
 
   it("invalidates cache after store", async () => {

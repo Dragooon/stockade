@@ -11,8 +11,8 @@ const validConfig = {
     host: "127.0.0.1",
     provider: {
       read: "op read op://{key}",
-      write: "op item create --vault AgentVault --title {key} --category password password={value}",
-      update: "op item edit {key} --vault AgentVault password={value}",
+      write: 'op item create --vault AgentVault --title {key} --category password "password=$APW_STORE_VALUE"',
+      update: 'op item edit {key} --vault AgentVault "password=$APW_STORE_VALUE"',
       cache_ttl: 300,
     },
     policy: {
@@ -124,8 +124,8 @@ proxy:
   host: "127.0.0.1"
   provider:
     read: "op read op://{key}"
-    write: "op item create --title {key} password={value}"
-    update: "op item edit {key} password={value}"
+    write: 'op item create --title {key} "password=$APW_STORE_VALUE"'
+    update: 'op item edit {key} "password=$APW_STORE_VALUE"'
     cache_ttl: 300
   policy:
     default: deny
@@ -196,8 +196,8 @@ describe("loadProxyConfig", () => {
 proxy:
   provider:
     read: "op read op://{key}"
-    write: "op item create --title {key} password={value}"
-    update: "op item edit {key} password={value}"
+    write: 'op item create --title {key} "password=$APW_STORE_VALUE"'
+    update: 'op item edit {key} "password=$APW_STORE_VALUE"'
   policy:
     default: allow
     rules: []

@@ -673,14 +673,14 @@ describe("Gateway API (real HTTP)", () => {
     expect(json.error).toContain("scope denied");
   });
 
-  it("rejects store when token has no storeKeys (403)", async () => {
+  it("allows store when token has no storeKeys (unrestricted by default)", async () => {
     const tokenRes = await fetch(`${gatewayUrl}/token`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        agentId: "readonly-agent",
+        agentId: "agent",
         credentials: ["AgentVault/Read/key"],
-        // no storeKeys
+        // no storeKeys → unrestricted
       }),
     });
     const { token } = (await tokenRes.json()) as any;
@@ -697,7 +697,7 @@ describe("Gateway API (real HTTP)", () => {
       },
     );
 
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
   });
 
   it("rejects POST /token without agentId (400)", async () => {
@@ -834,8 +834,8 @@ proxy:
   host: "127.0.0.1"
   provider:
     read: "echo {key}"
-    write: "echo write {key} {value}"
-    update: "echo update {key} {value}"
+    write: 'echo write {key} "$APW_STORE_VALUE"'
+    update: 'echo update {key} "$APW_STORE_VALUE"'
     cache_ttl: 60
   policy:
     default: deny

@@ -53,9 +53,12 @@ export function startGateway(getConfig: () => ProxyConfig) {
   // available without revealing secrets or leaking the global catalog.
   app.get("/gateway/list", async (c) => {
     const tokenData = c.get("tokenData");
+    // Omitted/empty storeKeys = unrestricted; advertise as ["*"] so callers
+    // can distinguish "no writes allowed" (impossible now) from "any key".
+    const storeKeys = tokenData.storeKeys?.length ? tokenData.storeKeys : ["*"];
     return c.json({
       keys: tokenData.credentials,
-      storeKeys: tokenData.storeKeys ?? [],
+      storeKeys,
     });
   });
 
@@ -101,12 +104,22 @@ export function startGateway(getConfig: () => ProxyConfig) {
   });
 
   // ── POST /gateway/store/* — Store a credential ──────────
-  // Key is a multi-segment path (e.g., AgentVault/GitHub/token)
+  // Key is a multi-segment path (e.g., AgentVault/GitHub/token). Restricted
+  // to a safe charset because the key is substituted into a shell command
+  // template (`provider.write` / `provider.update`).
   app.post("/gateway/store/*", async (c) => {
-    const key = new URL(c.req.url).pathname.replace(/^\/gateway\/store\//, "");
+    const key = decodeURIComponent(
+      new URL(c.req.url).pathname.replace(/^\/gateway\/store\//, "")
+    );
     const rawToken = c.get("rawToken") as string;
 
-    // Check store scope
+    if (!/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(key)) {
+      console.log(`[gateway] store rejected: key="${key}" — invalid characters`);
+      return c.json({
+        error: "Key must contain only [A-Za-z0-9._-] segments separated by /",
+      }, 400);
+    }
+
     if (!checkStoreScope(rawToken, key)) {
       console.log(`[gateway] store denied: key="${key}"`);
       return c.json({ error: "Store scope denied for this key" }, 403);

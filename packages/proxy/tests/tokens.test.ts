@@ -61,9 +61,15 @@ describe("gateway tokens", () => {
     expect(checkStoreScope(issued.token, "AgentVault/SSH/deploy-key")).toBe(true);
   });
 
-  it("checks store scope — denied without store keys", () => {
+  it("checks store scope — unrestricted when storeKeys is undefined", () => {
     const issued = issueToken("researcher", ["key1"], undefined, 3600);
-    expect(checkStoreScope(issued.token, "AgentVault/anything")).toBe(false);
+    expect(checkStoreScope(issued.token, "AgentVault/anything")).toBe(true);
+    expect(checkStoreScope(issued.token, "completely/different/key")).toBe(true);
+  });
+
+  it("checks store scope — unrestricted when storeKeys is empty", () => {
+    const issued = issueToken("researcher", ["key1"], [], 3600);
+    expect(checkStoreScope(issued.token, "any/key")).toBe(true);
   });
 
   it("checks store scope — denied with non-matching pattern", () => {

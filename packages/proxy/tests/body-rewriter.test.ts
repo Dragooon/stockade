@@ -12,8 +12,8 @@ const { rewriteBody } = await import("../src/http/body-rewriter.js");
 
 const provider = {
   read: "cat secrets/{key}",
-  write: "echo '{value}' > secrets/{key}",
-  update: "echo '{value}' > secrets/{key}",
+  write: 'sh -c \'printf %s "$APW_STORE_VALUE" > "secrets/{key}"\'',
+  update: 'sh -c \'printf %s "$APW_STORE_VALUE" > "secrets/{key}"\'',
   cache_ttl: 300,
 };
 
