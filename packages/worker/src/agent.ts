@@ -63,6 +63,22 @@ function httpPost(url: string, body: string, timeoutMs: number): Promise<{ statu
 const DEFAULT_MODEL = "sonnet";
 const DEFAULT_MAX_TURNS = 20;
 
+/**
+ * Browse worker drives a single Chrome profile + chrome-devtools-mcp instance.
+ * Concurrent sessions race over the profile lock and the per-query
+ * cleanupBrowseChrome() actively kills each other's Chrome. Serialize
+ * runs in this process so only one browse query() executes at a time.
+ */
+let browseMutex: Promise<void> = Promise.resolve();
+async function acquireBrowseSlot(): Promise<() => void> {
+  let release!: () => void;
+  const next = new Promise<void>((r) => { release = r; });
+  const prev = browseMutex;
+  browseMutex = next;
+  await prev;
+  return release;
+}
+
 const STALE_SESSION_PATTERNS = [
   "No conversation found",
   "session not found",
@@ -395,7 +411,12 @@ schedule_type options:
   // because Puppeteer-on-Windows doesn't propagate stdio close to Chrome.
   // Sweep before and after every query — pre-clears any orphan from a prior
   // session, post-tears-down whatever this session leaked.
+  //
+  // Concurrent browse sessions in the same worker process race over the
+  // shared Chrome profile and the per-query cleanup kills the competitor's
+  // Chrome mid-query. Serialize via mutex.
   const isBrowse = process.env.AGENT_ID === "browse";
+  const releaseBrowseSlot = isBrowse ? await acquireBrowseSlot() : null;
   if (isBrowse) cleanupBrowseChrome();
 
   try {
@@ -459,13 +480,16 @@ schedule_type options:
       console.log(`[worker] Stale session ${request.sessionId} — signalling orchestrator to retry`);
       emit({ type: "stale_session" });
       if (isBrowse) cleanupBrowseChrome();
+      releaseBrowseSlot?.();
       return;
     }
     if (isBrowse) cleanupBrowseChrome();
+    releaseBrowseSlot?.();
     throw err;
   }
 
   if (isBrowse) cleanupBrowseChrome();
+  releaseBrowseSlot?.();
 
   emit({ type: "result", text: resultText, sessionId: sdkSessionId, stopReason, files: pendingFiles });
 }
