@@ -15,6 +15,14 @@ export interface WorkerManager {
   ensure(agentId: string, agentConfig: AgentConfig, scope: string): Promise<string>;
 
   /**
+   * Look up an already-running worker for an agent without spawning anything.
+   * Returns the worker's base URL if one is alive, otherwise undefined.
+   * Used by inline sub-agent dispatch to reuse the parent's worker container
+   * instead of provisioning a fresh one.
+   */
+  lookupExisting(agentId: string): string | undefined;
+
+  /**
    * Restart the worker for a given agent (tear down and re-provision on next request).
    */
   restart(agentId: string, agentConfig: AgentConfig): Promise<void>;

@@ -84,6 +84,7 @@ export class OrchestratorBridge {
       noSession: (meta["noSession"] as boolean) ?? false,
       agentId: meta["agentId"] as string | undefined,
       parentCwd: meta["parentCwd"] as string | undefined,
+      parentAgentId: meta["parentAgentId"] as string | undefined,
       forceParentCwd: meta["forceParentCwd"] as boolean | undefined,
     };
 

@@ -169,6 +169,11 @@ const workerManager: WorkerManager = {
     }
     return hostWorkerManager.ensure(agentId, agentConfig, scope);
   },
+  lookupExisting(agentId) {
+    // Check both managers — parent could be host or sandboxed.
+    return hostWorkerManager.lookupExisting(agentId)
+      ?? containerManager?.lookupExisting(agentId);
+  },
   async restart(agentId, agentConfig) {
     if (agentConfig.sandboxed && containerManager) {
       return containerManager.restart(agentId, agentConfig);

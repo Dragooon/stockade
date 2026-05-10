@@ -74,6 +74,8 @@ export interface SessionMeta {
   agentId?: string;
   /** Parent agent's cwd (inline sub-agents share workspace). */
   parentCwd?: string;
+  /** Parent agent's id (inline sub-agents reuse parent's running worker container). */
+  parentAgentId?: string;
   /** Force parent cwd even for self-spawns (loads settings normally). */
   forceParentCwd?: boolean;
 }
@@ -232,14 +234,34 @@ export class SessionManager {
       const hostAgentCwd = isInline
         ? meta.parentCwd!
         : resolve(deps.agentsDir, agentId);
-      // sdkCwd: platform root (avoids SDK Mjz() block on .claude/skills/)
-      const sdkCwd = agentConfig.sandboxed ? "/workspace" : deps.platformRoot;
-      const sdkAddDirs = agentConfig.sandboxed ? [] : [hostAgentCwd];
-      // agentCwd as seen inside worker (for permission rules and callbacks)
-      const workerAgentCwd = agentConfig.sandboxed ? "/workspace" : hostAgentCwd;
 
-      // ── Ensure worker is running ──
-      const workerUrl = await deps.workerManager.ensure(agentId, agentConfig, scope);
+      // Inline children run as a fresh query() inside the parent's already-running
+      // worker container. Runtime characteristics (sandboxed, cwd, mounts, env)
+      // follow the parent — only model/system prompt/permissions come from the
+      // child's own config. If the parent worker isn't alive, fall back to a
+      // standalone child worker via ensure() below.
+      const parentWorkerUrl = isInline && meta.parentAgentId
+        ? deps.workerManager.lookupExisting(meta.parentAgentId)
+        : undefined;
+      const parentConfig = parentWorkerUrl && meta.parentAgentId
+        ? deps.allAgents.agents[meta.parentAgentId]
+        : undefined;
+      const effectiveSandboxed = parentConfig?.sandboxed ?? agentConfig.sandboxed ?? false;
+
+      // sdkCwd: platform root (avoids SDK Mjz() block on .claude/skills/)
+      const sdkCwd = effectiveSandboxed ? "/workspace" : deps.platformRoot;
+      const sdkAddDirs = effectiveSandboxed ? [] : [hostAgentCwd];
+      // agentCwd as seen inside worker (for permission rules and callbacks)
+      const workerAgentCwd = effectiveSandboxed ? "/workspace" : hostAgentCwd;
+
+      // ── Ensure worker is running (or reuse parent's for inline children) ──
+      const workerUrl = parentWorkerUrl
+        ?? await deps.workerManager.ensure(agentId, agentConfig, scope);
+      if (parentWorkerUrl) {
+        sessionLog(
+          `[session] inline ${agentId} → reusing parent ${meta.parentAgentId} worker ${parentWorkerUrl}`,
+        );
+      }
 
       // ── Create callback session ──
       const callbackToken = randomUUID();
@@ -357,7 +379,10 @@ export class SessionManager {
       // ── POST /sessions to worker ──
       // In Redis mode the worker subscribes to stockade:msg:{scope} for messages
       // and publishes events to stockade:evt:{scope}. No SSE subscription needed.
-      const orchestratorUrl = agentConfig.sandboxed
+      // The callback URL must be reachable from inside the worker. Inline children
+      // run in the parent's container, so we follow the parent's container-vs-host
+      // setting (effectiveSandboxed) — not the child's standalone config.
+      const orchestratorUrl = effectiveSandboxed
         ? deps.orchestratorCallbackUrl.replace("localhost", "host.docker.internal")
         : deps.orchestratorCallbackUrl;
 
@@ -414,7 +439,8 @@ export class SessionManager {
         workerUrl,
         workerSessionId,
         agentCwd: hostAgentCwd,
-        sandboxed: agentConfig.sandboxed ?? false,
+        // Inline children inherit the parent's container/host setting.
+        sandboxed: effectiveSandboxed,
         proxyToken,
         sdkSessionId: sdkSessionId ?? null,
         idleTimer: this.startIdleTimer(scope),

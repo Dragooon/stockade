@@ -82,6 +82,9 @@ export async function handleAgentStart(
     askApproval: parentCtx.askApproval,
     agentId,
     parentCwd: inline ? parentCtx.agentCwd : undefined,
+    // Inline children reuse the parent's worker container — pass parent agentId
+    // so the dispatch path can look up parent's running worker URL.
+    parentAgentId: inline ? parentCtx.agentId : undefined,
     forceParentCwd: isSelfSpawn,
   };
 

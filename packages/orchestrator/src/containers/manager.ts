@@ -528,6 +528,17 @@ export class ContainerManager implements WorkerManager {
     }
   }
 
+  /**
+   * Look up an already-running container's worker URL for an agentId.
+   * Only matches shared-isolation containers (key === agentId). Session-isolated
+   * parents would need scope context that callers don't have at lookup time;
+   * inline children of session-isolated parents are unsupported for now.
+   */
+  lookupExisting(agentId: string): string | undefined {
+    const existing = this.containers.get(agentId);
+    return existing?.url;
+  }
+
   private resolveKey(
     agentId: string,
     agentConfig: AgentConfig,

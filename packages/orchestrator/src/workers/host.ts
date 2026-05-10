@@ -66,6 +66,11 @@ export class HostWorkerManager implements WorkerManager {
     }
   }
 
+  lookupExisting(agentId: string): string | undefined {
+    const existing = this.workers.get(agentId);
+    return existing?.alive ? existing.url : undefined;
+  }
+
   async restart(agentId: string, _agentConfig: AgentConfig): Promise<void> {
     await this.stopWorker(agentId);
     console.log(`[host-workers] ${agentId} stopped — will re-start on next request`);
