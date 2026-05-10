@@ -177,6 +177,18 @@ const TOOL_GROUPS: Record<string, string[]> = {
 };
 
 /**
+ * Tool name aliases: ergonomic permission rule names that resolve to the
+ * actual tool exposed to the model.
+ *
+ * `Bash:host` is the natural way to spell "host-side bash" in a config rule
+ * (`allow:Bash:host(chrome.exe *)`). The underlying tool the SDK sees is
+ * `mcp__host__bash` — a stockade MCP tool that proxies to a host executor.
+ */
+const TOOL_ALIASES: Record<string, string> = {
+  "Bash:host": "mcp__host__bash",
+};
+
+/**
  * Extract the target file path from a tool invocation's input.
  * Returns null for non-file tools or when no path is present.
  */
@@ -408,12 +420,13 @@ export async function ruleMatches(
   ctx: PermissionContext,
 ): Promise<boolean> {
   // Tool name check — "*" matches all tools, tool groups expand matches,
-  // and a trailing "*" enables prefix matching (e.g. "mcp__chrome__*").
+  // a trailing "*" enables prefix matching (e.g. "mcp__chrome__*"), and
+  // TOOL_ALIASES lets ergonomic rule names resolve to the real tool.
   if (rule.tool !== "*" && rule.tool !== tool) {
     if (rule.tool.endsWith("*")) {
       const prefix = rule.tool.slice(0, -1);
       if (!tool.startsWith(prefix)) return false;
-    } else {
+    } else if (TOOL_ALIASES[rule.tool] !== tool) {
       const group = TOOL_GROUPS[rule.tool];
       if (!group || !group.includes(tool)) return false;
     }
@@ -431,8 +444,8 @@ export async function ruleMatches(
     return matchGlob(posixInput, posixPattern);
   }
 
-  // ── Bash: command string matching (text mode — * matches everything) ──
-  if (tool === "Bash") {
+  // ── Bash and host-bash: command string matching (text mode — * matches everything) ──
+  if (tool === "Bash" || tool === "mcp__host__bash") {
     const command = String(input.command ?? "");
     return matchGlob(command, rule.pattern, false);
   }
@@ -479,8 +492,8 @@ export async function evaluateAgentPermissions(
 
   const parsed = rules.map(parseRule);
 
-  // For Bash: decompose compound commands and evaluate each segment independently
-  if (tool === "Bash") {
+  // For Bash (and host-bash): decompose compound commands and evaluate each segment independently
+  if (tool === "Bash" || tool === "mcp__host__bash") {
     const command = String(input.command ?? "");
     const segments = decomposeCommand(command);
 
@@ -523,8 +536,9 @@ async function _evaluateRules(
 export function formatToolApproval(tool: string, input: Record<string, unknown>): string {
   const lines = [`Tool: ${tool}`];
 
-  if (tool === "Bash" && input.command) {
-    lines.push(`Command: ${input.command}`);
+  if ((tool === "Bash" || tool === "mcp__host__bash") && input.command) {
+    const label = tool === "mcp__host__bash" ? "Host command" : "Command";
+    lines.push(`${label}: ${input.command}`);
   } else if (input.file_path) {
     lines.push(`Path: ${input.file_path}`);
   } else if (input.path) {

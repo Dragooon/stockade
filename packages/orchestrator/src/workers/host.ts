@@ -6,9 +6,7 @@
  * A health monitor polls each worker every 30s and restarts it if it goes down.
  */
 
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { spawn, type ChildProcess } from "node:child_process";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -73,36 +71,6 @@ export class HostWorkerManager implements WorkerManager {
     console.log(`[host-workers] ${agentId} stopped — will re-start on next request`);
   }
 
-  /**
-   * Dispatch-boundary cleanup for the Madge Chrome profile. Defense-in-depth
-   * companion to the worker-side cleanup in `packages/worker/src/browse-cleanup.ts`
-   * — runs at browse-worker spawn/stop (rare) to catch crash-recovery cases the
-   * worker couldn't clean itself. Keep this in sync with the worker version.
-   */
-  private cleanupBrowseChrome(): void {
-    try {
-      if (process.platform === "win32") {
-        const ps =
-          "Get-WmiObject Win32_Process -Filter \"Name='chrome.exe'\" | " +
-          "Where-Object {$_.CommandLine -like '*--user-data-dir=*madge*'} | " +
-          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; " +
-          "Get-WmiObject Win32_Process -Filter \"Name='node.exe'\" | " +
-          "Where-Object {$_.CommandLine -like '*chrome-devtools-mcp*'} | " +
-          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
-        spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], {
-          stdio: "ignore",
-          timeout: 8_000,
-        });
-      } else {
-        spawnSync("pkill", ["-f", "--user-data-dir=.*madge"], { stdio: "ignore", timeout: 5_000 });
-        spawnSync("pkill", ["-f", "chrome-devtools-mcp"], { stdio: "ignore", timeout: 5_000 });
-      }
-      rmSync(join(homedir(), ".agent-browser", "profiles", "madge", "lockfile"), { force: true });
-    } catch {
-      // best-effort
-    }
-  }
-
   async shutdownAll(): Promise<void> {
     if (this.healthTimer) {
       clearInterval(this.healthTimer);
@@ -124,13 +92,6 @@ export class HostWorkerManager implements WorkerManager {
 
   private async startWorker(agentId: string, agentConfig: AgentConfig): Promise<string> {
     const port = this.portAllocator.allocate();
-
-    // browse parents an agent-browser daemon + Chrome. If a previous worker died
-    // without taking them down, the old Chrome holds the profile lock and the new
-    // session ends up in a stale or duplicate window. Sweep before spawning.
-    if (agentId === "browse") {
-      this.cleanupBrowseChrome();
-    }
 
     const env = {
       ...process.env,
@@ -211,10 +172,6 @@ export class HostWorkerManager implements WorkerManager {
       });
     } catch {
       // Best-effort
-    }
-
-    if (agentId === "browse") {
-      this.cleanupBrowseChrome();
     }
   }
 

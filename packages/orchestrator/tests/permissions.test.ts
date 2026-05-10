@@ -527,6 +527,35 @@ describe("ruleMatches", () => {
     expect(await ruleMatches(rule, "Bash", { command: "rm -rf /" }, ctx)).toBe(false);
   });
 
+  it("Bash:host alias matches mcp__host__bash invocations", async () => {
+    const rule: AgentPermissionRule = {
+      action: "allow",
+      tool: "Bash:host",
+      pattern: "chrome.exe *",
+    };
+    expect(
+      await ruleMatches(rule, "mcp__host__bash", { command: "chrome.exe --remote-debugging-port=9222" }, ctx),
+    ).toBe(true);
+    expect(
+      await ruleMatches(rule, "mcp__host__bash", { command: "tasklist /fi name=foo" }, ctx),
+    ).toBe(false);
+    // Bash:host rules must NOT match the in-container Bash tool
+    expect(
+      await ruleMatches(rule, "Bash", { command: "chrome.exe --remote-debugging-port=9222" }, ctx),
+    ).toBe(false);
+  });
+
+  it("plain Bash rules do not match host-bash invocations", async () => {
+    const rule: AgentPermissionRule = {
+      action: "allow",
+      tool: "Bash",
+      pattern: "chrome.exe *",
+    };
+    expect(
+      await ruleMatches(rule, "mcp__host__bash", { command: "chrome.exe --foo" }, ctx),
+    ).toBe(false);
+  });
+
   it("pattern on non-file non-Bash tool returns false", async () => {
     const rule: AgentPermissionRule = {
       action: "deny",

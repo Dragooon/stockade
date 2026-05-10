@@ -15,8 +15,6 @@ import { request as httpsRequest } from "node:https";
 import { basename } from "node:path";
 import type { ConversationChannel } from "./channel.js";
 import type { WorkerSessionRequest, WorkerEvent } from "./types.js";
-import { cleanupBrowseChrome } from "./browse-cleanup.js";
-
 /**
  * HTTP request using node:http/https directly — bypasses undici/fetch and any
  * proxy configuration that may interfere with internal callback traffic.
@@ -62,22 +60,6 @@ function httpPost(url: string, body: string, timeoutMs: number): Promise<{ statu
 
 const DEFAULT_MODEL = "sonnet";
 const DEFAULT_MAX_TURNS = 20;
-
-/**
- * Browse worker drives a single Chrome profile + chrome-devtools-mcp instance.
- * Concurrent sessions race over the profile lock and the per-query
- * cleanupBrowseChrome() actively kills each other's Chrome. Serialize
- * runs in this process so only one browse query() executes at a time.
- */
-let browseMutex: Promise<void> = Promise.resolve();
-async function acquireBrowseSlot(): Promise<() => void> {
-  let release!: () => void;
-  const next = new Promise<void>((r) => { release = r; });
-  const prev = browseMutex;
-  browseMutex = next;
-  await prev;
-  return release;
-}
 
 const STALE_SESSION_PATTERNS = [
   "No conversation found",
@@ -228,6 +210,75 @@ with full memory and settings, ideal for divide-and-conquer reasoning tasks.`,
     tools: [agentStartTool, agentStopTool, agentMessageTool, sendFileTool],
   });
 
+  // ── Host-bash MCP server: run a whitelisted command on the Docker host ──
+  // The orchestrator re-checks the agent's Bash:host(<glob>) permissions before
+  // executing — this tool only "succeeds" when the rule allows the command.
+  const hostBashTool = tool(
+    "bash",
+    `Run a single shell command on the host machine (outside this container).
+
+Use this for operations that require host-side state: launching/killing host
+processes (e.g. Chrome with remote debugging), Docker, hardware control, or
+anything that must touch the user's actual filesystem outside /workspace.
+
+Each invocation is checked against this agent's Bash:host(...) permission
+allowlist. Anything not on the list is refused.
+
+Output is capped at 1 MB per stream. Default timeout 120s, override with
+timeoutMs (max enforced by the orchestrator).`,
+    {
+      command: z.string().describe("The shell command to run on the host"),
+      cwd: z.string().optional().describe("Working directory on the host (defaults to orchestrator cwd)"),
+      timeoutMs: z.number().optional().describe("Timeout in milliseconds (default 120000)"),
+    },
+    async (args) => {
+      try {
+        // Long timeout: long-running host commands (e.g. pnpm install) need headroom.
+        // Cap at 15min on the worker side; the executor itself enforces its own cap.
+        const httpTimeout = Math.max((args.timeoutMs ?? 120_000) + 5_000, 30_000);
+        const res = await httpCallback(
+          "POST",
+          `${cbBase}/host-bash`,
+          JSON.stringify(args),
+          Math.min(httpTimeout, 15 * 60_000),
+        );
+        if (res.status === 403) {
+          const data = JSON.parse(res.text) as { error?: string; reason?: string };
+          return { content: [{ type: "text" as const, text: `Host command denied: ${data.reason ?? data.error ?? "policy"}` }] };
+        }
+        if (res.status < 200 || res.status >= 300) {
+          return { content: [{ type: "text" as const, text: `Host bash error (${res.status}): ${res.text}` }] };
+        }
+        const data = JSON.parse(res.text) as {
+          stdout: string;
+          stderr: string;
+          exitCode: number;
+          timedOut: boolean;
+          truncated: boolean;
+        };
+        const parts: string[] = [];
+        if (data.stdout) parts.push(data.stdout.trimEnd());
+        if (data.stderr) parts.push(`[stderr]\n${data.stderr.trimEnd()}`);
+        const flags: string[] = [];
+        if (data.exitCode !== 0) flags.push(`exit=${data.exitCode}`);
+        if (data.timedOut) flags.push("TIMED OUT");
+        if (data.truncated) flags.push("OUTPUT TRUNCATED");
+        if (flags.length) parts.push(`[${flags.join(" ")}]`);
+        const text = parts.join("\n\n") || "(no output)";
+        return { content: [{ type: "text" as const, text }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text" as const, text: `Host bash failed: ${msg}` }] };
+      }
+    },
+  );
+
+  const hostMcpServer = createSdkMcpServer({
+    name: "host",
+    version: "1.0.0",
+    tools: [hostBashTool],
+  });
+
   // ── Build scheduler MCP server: gives the agent mcp__scheduler__* ──
 
   const schedulerCreateTool = tool(
@@ -339,7 +390,7 @@ schedule_type options:
     allowDangerouslySkipPermissions: true,
     disallowedTools: request.disallowedTools,
     settings: request.sdkSettings,
-    mcpServers: { agent: agentMcpServer, scheduler: schedulerMcpServer },
+    mcpServers: { agent: agentMcpServer, scheduler: schedulerMcpServer, host: hostMcpServer },
   };
 
   if (request.tools) options.tools = request.tools;
@@ -407,18 +458,6 @@ schedule_type options:
   let prevUsage = { input: -1, output: -1, cacheRead: -1, cacheCreate: -1 };
   let emittedStarted = false;
 
-  // Browse worker leaks Chrome + chrome-devtools-mcp Node processes per query
-  // because Puppeteer-on-Windows doesn't propagate stdio close to Chrome.
-  // Sweep before and after every query — pre-clears any orphan from a prior
-  // session, post-tears-down whatever this session leaked.
-  //
-  // Concurrent browse sessions in the same worker process race over the
-  // shared Chrome profile and the per-query cleanup kills the competitor's
-  // Chrome mid-query. Serialize via mutex.
-  const isBrowse = process.env.AGENT_ID === "browse";
-  const releaseBrowseSlot = isBrowse ? await acquireBrowseSlot() : null;
-  if (isBrowse) cleanupBrowseChrome();
-
   try {
     for await (const message of query({ prompt: channel as any, options: options as any })) {
       const m = message as Record<string, unknown>;
@@ -479,17 +518,10 @@ schedule_type options:
     if (isStaleSessionError(err) && request.sessionId && !request.forceNewSession) {
       console.log(`[worker] Stale session ${request.sessionId} — signalling orchestrator to retry`);
       emit({ type: "stale_session" });
-      if (isBrowse) cleanupBrowseChrome();
-      releaseBrowseSlot?.();
       return;
     }
-    if (isBrowse) cleanupBrowseChrome();
-    releaseBrowseSlot?.();
     throw err;
   }
-
-  if (isBrowse) cleanupBrowseChrome();
-  releaseBrowseSlot?.();
 
   emit({ type: "result", text: resultText, sessionId: sdkSessionId, stopReason, files: pendingFiles });
 }

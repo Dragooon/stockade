@@ -2,6 +2,7 @@
   "name": "stockade",
   "version": "0.1.0-alpha",
   "private": true,
+  "packageManager": "pnpm@10.18.2",
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",

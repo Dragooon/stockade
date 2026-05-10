@@ -20,6 +20,7 @@ import { CronExpressionParser } from "cron-parser";
 import { getCallbackSession } from "./sessions.js";
 import { buildPreToolUseHook } from "../rbac.js";
 import { resolveEffectivePermissions } from "../gatekeeper.js";
+import { runHostCommand } from "../host-bash.js";
 import {
   handleAgentStart,
   handleAgentStop,
@@ -76,6 +77,51 @@ export function startCallbackServer(
     );
 
     const result = await hook({ tool_name, tool_input });
+    return c.json(result);
+  });
+
+  // ── Host bash: run a whitelisted command on the host machine ──
+  // The worker's mcp__host__bash MCP tool POSTs here. We re-evaluate the
+  // Bash:host permission rule (defense in depth — the PreToolUse hook in
+  // the SDK is the primary gate, but workers are across a trust boundary).
+  app.post("/cb/:token/host-bash", async (c) => {
+    const token = c.req.param("token");
+    const ctx = getCallbackSession(token);
+    if (!ctx) return c.json({ error: "Unknown callback token" }, 404);
+
+    const { command, cwd, timeoutMs } = await c.req.json() as {
+      command: string;
+      cwd?: string;
+      timeoutMs?: number;
+    };
+
+    if (!command || typeof command !== "string") {
+      return c.json({ error: "command is required" }, 400);
+    }
+
+    const agentRules = resolveEffectivePermissions(
+      ctx.agentConfig.permissions,
+      ctx.platformConfig.gatekeeper,
+    );
+    const hook = buildPreToolUseHook(
+      ctx.userId,
+      ctx.userPlatform,
+      ctx.platformConfig,
+      agentRules,
+      ctx.agentCwd,
+      ctx.platformRoot,
+      ctx.askApproval,
+      ctx.agentId,
+    );
+    const decision = await hook({ tool_name: "mcp__host__bash", tool_input: { command } });
+    if (decision.hookSpecificOutput.permissionDecision !== "allow") {
+      return c.json({
+        error: "Host command denied",
+        reason: decision.hookSpecificOutput.permissionDecisionReason ?? "policy",
+      }, 403);
+    }
+
+    const result = await runHostCommand(command, { cwd, timeoutMs });
     return c.json(result);
   });
 
