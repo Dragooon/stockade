@@ -326,11 +326,10 @@ export function buildSdkSettings(
     autoMemoryEnabled: memoryEnabled,
     ...(memoryEnabled && memoryDir ? { autoMemoryDirectory: memoryDir } : {}),
     autoDreamEnabled: !inline && (agentConfig.memory?.autoDream ?? false),
-    // Always load project-level settings (CLAUDE.md, .mcp.json, settings.json, skills)
-    // so inline children see the same workspace context as their parent — including
-    // .mcp.json which is how they get access to MCP servers like chrome-devtools-mcp.
-    // User-global settings remain excluded.
-    settingSources: ["project"],
+    // Inline agents share a parent's workspace but must not load that workspace's
+    // project config (CLAUDE.md, settings, skills) — they're programmatically defined.
+    // Non-inline agents load only project-level settings (no user-global bleed).
+    settingSources: inline ? [] : ["project"],
     permissions: {
       ...(skillAllow.length ? { allow: skillAllow } : {}),
       deny: [
