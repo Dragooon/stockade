@@ -258,14 +258,17 @@ export class OrchestratorBridge {
         // Stream mid-turn assistant text once per scope, regardless of how
         // many pending promises exist. Mid-turn injections produce multiple
         // pendings for the same scope, but they all target the same channel
-        // — calling onPartial on each would post the text N times.
+        // — calling onPartial on each would post the text N times. Mark only
+        // the chosen streamer as streamed; pendings without onPartial (e.g.
+        // scheduler dispatches) must still receive the final result text,
+        // and other coalesced pendings get suppressed by the result handler.
         let streamer: Pending | undefined;
         for (const p of this.pending.values()) {
           if (p.scope !== scope) continue;
-          if (!streamer && p.onPartial) streamer = p;
-          p.streamed = true;
+          if (p.onPartial) { streamer = p; break; }
         }
         if (streamer?.onPartial) {
+          streamer.streamed = true;
           try { streamer.onPartial(event.text); } catch (err) {
             console.error(`[bus] onPartial threw for ${scope.slice(0, 30)}:`, err);
           }
