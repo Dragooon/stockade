@@ -17,6 +17,7 @@ import type { WorkerSessionRequest, WorkerEvent } from "./types.js";
 import { runAgentSession } from "./agent.js";
 import type { WorkerRedisBridge } from "./redis-bridge.js";
 import type { BusWorkerEvent } from "./bus-types.js";
+import { trimDanglingToolUse } from "./transcript-cleanup.js";
 
 export type EventListener = (event: WorkerEvent) => void;
 
@@ -125,6 +126,19 @@ export class WorkerSession {
   ): Promise<void> {
     const scope = request.scope!;
     let currentSessionId: string | null = request.sessionId ?? null;
+
+    // If we're resuming an existing SDK session (worker restarted while a turn
+    // was in flight), the persisted JSONL may end with an unfinished tool_use.
+    // Strip the abandoned turn before the SDK reads the file — otherwise the
+    // model treats it as a pending request and re-fires on the next user msg.
+    if (currentSessionId) {
+      const cwd = request.cwd ?? process.env.AGENT_WORKSPACE ?? process.cwd();
+      try {
+        await trimDanglingToolUse(currentSessionId, cwd);
+      } catch (err) {
+        console.error(`[worker] transcript cleanup failed for ${currentSessionId}:`, err instanceof Error ? err.message : String(err));
+      }
+    }
 
     // Pending messages queue — decoupled from the ConversationChannel so that
     // a stale SDK iterator from a previous query() call cannot consume messages
