@@ -183,10 +183,12 @@ export class WorkerSession {
       const queryChannel = new ConversationChannel();
       activeChannel = queryChannel;
 
-      // Drain all pending messages into the channel before starting the query.
-      while (pendingMessages.length > 0) {
-        queryChannel.push(pendingMessages.shift()!);
-      }
+      // Collapse pending messages into a single user input so a burst of chat
+      // messages produces one model turn instead of N. The bridge already
+      // coalesces N-1 outbound responses; this saves the matching inbound work.
+      const merged = pendingMessages.join("\n\n");
+      pendingMessages.length = 0;
+      queryChannel.push(merged);
 
       queryRunning = true;
 
