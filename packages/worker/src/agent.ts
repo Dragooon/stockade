@@ -497,6 +497,11 @@ schedule_type options:
           if (block.type === "tool_use") {
             toolStart = Date.now();
             emit({ type: "tool_start", name: block.name });
+          } else if (block.type === "text") {
+            const text = typeof block.text === "string" ? block.text : "";
+            if (text.trim()) {
+              emit({ type: "assistant_text", text });
+            }
           }
         }
       } else if (m.type === "user" && toolStart) {

@@ -71,6 +71,14 @@ export interface BusEventToolEnd {
   timestamp: string;
 }
 
+export interface BusEventAssistantText {
+  kind: "evt:assistant_text";
+  scope: string;
+  correlationId: string;
+  text: string;
+  timestamp: string;
+}
+
 export interface BusEventResult {
   kind: "evt:result";
   scope: string;
@@ -102,6 +110,7 @@ export type BusWorkerEvent =
   | BusEventTurn
   | BusEventToolStart
   | BusEventToolEnd
+  | BusEventAssistantText
   | BusEventResult
   | BusEventError
   | BusEventStaleSession;

@@ -40,6 +40,10 @@ interface Pending {
   /** Original meta, kept for stale-session retry. */
   meta: SessionMeta;
   timeoutHandle: ReturnType<typeof setTimeout>;
+  /** Optional callback for mid-turn partial text streaming. */
+  onPartial?: (text: string) => void;
+  /** Set true once a partial has been streamed; suppresses the final post. */
+  streamed: boolean;
 }
 
 export class OrchestratorBridge {
@@ -89,6 +93,7 @@ export class OrchestratorBridge {
     };
 
     const attachments = meta["attachments"] as ChannelAttachment[] | undefined;
+    const onPartial = meta["onPartial"] as ((text: string) => void) | undefined;
 
     // Ensure session exists (idempotent)
     const session = await this.sessionManager.ensureSession(scope, sessionMeta);
@@ -120,6 +125,8 @@ export class OrchestratorBridge {
         originalText: promptText,
         meta: sessionMeta,
         timeoutHandle,
+        onPartial,
+        streamed: false,
       });
 
       const preview = promptText.slice(0, 80).replace(/\n/g, " ");
@@ -231,6 +238,22 @@ export class OrchestratorBridge {
         log(`[bus] ${scope.slice(0, 30)} tool done: ${event.elapsedMs}ms`);
         break;
 
+      case "evt:assistant_text": {
+        // Stream mid-turn assistant text to whichever pending promise is
+        // currently active for this scope. We key off scope (not correlationId)
+        // because mid-turn injections coalesce — the agent's text reply
+        // belongs to the conversation, not to a specific user message.
+        for (const p of this.pending.values()) {
+          if (p.scope === scope && p.onPartial) {
+            try { p.onPartial(event.text); } catch (err) {
+              console.error(`[bus] onPartial threw for ${scope.slice(0, 30)}:`, err);
+            }
+            p.streamed = true;
+          }
+        }
+        break;
+      }
+
       case "evt:result": {
         const p = this.pending.get(event.correlationId);
         const preview = event.text.slice(0, 100).replace(/\n/g, " ");
@@ -253,7 +276,10 @@ export class OrchestratorBridge {
         if (!p) break;
         clearTimeout(p.timeoutHandle);
         this.pending.delete(event.correlationId);
-        p.resolve({ text: event.text, files: event.files, stopReason: event.stopReason });
+        // If we already streamed the reply mid-turn, drop the final text
+        // (channel adapter has already posted it). Files still flow through.
+        const finalText = p.streamed ? "" : event.text;
+        p.resolve({ text: finalText, files: event.files, stopReason: event.stopReason });
         break;
       }
 

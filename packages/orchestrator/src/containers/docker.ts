@@ -40,7 +40,10 @@ export class DockerClient {
   // ── Containers ───────────────────────────────────────────
 
   async createContainer(opts: CreateContainerOpts): Promise<string> {
-    const args = ["create", "--name", opts.name, "--network", opts.network];
+    // --init runs tini as PID 1 so child processes orphaned by the worker
+    // (chrome-devtools-mcp, MCP servers, bash tools) get reaped. Without it,
+    // the worker itself is PID 1 and Node never reaps zombies → PID table bloat.
+    const args = ["create", "--init", "--name", opts.name, "--network", opts.network];
 
     // Ports
     for (const [container, host] of Object.entries(opts.ports)) {

@@ -303,7 +303,11 @@ async function executeTask(task: ScheduledTask): Promise<string> {
 }
 
 // 4. Define handleMessage callback — routes through the Redis event bus
-async function handleMessage(msg: ChannelMessage, approvalChannel?: ApprovalChannel): Promise<ChannelResponse> {
+async function handleMessage(
+  msg: ChannelMessage,
+  approvalChannel?: ApprovalChannel,
+  onPartial?: (text: string) => void,
+): Promise<ChannelResponse> {
   // Check for /agent:<id> prefix to determine target agent for RBAC + scope
   let agentId = resolveAgent(msg.scope, config.platform);
   let enqueueScope = msg.scope;
@@ -341,6 +345,7 @@ async function handleMessage(msg: ChannelMessage, approvalChannel?: ApprovalChan
     userPlatform: msg.platform,
     askApproval,
     attachments: msg.attachments,
+    onPartial,
   });
 }
 

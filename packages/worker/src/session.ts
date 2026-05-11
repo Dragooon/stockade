@@ -285,6 +285,8 @@ function mapToBusEvent(
       return { kind: "evt:tool_start", scope, correlationId, toolName: ev.name, timestamp: ts };
     case "tool_end":
       return { kind: "evt:tool_end", scope, correlationId, toolName: ev.name, elapsedMs: ev.elapsedMs, timestamp: ts };
+    case "assistant_text":
+      return { kind: "evt:assistant_text", scope, correlationId, text: ev.text, timestamp: ts };
     case "result":
       return {
         kind: "evt:result",

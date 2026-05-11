@@ -66,7 +66,11 @@ function toAttachment(f: ChannelFile): AttachmentBuilder {
 
 export interface DiscordAdapterOptions {
   /** Called to handle a message and return the agent's response. */
-  onMessage: (msg: ChannelMessage, approvalChannel?: ApprovalChannel) => Promise<ChannelResponse>;
+  onMessage: (
+    msg: ChannelMessage,
+    approvalChannel?: ApprovalChannel,
+    onPartial?: (text: string) => void,
+  ) => Promise<ChannelResponse>;
   /** Called to delete a session scope. */
   onSessionReset?: (scope: string) => void;
   /** Agent registry — used to expose agent names in /agent command. */
@@ -532,10 +536,24 @@ export class DiscordAdapter {
       this.inFlightMessages.delete(contentKey);
     };
 
+    // Serialize partial sends so chunks arrive in order even if the next
+    // partial fires before the previous send resolves.
+    let sendChain: Promise<unknown> = Promise.resolve();
+    const onPartial = (text: string) => {
+      const chunks = splitMessage(text, 2000);
+      sendChain = sendChain.then(async () => {
+        for (const chunk of chunks) {
+          await ch.send(chunk).catch(() => {});
+        }
+      });
+    };
+
     // Fire-and-forget: return immediately, deliver response when agent finishes.
     // The session persists per-scope; this message is injected into the running
     // session (or queued for the next turn) without blocking the channel handler.
-    this.opts.onMessage(channelMessage, askApproval).then(async (response) => {
+    this.opts.onMessage(channelMessage, askApproval, onPartial).then(async (response) => {
+      // Wait for any in-flight partial sends to land before posting final.
+      await sendChain.catch(() => {});
       cleanup();
       const { text, files, stopReason } = response;
       if (!text?.trim()) {
