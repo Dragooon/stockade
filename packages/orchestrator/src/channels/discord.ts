@@ -556,7 +556,15 @@ export class DiscordAdapter {
       await sendChain.catch(() => {});
       cleanup();
       const { text, files, stopReason } = response;
-      if (!text?.trim()) {
+      const attachments = files?.map(toAttachment) ?? [];
+      const hasText = !!text?.trim();
+      if (!hasText) {
+        // Files arrive only with the terminal result; if the text was streamed
+        // mid-turn, send the files as a follow-up so they aren't dropped.
+        if (attachments.length > 0) {
+          await ch.send({ files: attachments }).catch(() => {});
+          return;
+        }
         // end_turn = agent chose to stay silent (shared channel filtering, intentional no-op).
         // Anything else (max_turns, error, error_max_turns, …) is a silent failure — surface it.
         const normalSilent = !stopReason || stopReason === "end_turn";
@@ -566,7 +574,6 @@ export class DiscordAdapter {
         return;
       }
       const chunks = splitMessage(text, 2000);
-      const attachments = files?.map(toAttachment) ?? [];
       await ch.send({ content: chunks[0], files: attachments });
       for (const chunk of chunks.slice(1)) {
         await ch.send(chunk);
