@@ -205,15 +205,31 @@ export class OrchestratorBridge {
     for (const { cid, p } of toRetry) {
       clearTimeout(p.timeoutHandle);
       this.pending.delete(cid);
-      this.sendAndWait(p.scope, p.originalText, {
-        userId: p.meta.userId,
-        userPlatform: p.meta.userPlatform,
-        askApproval: p.meta.askApproval,
-        noSession: true,
-      }).then(p.resolve).catch(() =>
+      this.sendAndWait(p.scope, p.originalText, this.buildRetryMeta(p)).then(p.resolve).catch(() =>
         p.resolve({ text: "Error: worker restarted during processing" })
       );
     }
+  }
+
+  /**
+   * Build the meta to use for a retried dispatch (worker_restart or stale_session).
+   * Forwards the FULL original SessionMeta — dropping `agentId`, `parentAgentId`,
+   * `parentCwd`, or `forceParentCwd` causes inline subagents to be re-dispatched
+   * as standalone, hitting the wrong worker container and creating dual workers
+   * for the same scope (root cause of "Unknown callback token" failures).
+   */
+  private buildRetryMeta(p: Pending): Record<string, unknown> {
+    return {
+      userId: p.meta.userId,
+      userPlatform: p.meta.userPlatform,
+      askApproval: p.meta.askApproval,
+      agentId: p.meta.agentId,
+      parentCwd: p.meta.parentCwd,
+      parentAgentId: p.meta.parentAgentId,
+      forceParentCwd: p.meta.forceParentCwd,
+      noSession: true, // don't try to resume the SDK session
+      onPartial: p.onPartial,
+    };
   }
 
   private handleWorkerEvent(scope: string, event: BusWorkerEvent): void {
@@ -307,13 +323,10 @@ export class OrchestratorBridge {
         }).then(() => {
           clearTimeout(p.timeoutHandle);
           this.pending.delete(event.correlationId);
-          // Re-dispatch via sendAndWait (will create a fresh session)
-          return this.sendAndWait(scope, p.originalText, {
-            userId: p.meta.userId,
-            userPlatform: p.meta.userPlatform,
-            askApproval: p.meta.askApproval,
-            noSession: true, // don't try to resume again
-          });
+          // Re-dispatch via sendAndWait — preserves full meta so inline subagents
+          // are not silently downgraded to standalone (which would fork a second
+          // worker for the same scope and produce "Unknown callback token" errors).
+          return this.sendAndWait(scope, p.originalText, this.buildRetryMeta(p));
         }).then((result) => {
           p.resolve(result);
         }).catch((err) => {

@@ -11,11 +11,19 @@
 import Redis from "ioredis";
 import type { BusUserMessage, BusControlSignal, BusWorkerEvent } from "./bus-types.js";
 
+export type ScopeHandler = (msg: BusUserMessage) => void;
+
 export class WorkerRedisBridge {
   private readonly pub: Redis;
   private readonly sub: Redis;
-  /** Maps Redis channel names to message handlers. */
-  private readonly scopeHandlers = new Map<string, (msg: BusUserMessage) => void>();
+  /**
+   * Maps Redis channel names to message handlers. Multi-handler per channel:
+   * if a stale WorkerSession is still tearing down while a fresh one for the
+   * same scope is created (e.g. stale_session retry against an inline subagent),
+   * both end up subscribed transiently. A single-handler map would lose the
+   * old handler — and if the unsubscribe order races, lose the channel too.
+   */
+  private readonly scopeHandlers = new Map<string, ScopeHandler[]>();
   /** Control signal handlers (one per subscribeControl call). */
   private readonly controlHandlers: Array<(signal: BusControlSignal) => void> = [];
   private controlChannel: string | null = null;
@@ -25,9 +33,13 @@ export class WorkerRedisBridge {
     this.sub = new Redis(redisUrl, { lazyConnect: false, enableReadyCheck: false });
 
     this.sub.on("message", (channel: string, data: string) => {
-      const scopeHandler = this.scopeHandlers.get(channel);
-      if (scopeHandler) {
-        try { scopeHandler(JSON.parse(data) as BusUserMessage); } catch { /* ignore */ }
+      const handlers = this.scopeHandlers.get(channel);
+      if (handlers && handlers.length) {
+        let parsed: BusUserMessage;
+        try { parsed = JSON.parse(data) as BusUserMessage; } catch { return; }
+        for (const h of handlers) {
+          try { h(parsed); } catch { /* ignore */ }
+        }
         return;
       }
       if (channel === this.controlChannel && this.controlHandlers.length) {
@@ -40,16 +52,36 @@ export class WorkerRedisBridge {
   }
 
   /** Subscribe to incoming user messages for a scope. */
-  async subscribeScope(scope: string, handler: (msg: BusUserMessage) => void): Promise<void> {
+  async subscribeScope(scope: string, handler: ScopeHandler): Promise<void> {
     const channel = `stockade:msg:${scope}`;
-    this.scopeHandlers.set(channel, handler);
-    await this.sub.subscribe(channel);
-    console.log(`[worker-redis] subscribed to ${channel}`);
+    let handlers = this.scopeHandlers.get(channel);
+    if (!handlers) {
+      handlers = [];
+      this.scopeHandlers.set(channel, handlers);
+    }
+    handlers.push(handler);
+    if (handlers.length === 1) {
+      await this.sub.subscribe(channel);
+    }
+    console.log(`[worker-redis] subscribed to ${channel} (handlers=${handlers.length})`);
   }
 
-  /** Unsubscribe from a scope's message channel. */
-  async unsubscribeScope(scope: string): Promise<void> {
+  /**
+   * Unsubscribe from a scope's message channel. Removes only the specific
+   * handler if provided; the Redis subscription drops only when the last
+   * handler for the channel is gone.
+   */
+  async unsubscribeScope(scope: string, handler?: ScopeHandler): Promise<void> {
     const channel = `stockade:msg:${scope}`;
+    const handlers = this.scopeHandlers.get(channel);
+    if (!handlers) return;
+    if (handler) {
+      const idx = handlers.indexOf(handler);
+      if (idx !== -1) handlers.splice(idx, 1);
+    } else {
+      handlers.length = 0;
+    }
+    if (handlers.length > 0) return;
     this.scopeHandlers.delete(channel);
     await this.sub.unsubscribe(channel).catch(() => {});
   }

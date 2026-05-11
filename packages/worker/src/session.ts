@@ -154,7 +154,7 @@ export class WorkerSession {
     // correlationId of the most recently received message.
     let currentCorrelationId = "";
 
-    await bridge.subscribeScope(scope, (msg) => {
+    const messageHandler = (msg: { correlationId: string; text: string }) => {
       currentCorrelationId = msg.correlationId;
       if (queryRunning && activeChannel && !activeChannel.closed) {
         // Mid-turn injection: push into the running query's channel so the agent
@@ -170,7 +170,8 @@ export class WorkerSession {
         this._wakeLoop = null;
         wake?.();
       }
-    });
+    };
+    await bridge.subscribeScope(scope, messageHandler);
 
     // Subscription is confirmed — signal the HTTP caller so it can return its
     // response before the orchestrator publishes the first message.
@@ -269,7 +270,7 @@ export class WorkerSession {
         queryChannel.close(); // Terminate any lingering SDK read-ahead iterator.
       }
     }
-    await bridge.unsubscribeScope(scope).catch(() => {});
+    await bridge.unsubscribeScope(scope, messageHandler).catch(() => {});
     console.log(`[worker] Persistent session loop ended for scope ${scope.slice(0, 40)}`);
   }
 }
