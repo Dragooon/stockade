@@ -93,6 +93,10 @@ export interface ManagedSession {
   sandboxed: boolean;
   proxyToken?: string;
   sdkSessionId: string | null;
+  /** Ephemeral session — its sdkSessionId is never persisted to sessions.db.
+   * Set true for scheduler tasks dispatched with meta.noSession so a fresh
+   * SDK session per fire never overwrites the user's resume mapping. */
+  isolated: boolean;
   idleTimer: ReturnType<typeof setTimeout>;
 }
 
@@ -170,6 +174,7 @@ export class SessionManager {
     if (!session) return;
     session.sdkSessionId = sdkSessionId;
     if (!session.idleTimer) return; // safety guard
+    if (session.isolated) return;   // ephemeral — must not pollute sessions.db
     this.deps.setSessionId(scope, sdkSessionId);
   }
 
@@ -443,6 +448,7 @@ export class SessionManager {
         sandboxed: effectiveSandboxed,
         proxyToken,
         sdkSessionId: sdkSessionId ?? null,
+        isolated: !!meta.noSession,
         idleTimer: this.startIdleTimer(scope),
       };
 

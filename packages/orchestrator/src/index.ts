@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { loadConfig } from "./config.js";
 import { resolveAgent } from "./router.js";
@@ -276,11 +277,31 @@ const channelSenders = new Map<string, (scope: string, text: string, files?: Cha
  * back to the channel the task was created in.
  */
 async function executeTask(task: ScheduledTask): Promise<string> {
-  const response = await bridge.sendAndWait(task.scope, task.prompt, {
+  const isolated = task.context_mode === "isolated";
+
+  // Isolated tasks dispatch under a unique ephemeral scope so the SDK session
+  // they create can never overwrite the user's resume mapping in sessions.db
+  // (router.resolveAgent only inspects parts[0..2] so the suffix is harmless;
+  // delivery still goes to task.scope, which is the real Discord channel).
+  const dispatchScope = isolated
+    ? `${task.scope}#sched:${task.id}:${randomUUID().slice(0, 8)}`
+    : task.scope;
+
+  const response = await bridge.sendAndWait(dispatchScope, task.prompt, {
+    agentId: task.agentId,
     userId: task.userId,
     userPlatform: task.userPlatform,
-    noSession: task.context_mode === "isolated",
+    noSession: isolated,
   });
+
+  // Tear down the ephemeral session immediately — its in-memory ManagedSession
+  // would otherwise live until the idle timer fires, and any concurrent message
+  // that happened to land on the same dispatchScope would reuse its SDK session.
+  if (isolated) {
+    bridge.closeSession(dispatchScope, "scheduler_isolated_done").catch((err) =>
+      console.error(`[scheduler] closeSession failed for ${dispatchScope.slice(0, 60)}:`, err)
+    );
+  }
 
   // Deliver result back to the originating channel. Empty responses are
   // dropped (not echoed as the raw prompt) — empties usually mean the dispatch
