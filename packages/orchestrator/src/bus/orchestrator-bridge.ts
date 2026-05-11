@@ -239,16 +239,19 @@ export class OrchestratorBridge {
         break;
 
       case "evt:assistant_text": {
-        // Stream mid-turn assistant text to whichever pending promise is
-        // currently active for this scope. We key off scope (not correlationId)
-        // because mid-turn injections coalesce — the agent's text reply
-        // belongs to the conversation, not to a specific user message.
+        // Stream mid-turn assistant text once per scope, regardless of how
+        // many pending promises exist. Mid-turn injections produce multiple
+        // pendings for the same scope, but they all target the same channel
+        // — calling onPartial on each would post the text N times.
+        let streamer: Pending | undefined;
         for (const p of this.pending.values()) {
-          if (p.scope === scope && p.onPartial) {
-            try { p.onPartial(event.text); } catch (err) {
-              console.error(`[bus] onPartial threw for ${scope.slice(0, 30)}:`, err);
-            }
-            p.streamed = true;
+          if (p.scope !== scope) continue;
+          if (!streamer && p.onPartial) streamer = p;
+          p.streamed = true;
+        }
+        if (streamer?.onPartial) {
+          try { streamer.onPartial(event.text); } catch (err) {
+            console.error(`[bus] onPartial threw for ${scope.slice(0, 30)}:`, err);
           }
         }
         break;
