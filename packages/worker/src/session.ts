@@ -218,19 +218,31 @@ export class WorkerSession {
         // filesystem is not accessible from the host.
         if (ev.type === "result" && ev.files && ev.files.length > 0) {
           Promise.all(
-            ev.files.map(async (f) => ({
-              ...f,
-              // Skip readFile when content is already embedded (e.g. propagated from sub-agent)
-              content: f.content ?? await readFile(f.path).then((buf) => buf.toString("base64")).catch(() => undefined),
-            })),
+            ev.files.map(async (f) => {
+              if (f.content) {
+                console.log(`[worker] file already-embedded name=${f.filename} bytes=${Math.floor(f.content.length * 0.75)}`);
+                return f;
+              }
+              try {
+                const buf = await readFile(f.path);
+                const content = buf.toString("base64");
+                console.log(`[worker] file readFile-ok name=${f.filename} path=${f.path} bytes=${buf.length}`);
+                return { ...f, content };
+              } catch (err) {
+                console.error(`[worker] file readFile-FAIL name=${f.filename} path=${f.path} err=${err instanceof Error ? err.message : String(err)}`);
+                return { ...f, content: undefined };
+              }
+            }),
           ).then((filesWithContent) => {
+            const okCount = filesWithContent.filter((f) => f.content).length;
+            console.log(`[worker] publishing result with files: ok=${okCount}/${filesWithContent.length}`);
             const busEvent = mapToBusEvent({ ...ev, files: filesWithContent }, scope, queryCorrelationId);
             if (!busEvent) return;
             bridge.publishEvent(scope, busEvent).catch((err) => {
               console.error(`[worker] Failed to publish event for ${scope}:`, err.message);
             });
-          }).catch(() => {
-            // Fall back to publishing without content on read error
+          }).catch((err) => {
+            console.error(`[worker] file processing pipeline failed:`, err instanceof Error ? err.message : String(err));
             const busEvent = mapToBusEvent(ev, scope, queryCorrelationId);
             if (!busEvent) return;
             bridge.publishEvent(scope, busEvent).catch(() => {});

@@ -556,13 +556,20 @@ export class DiscordAdapter {
       await sendChain.catch(() => {});
       cleanup();
       const { text, files, stopReason } = response;
+      const fileSummary = files?.map((f) => `${f.filename}(${f.content ? `b64:${Math.floor(f.content.length*0.75)}b` : `path:${f.path}`})`).join(", ") ?? "none";
+      console.log(`[discord] response received scope=${scope.slice(0, 30)} text_len=${text?.length ?? 0} files=[${fileSummary}]`);
       const attachments = files?.map(toAttachment) ?? [];
       const hasText = !!text?.trim();
       if (!hasText) {
         // Files arrive only with the terminal result; if the text was streamed
         // mid-turn, send the files as a follow-up so they aren't dropped.
         if (attachments.length > 0) {
-          await ch.send({ files: attachments }).catch(() => {});
+          try {
+            await ch.send({ files: attachments });
+            console.log(`[discord] follow-up files sent (${attachments.length})`);
+          } catch (err) {
+            console.error(`[discord] follow-up files send FAILED:`, err instanceof Error ? err.message : String(err));
+          }
           return;
         }
         // end_turn = agent chose to stay silent (shared channel filtering, intentional no-op).
