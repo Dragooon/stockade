@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   ActionRowBuilder,
   AttachmentBuilder,
@@ -27,6 +28,36 @@ const ASK_TIMEOUT_MS = 10 * 60_000;
 /** Max attachment size — matches Discord's file upload limit. */
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25 MB
 
+const RESIZE_SCRIPT = [
+  "import sys, io",
+  "from PIL import Image",
+  "data = sys.stdin.buffer.read()",
+  "img = Image.open(io.BytesIO(data))",
+  "w, h = img.size",
+  "if w <= 2000 and h <= 2000:",
+  "    sys.stdout.buffer.write(data)",
+  "else:",
+  "    fmt = img.format or 'PNG'",
+  "    img.thumbnail((2000, 2000), Image.LANCZOS)",
+  "    out = io.BytesIO()",
+  "    img.save(out, format=fmt)",
+  "    sys.stdout.buffer.write(out.getvalue())",
+].join("\n");
+
+/** Shrink any image exceeding 2000px on either dimension (Anthropic multi-image limit). */
+function resizeImageIfNeeded(buf: Buffer, mime: string): Buffer {
+  if (!mime.startsWith("image/")) return buf;
+  const result = spawnSync("python3", ["-c", RESIZE_SCRIPT], {
+    input: buf,
+    maxBuffer: 30 * 1024 * 1024,
+    timeout: 10_000,
+  });
+  if (result.status === 0 && result.stdout && (result.stdout as Buffer).length > 0) {
+    return result.stdout as Buffer;
+  }
+  return buf; // fallback: pass original if resize fails
+}
+
 /**
  * Download a Discord attachment as base64.
  * All file types are accepted — the dispatcher saves them to the agent's
@@ -45,10 +76,12 @@ async function downloadAttachment(
   try {
     const res = await fetch(url);
     const buf = await res.arrayBuffer();
+    const raw = Buffer.from(buf);
+    const resized = resizeImageIfNeeded(raw, mime);
     return {
       filename,
       contentType: mime,
-      data: Buffer.from(buf).toString("base64"),
+      data: resized.toString("base64"),
       size,
     };
   } catch {
