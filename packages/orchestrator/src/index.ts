@@ -238,6 +238,7 @@ const sessionManager = new SessionManager({
   redisUrl: redisConfig.url,
   getSessionId: (scope) => getSessionId(db, scope),
   setSessionId: (scope, id) => setSessionId(db, scope, id),
+  deleteSessionId: (scope) => deleteSession(db, scope),
 });
 
 const bridge = new OrchestratorBridge(bus, sessionManager);

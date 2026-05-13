@@ -38,13 +38,13 @@ const runs = new Map<string, AgentRun>();
 const namedRuns = new Map<string, string>();
 
 export async function handleAgentStart(
-  args: { agentId?: string; task: string; name?: string; background?: boolean; inline?: boolean; model?: string },
+  args: { agentId?: string; task: string; name?: string; session?: string; background?: boolean; inline?: boolean; model?: string },
   parentCtx: CallbackSession,
   dispatchCtx: DispatchContext,
   workerManager: WorkerManager,
   bridge: OrchestratorBridge,
 ): Promise<{ runId: string; result?: string; files?: Array<{ filename: string; contentType: string; path: string; content?: string }> }> {
-  const { task, name, background = false } = args;
+  const { task, name, session, background = false } = args;
 
   const isSelfSpawn = !args.agentId;
   const agentId = args.agentId ?? parentCtx.agentId;
@@ -61,9 +61,13 @@ export async function handleAgentStart(
   const inline = isSelfSpawn ? true : (args.inline ?? targetConfig.inline ?? false);
 
   const runId = randomUUID();
-  const subScope = isSelfSpawn
-    ? `self-spawn:${agentId}:${runId}`
-    : `subagent:${agentId}:${parentCtx.callbackToken}`;
+  // session key → stable scope that persists in sessions.db for resumption across calls.
+  // No session key → ephemeral scope (uuid-based), DB entry deleted after close.
+  const subScope = session
+    ? `subagent:${agentId}:session:${session}`
+    : isSelfSpawn
+      ? `self-spawn:${agentId}:${runId}`
+      : `subagent:${agentId}:${parentCtx.callbackToken}`;
 
   const run: AgentRun = {
     runId,

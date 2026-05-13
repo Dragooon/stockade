@@ -118,11 +118,15 @@ Use background:true for long-running tasks (result injected when done).
 Use background:false (default) to block until the sub-agent returns.
 Use inline:true to share the current workspace (no separate isolation).
 Omit agentId to self-spawn: starts a parallel copy of this agent in the same workspace
-with full memory and settings, ideal for divide-and-conquer reasoning tasks.`,
+with full memory and settings, ideal for divide-and-conquer reasoning tasks.
+Use session to give the sub-agent a persistent session key: the same key always resumes
+the same SDK conversation, letting context accumulate across multiple invocations.
+Omit session to start a fresh ephemeral sub-agent each time (default).`,
     {
       agentId: z.string().optional().describe("Agent ID from agents config. Omit to self-spawn a parallel copy of this agent."),
       task: z.string().describe("Task description or prompt for the sub-agent"),
-      name: z.string().optional().describe("Name this agent for later messaging via mcp__agent__message"),
+      name: z.string().optional().describe("Name this agent for in-flight messaging via mcp__agent__message"),
+      session: z.string().optional().describe("Persistent session key: reusing the same key resumes the prior conversation. Omit for a one-shot ephemeral invocation."),
       background: z.boolean().optional().describe("Run in background without blocking (default: false)"),
       inline: z.boolean().optional().describe("Share parent workspace instead of isolated workspace (default: false)"),
       model: z.string().optional().describe("Override model for this invocation (e.g. 'sonnet', 'opus'). Use when the default model is insufficient for the task."),

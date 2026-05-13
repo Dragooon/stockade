@@ -62,6 +62,7 @@ export interface SessionManagerDeps {
   redisUrl: string;
   getSessionId: (scope: string) => string | null;
   setSessionId: (scope: string, sdkSessionId: string) => void;
+  deleteSessionId: (scope: string) => void;
 }
 
 export interface SessionMeta {
@@ -155,6 +156,15 @@ export class SessionManager {
     deleteCallbackSession(session.callbackToken);
     this.deps.gate.release(scope);
     await this.deps.bus.deleteSession(scope).catch(() => {});
+    // Ephemeral subagent sessions are never resumed — remove their DB entry so
+    // the sessions table doesn't accumulate stale rows for every subagent invocation.
+    // Stable named-session scopes (containing ":session:") are kept for resumption.
+    const isEphemeralSubagent =
+      (scope.startsWith("subagent:") || scope.startsWith("self-spawn:")) &&
+      !scope.includes(":session:");
+    if (isEphemeralSubagent) {
+      this.deps.deleteSessionId(scope);
+    }
   }
 
   /**
