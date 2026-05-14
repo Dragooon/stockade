@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { connect as tlsConnect, createSecureContext } from "node:tls";
 import * as net from "node:net";
@@ -98,6 +99,84 @@ function extractUsage(body: string): Record<string, number> {
  *   3. Second-to-last user message: proxy sets ttl:1h — stable history anchor
  *   4. Last user message: SDK sets — proxy upgrades to ttl:1h
  */
+
+const PILLOW_RESIZE = [
+  "import sys, io, json, base64",
+  "from PIL import Image",
+  "MAX = 2000",
+  "items = json.loads(sys.stdin.buffer.read())",
+  "out = []",
+  "for b64 in items:",
+  "    raw = base64.b64decode(b64)",
+  "    img = Image.open(io.BytesIO(raw))",
+  "    w, h = img.size",
+  "    if w <= MAX and h <= MAX:",
+  "        out.append(b64)",
+  "    else:",
+  "        img.thumbnail((MAX, MAX), Image.LANCZOS)",
+  "        buf = io.BytesIO()",
+  "        img.save(buf, format=img.format or 'PNG')",
+  "        out.append(base64.b64encode(buf.getvalue()).decode())",
+  "print(json.dumps(out))",
+].join("\n");
+
+/** Read width/height from PNG IHDR bytes (offset 16–23) without full decode. */
+function pngDimensions(b64: string): { w: number; h: number } | null {
+  try {
+    const raw = Buffer.from(b64.slice(0, 64), "base64");
+    if (raw[0] !== 0x89 || raw[1] !== 0x50 || raw[2] !== 0x4e || raw[3] !== 0x47) return null;
+    return { w: raw.readUInt32BE(16), h: raw.readUInt32BE(20) };
+  } catch { return null; }
+}
+
+/**
+ * Walk the request body and shrink any image content block exceeding 2000px
+ * on either dimension (Anthropic multi-image limit). Covers user messages,
+ * tool_result content, and any other nested position.
+ */
+export function downsizeImages(body: Buffer, host: string, path: string): Buffer {
+  if (host !== "api.anthropic.com" || !path.includes("/messages")) return body;
+  try {
+    const req = JSON.parse(body.toString("utf8")) as { messages?: unknown[] };
+    if (!Array.isArray(req.messages)) return body;
+
+    // Collect all base64 image sources that need checking
+    const sources: Array<Record<string, unknown>> = [];
+    function collect(v: unknown): void {
+      if (!v || typeof v !== "object") return;
+      if (Array.isArray(v)) { for (const item of v) collect(item); return; }
+      const o = v as Record<string, unknown>;
+      if (o.type === "image") {
+        const src = o.source as Record<string, unknown> | undefined;
+        if (src?.type === "base64" && typeof src.data === "string") {
+          const dims = pngDimensions(src.data);
+          if (!dims || dims.w > 2000 || dims.h > 2000) sources.push(src);
+        }
+        return;
+      }
+      for (const val of Object.values(o)) collect(val);
+    }
+    collect(req.messages);
+
+    if (sources.length === 0) return body;
+
+    // Batch resize via Python/Pillow
+    const input = Buffer.from(JSON.stringify(sources.map((s) => s.data)));
+    const result = spawnSync("python3", ["-c", PILLOW_RESIZE], {
+      input,
+      maxBuffer: 200 * 1024 * 1024,
+      timeout: 30_000,
+    });
+    if (result.status !== 0 || !result.stdout?.length) return body;
+
+    const resized = JSON.parse(result.stdout.toString()) as string[];
+    if (resized.length !== sources.length) return body;
+
+    for (let i = 0; i < sources.length; i++) sources[i].data = resized[i];
+    return Buffer.from(JSON.stringify(req), "utf8");
+  } catch { return body; }
+}
+
 export function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
   if (host !== "api.anthropic.com" || !path.includes("/messages")) return body;
   try {
@@ -501,6 +580,17 @@ async function handleMitmRequest(
     const injected = injectCacheMarkers(body, host, path);
     if (injected !== body) {
       body = injected;
+      if (headers["content-length"]) {
+        headers["content-length"] = String(body.length);
+      }
+    }
+  }
+
+  // Downsize any images exceeding Anthropic's 2000px multi-image limit
+  if (method !== "GET" && method !== "HEAD" && body.length > 0) {
+    const downsized = downsizeImages(body, host, path);
+    if (downsized !== body) {
+      body = downsized;
       if (headers["content-length"]) {
         headers["content-length"] = String(body.length);
       }
