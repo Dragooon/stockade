@@ -72,6 +72,8 @@ const ProviderOverrideSchema = z.object({
 
 export const ProviderSchema = z.object({
   read: z.string(),
+  /** Shell command to list all credential keys in the vault. Output must be a JSON array of objects with a `title` field. */
+  list: z.string().optional(),
   /** Shell command to create a new credential. Only needed for gateway/store. */
   write: z.string().optional(),
   /** Shell command to update an existing credential. Only needed for gateway/store. */

@@ -51,6 +51,18 @@ function globMatch(pattern: string, value: string): boolean {
 }
 
 /**
+ * List all credential titles available in the vault.
+ * Returns raw item titles from the provider's `list` command output (JSON array
+ * with `title` fields). Returns an empty array if no list command is configured.
+ */
+export async function listCredentials(provider: Provider): Promise<string[]> {
+  if (!provider.list) return [];
+  const output = await execProviderCommand(provider.list, provider);
+  const items: Array<{ title: string }> = JSON.parse(output);
+  return items.map((item) => item.title);
+}
+
+/**
  * Store a credential via the provider's `update` command.
  * Falls back to `write` if update fails (key doesn't exist yet).
  * Invalidates the cache entry on success.

@@ -127,6 +127,28 @@ case "$COMMAND" in
     fi
     ;;
 
+  list)
+    RESPONSE=$(curl -s -w "\n%{http_code}" \
+      -H "Authorization: Bearer $APW_TOKEN" \
+      "${APW_GATEWAY}/gateway/list")
+
+    HTTP_CODE=$(printf '%s\n' "$RESPONSE" | tail -n1)
+    BODY_RESP=$(printf '%s\n' "$RESPONSE" | sed '$d')
+
+    if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+      printf '%s\n' "$BODY_RESP" | python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+items = d.get('vaultItems') or d.get('keys', [])
+for item in sorted(items):
+    print(item)
+"
+    else
+      echo "Error ($HTTP_CODE): $BODY_RESP" >&2
+      exit 1
+    fi
+    ;;
+
   ssh)
     TARGET="${1:-}"
     if [ -z "$TARGET" ]; then
@@ -175,6 +197,7 @@ sys.exit(d.get('exitCode', 0))
 
   *)
     echo "Usage:" >&2
+    echo "  apw list                                    — list available credential keys" >&2
     echo "  apw read <key>                              — get a ref token for a credential" >&2
     echo "  apw reveal <key>                            — get the raw credential value" >&2
     echo "  apw store <key> [--host H --header H --format F]  — store a credential from stdin" >&2

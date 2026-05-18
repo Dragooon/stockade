@@ -46,6 +46,7 @@ export function validateToken(
 
 /**
  * Check if a token grants access to a specific credential key.
+ * Supports glob patterns (e.g. "*") in the credentials array.
  */
 export function checkCredentialScope(
   token: string,
@@ -53,7 +54,7 @@ export function checkCredentialScope(
 ): boolean {
   const entry = tokens.get(token);
   if (!entry || entry.expiresAt <= Date.now()) return false;
-  return entry.credentials.includes(key);
+  return entry.credentials.some((pattern) => globMatch(pattern, key));
 }
 
 /**

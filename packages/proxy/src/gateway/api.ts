@@ -3,7 +3,7 @@ import { serve } from "@hono/node-server";
 import ssh2 from "ssh2";
 const { Client: SshClient } = ssh2;
 import type { ProxyConfig, GatewayToken } from "../shared/types.js";
-import { resolveCredential, storeCredential, invalidateCache } from "../shared/credentials.js";
+import { resolveCredential, storeCredential, invalidateCache, listCredentials } from "../shared/credentials.js";
 import {
   issueToken,
   validateToken,
@@ -49,16 +49,27 @@ export function startGateway(getConfig: () => ProxyConfig) {
 
   // ── GET /gateway/list — List credential keys this token can access ──
   // Returns the names only (never values) of the credentials and store-key
-  // patterns scoped to the caller's token. Lets an agent discover what's
-  // available without revealing secrets or leaking the global catalog.
+  // patterns scoped to the caller's token. When the token has a wildcard
+  // credential grant ("*"), also enumerates actual vault items so the agent
+  // can discover what's available.
   app.get("/gateway/list", async (c) => {
     const tokenData = c.get("tokenData");
-    // Omitted/empty storeKeys = unrestricted; advertise as ["*"] so callers
-    // can distinguish "no writes allowed" (impossible now) from "any key".
     const storeKeys = tokenData.storeKeys?.length ? tokenData.storeKeys : ["*"];
+
+    const isWildcard = tokenData.credentials.some((p) => p === "*");
+    let vaultItems: string[] | undefined;
+    if (isWildcard) {
+      try {
+        vaultItems = await listCredentials(getConfig().provider);
+      } catch (err: any) {
+        console.warn(`[gateway] vault list failed: ${err?.message ?? err}`);
+      }
+    }
+
     return c.json({
       keys: tokenData.credentials,
       storeKeys,
+      ...(vaultItems !== undefined && { vaultItems }),
     });
   });
 
