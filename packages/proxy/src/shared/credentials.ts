@@ -51,15 +51,32 @@ function globMatch(pattern: string, value: string): boolean {
 }
 
 /**
- * List all credential titles available in the vault.
- * Returns raw item titles from the provider's `list` command output (JSON array
- * with `title` fields). Returns an empty array if no list command is configured.
+ * List all credential keys available in the vault.
+ *
+ * Vault item titles are matched against override read commands: if a title
+ * appears literally in an override's read command string, that item is accessed
+ * via the override's slug (not the raw title) and the slug is returned instead.
+ * Items not covered by any override are returned by their title, which doubles
+ * as the key slug for the default read command.
  */
 export async function listCredentials(provider: Provider): Promise<string[]> {
   if (!provider.list) return [];
   const output = await execProviderCommand(provider.list, provider);
   const items: Array<{ title: string }> = JSON.parse(output);
-  return items.map((item) => item.title);
+
+  const overrides = provider.overrides ?? [];
+  const result: string[] = [];
+
+  for (const item of items) {
+    const override = overrides.find((o) => o.read.includes(item.title));
+    if (override) {
+      result.push(override.match);
+    } else {
+      result.push(item.title);
+    }
+  }
+
+  return result.sort();
 }
 
 /**
