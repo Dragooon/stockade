@@ -512,7 +512,9 @@ schedule_type options:
         emit({ type: "tool_end", name: "", elapsedMs: Date.now() - toolStart });
         toolStart = 0;
       } else if ("result" in m) {
-        resultText = String((m as any).result ?? "");
+        // Strip <thinking> blocks the SDK injects when MAX_THINKING_TOKENS is set —
+        // thinking is useful internally but must not leak to chat surfaces.
+        resultText = String((m as any).result ?? "").replace(/<thinking>[\s\S]*?<\/antml:thinking>\n*/g, "").trim();
         stopReason = String((m as any).stop_reason ?? "unknown");
         const modelUsage = (m as any).modelUsage;
         if (modelUsage) {
