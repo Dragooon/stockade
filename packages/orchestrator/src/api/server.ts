@@ -77,6 +77,8 @@ export function startCallbackServer(
     );
 
     const result = await hook({ tool_name, tool_input });
+    const decision = result.hookSpecificOutput.permissionDecision;
+    console.log(`[pretooluse] ${decision} "${tool_name}" (${ctx.agentId})`);
     return c.json(result);
   });
 
