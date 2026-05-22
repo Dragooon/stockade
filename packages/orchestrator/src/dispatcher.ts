@@ -333,7 +333,7 @@ export function buildSdkSettings(
     // User-global settings remain excluded.
     settingSources: ["project"],
     // Auto-compact when context exceeds 200k tokens to prevent runaway JSONL growth.
-    autoCompactWindow: 200000,
+    autoCompactWindow: 250000,
     permissions: {
       ...(skillAllow.length ? { allow: skillAllow } : {}),
       deny: [

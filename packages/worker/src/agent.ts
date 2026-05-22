@@ -383,9 +383,9 @@ schedule_type options:
     systemPrompt: request.systemPrompt,
     maxTurns: request.maxTurns ?? DEFAULT_MAX_TURNS,
     cwd: resolvedCwd,
-    // addDir: make the SDK load CLAUDE.md and skills from the agent workspace even when
-    // resolvedCwd points elsewhere (e.g. platform root to avoid Mjz .claude/skills/ block).
-    ...(request.addDir?.length ? { addDir: request.addDir } : {}),
+    // additionalDirectories: make the SDK load CLAUDE.md and skills from the agent workspace
+    // even when resolvedCwd points elsewhere (e.g. platform root to avoid .claude/skills/ block).
+    ...(request.addDir?.length ? { additionalDirectories: request.addDir } : {}),
     // Workers run inside a security boundary — bypass is the correct mode.
     // The PreToolUse hook below is our permission gate.
     // allowDangerouslySkipPermissions is required for bypassPermissions to fully disable
