@@ -14,7 +14,6 @@ import { ensureCA, generateCert, type CaBundle } from "./tls.js";
 
 const META_LOG = join(homedir(), ".stockade", "logs", "cache-meta.ndjson");
 const REQ_LOG  = join(homedir(), ".stockade", "logs", "requests.ndjson");
-const RAW_LOG  = join(homedir(), ".stockade", "logs", "cache-raw.ndjson");
 
 function metaWrite(entry: object): void {
   try { appendFileSync(META_LOG, JSON.stringify(entry) + "\n"); } catch {}
@@ -24,40 +23,6 @@ function reqWrite(entry: object): void {
   try { appendFileSync(REQ_LOG, JSON.stringify(entry) + "\n"); } catch {}
 }
 
-function rawWrite(entry: object): void {
-  try { appendFileSync(RAW_LOG, JSON.stringify(entry) + "\n"); } catch {}
-}
-
-/** Extract cache_control markers from a raw request body for inspection. */
-function extractCacheMarkers(body: Buffer): object | null {
-  try {
-    const req = JSON.parse(body.toString("utf8")) as {
-      model?: string;
-      system?: Array<{ type?: string; cache_control?: unknown; text?: string }>;
-      messages?: Array<{ role: string; content: string | Array<{ type?: string; cache_control?: unknown; text?: string }> }>;
-    };
-    const systemMarkers = (req.system ?? []).map((blk, i) => ({
-      i,
-      type: blk.type,
-      cache_control: blk.cache_control ?? null,
-      bytes: Buffer.byteLength(blk.text ?? "", "utf8"),
-    }));
-    const messageMarkers = (req.messages ?? []).map((msg, i) => {
-      const c = msg.content;
-      if (typeof c === "string") return { i, role: msg.role, format: "string", markers: [] };
-      const markers = c
-        .map((item, j) => ({ j, type: item.type, cache_control: (item as Record<string, unknown>).cache_control ?? null }))
-        .filter((item) => item.cache_control !== null);
-      return { i, role: msg.role, format: "array", len: c.length, ...(markers.length ? { markers } : {}) };
-    });
-    return {
-      model: req.model,
-      system: systemMarkers,
-      msg_count: (req.messages ?? []).length,
-      messages: messageMarkers,
-    };
-  } catch { return null; }
-}
 
 // Track sessions we've already logged a system prompt for — avoids re-logging
 // the same (unchanged) system on every turn of the same session.
@@ -501,17 +466,6 @@ async function handleMitmRequest(
   const isMessages = host === "api.anthropic.com" && path.includes("/messages")
     && method !== "GET" && method !== "HEAD" && body.length > 0;
   const requestMeta = isMessages ? extractRequestMeta(body) : null;
-
-  // Raw cache marker log: every messages turn, capture what the SDK sent natively.
-  if (isMessages) {
-    const markers = extractCacheMarkers(body);
-    if (markers) rawWrite({
-      ts: new Date().toISOString(),
-      ...(stockadeSession && { session: stockadeSession }),
-      ...(stockadeAgent   && { agent:   stockadeAgent }),
-      ...markers,
-    });
-  }
 
   // Request log: capture system prompt once per session (deduped by session ID).
   // Logs to requests.ndjson — separate from cache-meta so it can be inspected
