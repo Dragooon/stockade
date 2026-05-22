@@ -14,6 +14,7 @@ import { ensureCA, generateCert, type CaBundle } from "./tls.js";
 
 const META_LOG = join(homedir(), ".stockade", "logs", "cache-meta.ndjson");
 const REQ_LOG  = join(homedir(), ".stockade", "logs", "requests.ndjson");
+const RAW_LOG  = join(homedir(), ".stockade", "logs", "cache-raw.ndjson");
 
 function metaWrite(entry: object): void {
   try { appendFileSync(META_LOG, JSON.stringify(entry) + "\n"); } catch {}
@@ -21,6 +22,41 @@ function metaWrite(entry: object): void {
 
 function reqWrite(entry: object): void {
   try { appendFileSync(REQ_LOG, JSON.stringify(entry) + "\n"); } catch {}
+}
+
+function rawWrite(entry: object): void {
+  try { appendFileSync(RAW_LOG, JSON.stringify(entry) + "\n"); } catch {}
+}
+
+/** Extract cache_control markers from a raw request body for inspection. */
+function extractCacheMarkers(body: Buffer): object | null {
+  try {
+    const req = JSON.parse(body.toString("utf8")) as {
+      model?: string;
+      system?: Array<{ type?: string; cache_control?: unknown; text?: string }>;
+      messages?: Array<{ role: string; content: string | Array<{ type?: string; cache_control?: unknown; text?: string }> }>;
+    };
+    const systemMarkers = (req.system ?? []).map((blk, i) => ({
+      i,
+      type: blk.type,
+      cache_control: blk.cache_control ?? null,
+      bytes: Buffer.byteLength(blk.text ?? "", "utf8"),
+    }));
+    const messageMarkers = (req.messages ?? []).map((msg, i) => {
+      const c = msg.content;
+      if (typeof c === "string") return { i, role: msg.role, format: "string", markers: [] };
+      const markers = c
+        .map((item, j) => ({ j, type: item.type, cache_control: (item as Record<string, unknown>).cache_control ?? null }))
+        .filter((item) => item.cache_control !== null);
+      return { i, role: msg.role, format: "array", len: c.length, ...(markers.length ? { markers } : {}) };
+    });
+    return {
+      model: req.model,
+      system: systemMarkers,
+      msg_count: (req.messages ?? []).length,
+      messages: messageMarkers,
+    };
+  } catch { return null; }
 }
 
 // Track sessions we've already logged a system prompt for — avoids re-logging
@@ -74,30 +110,15 @@ function extractUsage(body: string): Record<string, number> {
 }
 
 /**
- * Normalize user messages and inject cache_control markers.
+ * Strip scope:global from any cache_control block in the request.
  *
- * ## SDK cache bug workaround (anthropics/claude-agent-sdk-typescript#269)
+ * SDK 0.3.x sets cache markers natively (ttl:1h, correct placements, array
+ * message format). The only remaining fixup needed is that system[2] still
+ * carries scope:global which the Anthropic API rejects with a 400 error.
  *
- * The SDK injects system-reminder blocks into the last user message each turn,
- * then strips them on replay — changing the format (array[3]→string). Since
- * Anthropic's caching is byte-exact prefix matching, this breaks the prefix at
- * the second-to-last user message on every turn.
- *
- * Workaround: place a cache breakpoint on the **second-to-last user message**,
- * which is always in its stable (stripped) form. This anchors the message history
- * prefix so everything up to that point is cache_read. Only the last user turn
- * (~1–2K tokens) is cache_create — an acceptable loss vs ~11K without the fix.
- * This also means cache_read starts from turn 3 instead of turn 4.
- *
- * We also normalize all string-content user messages to array format, so the
- * stable prefix is byte-identical even if the SDK alternates between string and
- * array representations for historical messages.
- *
- * ## Cache markers (up to 4 total, all ttl:1h):
- *   1. system[2]: SDK sets — proxy strips scope:global and ensures ttl:1h
- *   2. system[last]: proxy sets ttl:1h — platform instructions
- *   3. Second-to-last user message: proxy sets ttl:1h — stable history anchor
- *   4. Last user message: SDK sets — proxy upgrades to ttl:1h
+ * All prior workarounds (TTL upgrade, string→array normalisation, second-to-last
+ * user message anchor for SDK bug #269) are no longer needed — validated against
+ * live 0.3.148 traffic on 2026-05-23.
  */
 
 const PILLOW_RESIZE = [
@@ -177,140 +198,23 @@ export function downsizeImages(body: Buffer, host: string, path: string): Buffer
   } catch { return body; }
 }
 
-export function injectCacheMarkers(body: Buffer, host: string, path: string): Buffer {
+export function stripCacheScope(body: Buffer, host: string, path: string): Buffer {
   if (host !== "api.anthropic.com" || !path.includes("/messages")) return body;
   try {
     const req = JSON.parse(body.toString("utf8")) as {
-      model?: string;
-      system?: Array<{ cache_control?: unknown }>;
-      messages?: Array<{ role: string; content: string | Array<{ cache_control?: unknown; type?: string; text?: string }> }>;
+      system?: Array<{ cache_control?: Record<string, unknown> }>;
+      messages?: Array<{ content: string | Array<{ cache_control?: Record<string, unknown> }> }>;
     };
-    let markerCount = 0;
     let modified = false;
 
-    // ── Model-aware cache TTL ──
-    // Haiku does not support ttl:"1h" on system or message cache_control — it returns
-    // 400 ("system.N.cache_control" invalid_request_error). Use standard ephemeral (5m)
-    // for Haiku; use 1h for Opus/Sonnet class models.
-    // Note: scope:global was also tried but returns 400 for all models now.
-    const isHaiku = (req.model ?? "").includes("haiku");
-    const target1hMarker = isHaiku
-      ? { type: "ephemeral" }
-      : { type: "ephemeral", ttl: "1h" };
+    function stripScope(cc: Record<string, unknown> | undefined): void {
+      if (cc?.scope) { delete cc.scope; modified = true; }
+    }
 
-    // ── Normalize user messages: string → array[1] ──
-    // Ensures byte-stable prefix regardless of SDK format inconsistencies.
+    for (const blk of req.system ?? []) stripScope(blk.cache_control);
     for (const msg of req.messages ?? []) {
-      if (msg.role === "user" && typeof msg.content === "string") {
-        (msg as Record<string, unknown>).content = [{ type: "text", text: msg.content }];
-        modified = true;
-      }
-    }
-
-    // Count existing cache markers (after normalization)
-    for (const blk of req.system ?? []) if (blk.cache_control) markerCount++;
-    for (const msg of req.messages ?? []) {
-      const c = msg.content;
-      if (Array.isArray(c)) for (const item of c) if ((item as Record<string, unknown>).cache_control) markerCount++;
-    }
-
-    if (Array.isArray(req.system)) {
-      // Normalise ALL system blocks: strip scope:global (API rejects it)
-      // and upgrade/downgrade ttl to match model capabilities.
-      // Without this, an SDK-set {type:"ephemeral"} (5m) on an early system
-      // block followed by a proxy-set ttl:"1h" on a later block triggers:
-      //   "a ttl='1h' cache_control block must not come after a ttl='5m' block"
-      for (const blk of req.system) {
-        const cc = blk.cache_control as Record<string, unknown> | undefined;
-        if (!cc) continue;
-        if (cc.scope) {
-          delete cc.scope;
-          modified = true;
-        }
-        if (isHaiku) {
-          if (cc.ttl !== undefined) {
-            delete cc.ttl;
-            modified = true;
-          }
-        } else if (cc.ttl !== "1h") {
-          cc.ttl = "1h";
-          modified = true;
-        }
-      }
-
-      // Ensure last system block has a cache marker (ttl already normalised above)
-      if (markerCount < 4 && req.system.length >= 2) {
-        const last = req.system[req.system.length - 1];
-        if (!last.cache_control) {
-          last.cache_control = target1hMarker;
-          markerCount++;
-          modified = true;
-        }
-      }
-    }
-
-    // ── Normalise all message cache markers ──
-    // For Sonnet/Opus: upgrade {type:"ephemeral"} (5m) → ttl:"1h" to avoid ordering
-    //   violations (a 1h marker must not be followed by a 5m marker).
-    // For Haiku: strip ttl field entirely — Haiku only supports standard ephemeral
-    //   (no ttl field). The SDK may set ttl:"1h" even for Haiku, causing 400 errors.
-    // Always strip scope:global (API rejects it for all models).
-    for (const msg of req.messages ?? []) {
-      const c = msg.content;
-      if (!Array.isArray(c)) continue;
-      for (const item of c) {
-        const cc = (item as Record<string, unknown>).cache_control as Record<string, unknown> | undefined;
-        if (!cc) continue;
-        if (isHaiku) {
-          // Downgrade: strip ttl so Haiku gets plain {type:"ephemeral"}
-          if (cc.ttl) {
-            delete cc.ttl;
-            modified = true;
-          }
-        } else if (!cc.ttl) {
-          // Upgrade: add ttl:"1h" for non-Haiku models
-          cc.ttl = "1h";
-          modified = true;
-        }
-        if (cc.scope) {
-          delete cc.scope;
-          modified = true;
-        }
-      }
-    }
-
-    // ── Cache breakpoint on second-to-last user message (stable history anchor) ──
-    //
-    // The SDK injects system-reminders into the LAST user message as array blocks,
-    // then strips them when replaying that message as history (SDK bug #269). This
-    // makes the last user message's content unstable across turns.
-    //
-    // The SECOND-to-last user message was the last message one turn ago. By now,
-    // the SDK has already stripped its system-reminders and our proxy has normalized
-    // it to array[1] format. That normalized form is what gets written to cache this
-    // turn — and it's stable: next turn the SDK sends it as a plain string, we
-    // normalize it to the same array[1], and cache_read hits.
-    //
-    // Placing the anchor here instead of third-to-last:
-    //   - Enables cache_read from turn 3 (vs turn 4 with third-to-last)
-    //   - Covers 1 extra turn of history per request in cache_read
-    //   - Works even for short 2–3 turn conversations
-    if (markerCount < 4 && Array.isArray(req.messages)) {
-      let userMsgCount = 0;
-      for (let i = req.messages.length - 1; i >= 0; i--) {
-        const msg = req.messages[i];
-        if (msg.role !== "user") continue;
-        userMsgCount++;
-        if (userMsgCount < 2) continue; // skip only the last user message (unstable zone)
-        if (Array.isArray(msg.content) && msg.content.length > 0) {
-          const lastItem = msg.content[msg.content.length - 1] as Record<string, unknown>;
-          if (!lastItem.cache_control) {
-            lastItem.cache_control = target1hMarker;
-            markerCount++;
-            modified = true;
-          }
-        }
-        break;
+      if (Array.isArray(msg.content)) {
+        for (const item of msg.content) stripScope(item.cache_control);
       }
     }
 
@@ -573,16 +477,12 @@ async function handleMitmRequest(
     }
   }
 
-  // Inject cache markers for Anthropic messages requests:
-  //   - 1h cache on last system block (platform instructions, block 4)
-  //   - 5m cache on last user message content
+  // Strip scope:global from cache_control blocks — API rejects it for all models.
   if (method !== "GET" && method !== "HEAD" && body.length > 0) {
-    const injected = injectCacheMarkers(body, host, path);
-    if (injected !== body) {
-      body = injected;
-      if (headers["content-length"]) {
-        headers["content-length"] = String(body.length);
-      }
+    const stripped = stripCacheScope(body, host, path);
+    if (stripped !== body) {
+      body = stripped;
+      if (headers["content-length"]) headers["content-length"] = String(body.length);
     }
   }
 
@@ -601,6 +501,17 @@ async function handleMitmRequest(
   const isMessages = host === "api.anthropic.com" && path.includes("/messages")
     && method !== "GET" && method !== "HEAD" && body.length > 0;
   const requestMeta = isMessages ? extractRequestMeta(body) : null;
+
+  // Raw cache marker log: every messages turn, capture what the SDK sent natively.
+  if (isMessages) {
+    const markers = extractCacheMarkers(body);
+    if (markers) rawWrite({
+      ts: new Date().toISOString(),
+      ...(stockadeSession && { session: stockadeSession }),
+      ...(stockadeAgent   && { agent:   stockadeAgent }),
+      ...markers,
+    });
+  }
 
   // Request log: capture system prompt once per session (deduped by session ID).
   // Logs to requests.ndjson — separate from cache-meta so it can be inspected
