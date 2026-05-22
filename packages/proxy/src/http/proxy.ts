@@ -163,6 +163,57 @@ export function downsizeImages(body: Buffer, host: string, path: string): Buffer
   } catch { return body; }
 }
 
+// cc_version cached from the most recent native Claude Code binary session.
+// Workers don't inject this themselves (SDK 0.3.x removed it), so the proxy
+// injects it to keep worker requests classified as CLI traffic by Anthropic.
+let nativeCcVersion = "2.1.146.0000"; // fallback — kept in sync via updateCcVersionCache
+
+/** Sniff the cc_version from a native CLI session and cache it for worker injection. */
+function updateCcVersionCache(body: Buffer, isWorker: boolean, host: string, path: string): void {
+  if (isWorker || host !== "api.anthropic.com" || !path.includes("/messages")) return;
+  try {
+    const req = JSON.parse(body.toString("utf8")) as { system?: Array<{ text?: string }> };
+    const text = req.system?.[0]?.text ?? "";
+    if (!text.startsWith("x-anthropic-billing-header:")) return;
+    const m = text.match(/cc_version=([^;]+)/);
+    if (m?.[1]) nativeCcVersion = m[1];
+  } catch { /* ignore */ }
+}
+
+/**
+ * For Stockade worker requests: ensure the billing header looks like a native
+ * Claude Code CLI session (cc_entrypoint=cli). SDK 0.3.x injects the header
+ * itself but with cc_entrypoint=sdk-ts — rewrite it so requests are classified
+ * as CLI traffic (Claude Max subscription billing) rather than API-SDK traffic.
+ */
+export function injectBillingHeader(body: Buffer, host: string, path: string, isWorker: boolean): Buffer {
+  if (!isWorker || host !== "api.anthropic.com" || !path.includes("/messages")) return body;
+  try {
+    const req = JSON.parse(body.toString("utf8")) as {
+      system?: Array<{ type?: string; text?: string; cache_control?: Record<string, unknown> }>;
+    };
+    const firstText = req.system?.[0]?.text ?? "";
+
+    if (firstText.startsWith("x-anthropic-billing-header:")) {
+      // SDK injected a billing header — rewrite it with cli entrypoint and native version
+      const newText = firstText
+        .replace(/cc_entrypoint=[^;]+/, "cc_entrypoint=cli")
+        .replace(/cc_version=[^;]+/, `cc_version=${nativeCcVersion}`);
+      if (newText === firstText) return body; // already cli, nothing to do
+      req.system![0] = { ...req.system![0], text: newText };
+    } else {
+      // No billing header at all — inject one (legacy path, SDK 0.2.x already did this)
+      req.system = [
+        { type: "text", text: `x-anthropic-billing-header: cc_version=${nativeCcVersion}; cc_entrypoint=cli; cch=00000;` },
+        ...(req.system ?? []),
+      ];
+    }
+    return Buffer.from(JSON.stringify(req), "utf8");
+  } catch {
+    return body;
+  }
+}
+
 export function stripCacheScope(body: Buffer, host: string, path: string): Buffer {
   if (host !== "api.anthropic.com" || !path.includes("/messages")) return body;
   try {
@@ -451,6 +502,25 @@ async function handleMitmRequest(
     }
   }
 
+  // A request is a Stockade worker request if it carries the scope header.
+  // (stockadeSession is empty for new sessions — only set when resuming.)
+  const isWorkerRequest = !!stockadeScope;
+
+  // Keep cc_version in sync from native CLI sessions passing through the proxy.
+  if (method !== "GET" && method !== "HEAD" && body.length > 0) {
+    updateCcVersionCache(body, isWorkerRequest, host, path);
+  }
+
+  // Worker requests (SDK 0.3.x) no longer carry x-anthropic-billing-header; inject it
+  // so they remain classified as Claude Code CLI traffic on Anthropic's side.
+  if (method !== "GET" && method !== "HEAD" && body.length > 0) {
+    const injected = injectBillingHeader(body, host, path, isWorkerRequest);
+    if (injected !== body) {
+      body = injected;
+      if (headers["content-length"]) headers["content-length"] = String(body.length);
+    }
+  }
+
   // Downsize any images exceeding Anthropic's 2000px multi-image limit
   if (method !== "GET" && method !== "HEAD" && body.length > 0) {
     const downsized = downsizeImages(body, host, path);
@@ -470,8 +540,8 @@ async function handleMitmRequest(
   // Request log: capture system prompt once per session (deduped by session ID).
   // Logs to requests.ndjson — separate from cache-meta so it can be inspected
   // independently without noise from per-turn usage stats.
-  if (isMessages && stockadeSession && !loggedSessions.has(stockadeSession)) {
-    loggedSessions.add(stockadeSession);
+  if (isMessages && isWorkerRequest && !loggedSessions.has(stockadeScope)) {
+    loggedSessions.add(stockadeScope);
     try {
       const parsed = JSON.parse(body.toString("utf8")) as {
         model?: string;
@@ -479,9 +549,9 @@ async function handleMitmRequest(
       };
       reqWrite({
         ts: new Date().toISOString(),
-        session: stockadeSession,
+        session: stockadeSession || undefined,
         agent: stockadeAgent || undefined,
-        scope: stockadeScope || undefined,
+        scope: stockadeScope,
         model: parsed.model,
         system: (parsed.system ?? []).map((blk, i) => ({
           index: i,
