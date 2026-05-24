@@ -20,6 +20,8 @@ export interface AgentConfig {
   system_mode?: "append" | "replace";
   /** Effort level for reasoning depth: low, medium, high, max. */
   effort?: "low" | "medium" | "high" | "max";
+  /** Enable adaptive thinking (model self-selects budget). Default: false. */
+  adaptive_thinking?: boolean;
   tools?: string[];
   /** Tool names to disallow (stripped from SDK, never sent to model). Merged with platform defaults. */
   disallowed_tools?: string[];

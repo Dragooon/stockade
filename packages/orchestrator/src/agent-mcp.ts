@@ -67,7 +67,7 @@ export async function handleAgentStart(
     ? `subagent:${agentId}:session:${session}`
     : isSelfSpawn
       ? `self-spawn:${agentId}:${runId}`
-      : `subagent:${agentId}:${parentCtx.callbackToken}`;
+      : `subagent:${agentId}:${runId}`;
 
   const run: AgentRun = {
     runId,

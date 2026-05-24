@@ -333,7 +333,7 @@ export function buildSdkSettings(
     // User-global settings remain excluded.
     settingSources: ["project"],
     // Auto-compact when context exceeds 200k tokens to prevent runaway JSONL growth.
-    autoCompactWindow: 250000,
+    autoCompactWindow: 300000,
     permissions: {
       ...(skillAllow.length ? { allow: skillAllow } : {}),
       deny: [
@@ -587,11 +587,10 @@ export async function dispatchToWorker(
     }
   }
 
-  // Disable 1M context models and adaptive thinking for all agent sessions.
+  // Per-agent thinking config: suppress adaptive thinking unless explicitly enabled.
   workerEnv = {
     ...workerEnv,
-    CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1",
-    CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
+    ...(agentConfig.adaptive_thinking ? {} : { CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1" }),
     MAX_THINKING_TOKENS: agentConfig.model?.includes("opus") ? "128000" : "64000",
   };
 
