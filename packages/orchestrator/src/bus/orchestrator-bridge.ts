@@ -293,6 +293,11 @@ export class OrchestratorBridge {
         const emptyMark = event.text.length === 0 ? " ⚠ EMPTY" : "";
         log(`[bus] ← ${scope.slice(0, 30)} | session=${event.sdkSessionId.slice(0, 12)} | stop=${event.stopReason} | "${preview}${event.text.length > 100 ? "…" : ""}"${emptyMark}`);
 
+        // Guard: if the correlationId has no pending (e.g. stale-session recovery
+        // already consumed it), do NOT coalesce — other pendings for this scope
+        // may be legitimate retries waiting for their own results.
+        if (!p) break;
+
         // Coalesce injected messages: any other pending promises for the same
         // scope were mid-turn injections. The agent addressed them all in one
         // reply, so resolve the coalesced ones with empty text — the channel
@@ -305,8 +310,6 @@ export class OrchestratorBridge {
             op.resolve({ text: "", stopReason: event.stopReason });
           }
         }
-
-        if (!p) break;
         clearTimeout(p.timeoutHandle);
         this.pending.delete(event.correlationId);
         p.resolve({ text: event.text, files: event.files, stopReason: event.stopReason });
