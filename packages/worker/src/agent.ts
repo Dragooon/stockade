@@ -497,11 +497,16 @@ schedule_type options:
           turns++;
           emit({ type: "turn", turns, ...cur });
         }
-        for (const block of (m as any).message?.content ?? []) {
+        const content = (m as any).message?.content ?? [];
+        // Only stream text that accompanies tool calls (progress updates visible
+        // mid-turn). Text-only messages are the final response and must flow via
+        // evt:result so the channel adapter can post them reliably.
+        const hasToolUse = content.some((b: any) => b.type === "tool_use");
+        for (const block of content) {
           if (block.type === "tool_use") {
             toolStart = Date.now();
             emit({ type: "tool_start", name: block.name });
-          } else if (block.type === "text") {
+          } else if (block.type === "text" && hasToolUse) {
             const text = typeof block.text === "string" ? block.text : "";
             if (text.trim()) {
               emit({ type: "assistant_text", text });

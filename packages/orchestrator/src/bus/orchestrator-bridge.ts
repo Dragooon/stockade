@@ -45,8 +45,6 @@ interface Pending {
   timeoutHandle: ReturnType<typeof setTimeout>;
   /** Optional callback for mid-turn partial text streaming. */
   onPartial?: (text: string) => void;
-  /** Set true once a partial has been streamed; suppresses the final post. */
-  streamed: boolean;
   /** Number of auto-continue retries already issued for this dispatch. */
   autoContinueRetries: number;
 }
@@ -143,7 +141,6 @@ export class OrchestratorBridge {
         meta: sessionMeta,
         timeoutHandle,
         onPartial,
-        streamed: false,
         autoContinueRetries,
       });
 
@@ -286,7 +283,6 @@ export class OrchestratorBridge {
           if (p.onPartial) { streamer = p; break; }
         }
         if (streamer?.onPartial) {
-          streamer.streamed = true;
           try { streamer.onPartial(event.text); } catch (err) {
             console.error(`[bus] onPartial threw for ${scope.slice(0, 30)}:`, err);
           }
@@ -316,10 +312,7 @@ export class OrchestratorBridge {
         if (!p) break;
         clearTimeout(p.timeoutHandle);
         this.pending.delete(event.correlationId);
-        // If we already streamed the reply mid-turn, drop the final text
-        // (channel adapter has already posted it). Files still flow through.
-        const finalText = p.streamed ? "" : event.text;
-        p.resolve({ text: finalText, files: event.files, stopReason: event.stopReason });
+        p.resolve({ text: event.text, files: event.files, stopReason: event.stopReason });
         break;
       }
 
