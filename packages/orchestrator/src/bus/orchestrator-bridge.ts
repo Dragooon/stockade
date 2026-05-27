@@ -32,6 +32,9 @@ function log(msg: string): void {
   appendLog(LOG_FILE, msg);
 }
 
+/** How many times a timed-out dispatch may be auto-continued before giving up. */
+const MAX_AUTO_CONTINUE = 5;
+
 interface Pending {
   resolve: (result: ChannelResponse) => void;
   scope: string;
@@ -44,6 +47,8 @@ interface Pending {
   onPartial?: (text: string) => void;
   /** Set true once a partial has been streamed; suppresses the final post. */
   streamed: boolean;
+  /** Number of auto-continue retries already issued for this dispatch. */
+  autoContinueRetries: number;
 }
 
 export class OrchestratorBridge {
@@ -94,6 +99,7 @@ export class OrchestratorBridge {
 
     const attachments = meta["attachments"] as ChannelAttachment[] | undefined;
     const onPartial = meta["onPartial"] as ((text: string) => void) | undefined;
+    const autoContinueRetries = (meta["_autoContinueRetries"] as number | undefined) ?? 0;
 
     // Ensure session exists (idempotent)
     const session = await this.sessionManager.ensureSession(scope, sessionMeta);
@@ -115,8 +121,19 @@ export class OrchestratorBridge {
 
     return new Promise<ChannelResponse>((resolve) => {
       const timeoutHandle = setTimeout(() => {
+        const p = this.pending.get(correlationId);
+        if (!p) return; // already resolved
         this.pending.delete(correlationId);
-        resolve({ text: "Error: dispatch timed out" });
+        if (p.autoContinueRetries < MAX_AUTO_CONTINUE) {
+          const attempt = p.autoContinueRetries + 1;
+          log(`[bus] ⏱ timeout ${scope.slice(0, 30)} — auto-continuing (${attempt}/${MAX_AUTO_CONTINUE})`);
+          const continueMeta = { ...this.buildRetryMeta(p), _autoContinueRetries: attempt };
+          this.sendAndWait(p.scope, "continue", continueMeta).then(resolve).catch(() =>
+            resolve({ text: "Error: dispatch timed out" })
+          );
+        } else {
+          resolve({ text: "Error: dispatch timed out" });
+        }
       }, this.timeoutMs);
 
       this.pending.set(correlationId, {
@@ -127,6 +144,7 @@ export class OrchestratorBridge {
         timeoutHandle,
         onPartial,
         streamed: false,
+        autoContinueRetries,
       });
 
       const preview = promptText.slice(0, 80).replace(/\n/g, " ");
