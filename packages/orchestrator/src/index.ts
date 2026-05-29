@@ -245,6 +245,17 @@ const bridge = new OrchestratorBridge(bus, sessionManager);
 await bridge.start();
 console.log(`[bus] Redis event bus started (url=${redisConfig.url})`);
 
+// 3d. Channel sender registry — populated when adapters start
+// Used by scheduler and background agent delivery to post results back to the originating channel.
+const channelSenders = new Map<string, (scope: string, text: string, files?: ChannelFile[]) => Promise<void>>();
+
+// Deliver a result to the channel identified by scope (platform-routed).
+function sendToChannel(scope: string, text: string, files?: ChannelFile[]): Promise<void> {
+  const platform = scope.split(":")[0];
+  const sender = channelSenders.get(platform);
+  return sender ? sender(scope, text, files) : Promise.resolve();
+}
+
 // 3c. Start orchestrator callback server (port 7420)
 // Workers call back here for permission checks and agent MCP tool invocations.
 const stopCallbackServer = startCallbackServer(
@@ -267,11 +278,8 @@ const stopCallbackServer = startCallbackServer(
     };
   },
   taskStore,
+  sendToChannel,
 );
-
-// 3d. Channel sender registry — populated when adapters start
-// Used by scheduler to deliver task results back to the originating channel.
-const channelSenders = new Map<string, (scope: string, text: string, files?: ChannelFile[]) => Promise<void>>();
 
 /**
  * Execute a scheduled task: dispatch to the agent and deliver the result
@@ -308,17 +316,13 @@ async function executeTask(task: ScheduledTask): Promise<string> {
   // dropped (not echoed as the raw prompt) — empties usually mean the dispatch
   // was coalesced as a mid-turn injection by the bus, in which case the real
   // reply already went out under another correlationId.
-  const platform = task.scope.split(":")[0];
-  const sender = channelSenders.get(platform);
-  if (sender) {
-    const text = response.text.trim();
-    if (!text) {
-      console.warn(`[scheduler] Task ${task.id} returned empty response — skipping channel delivery`);
-    } else {
-      sender(task.scope, text, response.files).catch((err: unknown) =>
-        console.error(`[scheduler] Failed to deliver result for task ${task.id}:`, err)
-      );
-    }
+  const text = response.text.trim();
+  if (!text) {
+    console.warn(`[scheduler] Task ${task.id} returned empty response — skipping channel delivery`);
+  } else {
+    sendToChannel(task.scope, text, response.files).catch((err: unknown) =>
+      console.error(`[scheduler] Failed to deliver result for task ${task.id}:`, err)
+    );
   }
 
   return response.text;

@@ -30,6 +30,7 @@ import type { WorkerManager } from "../workers/index.js";
 import type { DispatchContext } from "../dispatcher.js";
 import type { OrchestratorBridge } from "../bus/orchestrator-bridge.js";
 import type { TaskStore, ScheduleType, ContextMode } from "../scheduler/types.js";
+import type { ChannelFile } from "../types.js";
 
 export const CALLBACK_PORT = 7420;
 
@@ -38,6 +39,7 @@ export function startCallbackServer(
   bridge: OrchestratorBridge | null,
   buildDispatchContext: (token: string) => DispatchContext | null,
   taskStore?: TaskStore,
+  sendToChannel?: (scope: string, text: string, files?: ChannelFile[]) => Promise<void>,
 ): () => void {
   const app = new Hono();
 
@@ -146,7 +148,7 @@ export function startCallbackServer(
 
     if (!bridge) return c.json({ error: "Redis bridge not initialized" }, 503);
     try {
-      const result = await handleAgentStart(args, ctx, dispatchCtx, workerManager, bridge);
+      const result = await handleAgentStart(args, ctx, dispatchCtx, workerManager, bridge, sendToChannel);
       return c.json(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -18,7 +18,7 @@ import { checkAccess, buildPermissionHook } from "./rbac.js";
 import { resolveEffectivePermissions } from "./gatekeeper.js";
 import type { WorkerManager } from "./workers/index.js";
 import type { OrchestratorBridge } from "./bus/orchestrator-bridge.js";
-import type { AskApprovalFn } from "./types.js";
+import type { AskApprovalFn, ChannelFile } from "./types.js";
 
 interface AgentRun {
   runId: string;
@@ -43,6 +43,7 @@ export async function handleAgentStart(
   dispatchCtx: DispatchContext,
   workerManager: WorkerManager,
   bridge: OrchestratorBridge,
+  sendToChannel?: (scope: string, text: string, files?: ChannelFile[]) => Promise<void>,
 ): Promise<{ runId: string; result?: string; files?: Array<{ filename: string; contentType: string; path: string; content?: string }> }> {
   const { task, name, session, background = false } = args;
 
@@ -100,7 +101,7 @@ export async function handleAgentStart(
     const label = `"${name ?? agentId}" (${runId.slice(0, 8)})`;
 
     bridge.sendAndWait(subScope, task, meta)
-      .then((result) => {
+      .then(async (result) => {
         run.done = true;
         if (name) namedRuns.delete(name);
         runs.delete(runId);
@@ -108,11 +109,19 @@ export async function handleAgentStart(
 
         const text = `[Background agent ${label} complete]:\n${result.text}`;
         // Re-dispatch via bridge to inject completion into parent scope
-        return bridge.sendAndWait(parentScope, text, {
+        const injectionResult = await bridge.sendAndWait(parentScope, text, {
           userId: parentUserId,
           userPlatform: parentUserPlatform,
           askApproval: parentAskApproval as AskApprovalFn | undefined,
         });
+
+        // Deliver synthesis response to the originating channel.
+        // Without this the result resolves inside agent-mcp and is never posted.
+        if (sendToChannel && injectionResult.text?.trim()) {
+          sendToChannel(parentScope, injectionResult.text, injectionResult.files).catch((err) => {
+            console.error(`[agent-mcp] failed to deliver background agent result to ${parentScope.slice(0, 40)}:`, err);
+          });
+        }
       })
       .catch((err) => {
         run.done = true;
@@ -127,6 +136,10 @@ export async function handleAgentStart(
           userId: parentUserId,
           userPlatform: parentUserPlatform,
           askApproval: parentAskApproval as AskApprovalFn | undefined,
+        }).then((injectionResult) => {
+          if (sendToChannel && injectionResult.text?.trim()) {
+            sendToChannel(parentScope, injectionResult.text, injectionResult.files).catch(() => {});
+          }
         }).catch(() => {});
       });
 
