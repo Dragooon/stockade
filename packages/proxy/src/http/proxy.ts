@@ -199,8 +199,16 @@ export function downsizeImages(body: Buffer, host: string, path: string): Buffer
     const resized = JSON.parse(result.stdout.toString()) as string[];
     if (resized.length !== sources.length) return body;
 
-    for (let i = 0; i < sources.length; i++) sources[i].data = resized[i];
-    return Buffer.from(JSON.stringify(req), "utf8");
+    // Patch the original body bytes by replacing each image's base64 data in-place.
+    // Do NOT mutate req and re-serialize — that would corrupt thinking block signatures.
+    let bodyStr = body.toString("utf8");
+    for (let i = 0; i < sources.length; i++) {
+      const oldData = sources[i].data as string;
+      const newData = resized[i];
+      if (oldData === newData) continue;
+      bodyStr = bodyStr.split(JSON.stringify(oldData)).join(JSON.stringify(newData));
+    }
+    return Buffer.from(bodyStr, "utf8");
   } catch { return body; }
 }
 
