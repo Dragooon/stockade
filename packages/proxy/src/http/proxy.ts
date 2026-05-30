@@ -15,6 +15,47 @@ import { ensureCA, generateCert, type CaBundle } from "./tls.js";
 const META_LOG = join(homedir(), ".stockade", "logs", "cache-meta.ndjson");
 const REQ_LOG  = join(homedir(), ".stockade", "logs", "requests.ndjson");
 
+/**
+ * Re-serialize `req` but splice the original raw bytes of the `messages` array
+ * back in from `originalBody`. This prevents JSON.parse→stringify round-trips from
+ * altering thinking/redacted_thinking block bytes (e.g. é → é) in ways that
+ * break the API's signature check and cause a 400.
+ */
+function reserializePreservingMessages(req: Record<string, unknown>, originalBody: string): string {
+  if (!req.messages) return JSON.stringify(req);
+
+  // Find "messages": in the original body and extract the raw array span.
+  const msgIdx = originalBody.indexOf('"messages"');
+  if (msgIdx === -1) return JSON.stringify(req);
+
+  let i = msgIdx + '"messages"'.length;
+  // Skip whitespace and the colon
+  while (i < originalBody.length && originalBody[i] !== ':') i++;
+  i++; // skip ':'
+  while (i < originalBody.length && ' \t\n\r'.includes(originalBody[i])) i++;
+  if (originalBody[i] !== '[') return JSON.stringify(req); // unexpected
+
+  const valueStart = i;
+  let depth = 0, inStr = false, esc = false;
+  while (i < originalBody.length) {
+    const c = originalBody[i++];
+    if (esc) { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === '[') depth++;
+    else if (c === ']') { if (--depth === 0) break; }
+  }
+  const originalMessagesSpan = originalBody.slice(valueStart, i);
+
+  // Serialize everything except messages, then splice the original span back in.
+  const copy = { ...req } as Record<string, unknown>;
+  delete copy.messages;
+  const withoutMessages = JSON.stringify(copy);
+  const hasKeys = Object.keys(copy).length > 0;
+  return withoutMessages.slice(0, -1) + (hasKeys ? ',' : '') + `"messages":${originalMessagesSpan}}`;
+}
+
 function metaWrite(entry: object): void {
   try { appendFileSync(META_LOG, JSON.stringify(entry) + "\n"); } catch {}
 }
@@ -195,20 +236,26 @@ export function injectBillingHeader(body: Buffer, host: string, path: string, is
     const firstText = req.system?.[0]?.text ?? "";
 
     if (firstText.startsWith("x-anthropic-billing-header:")) {
-      // SDK injected a billing header — rewrite it with cli entrypoint and native version
+      // SDK injected a billing header — rewrite it with cli entrypoint and native version.
       const newText = firstText
         .replace(/cc_entrypoint=[^;]+/, "cc_entrypoint=cli")
         .replace(/cc_version=[^;]+/, `cc_version=${nativeCcVersion}`);
       if (newText === firstText) return body; // already cli, nothing to do
-      req.system![0] = { ...req.system![0], text: newText };
+      // Patch only the text value in the original buffer to avoid re-serializing the
+      // whole body and corrupting thinking/redacted_thinking block signatures.
+      const bodyStr = body.toString("utf8");
+      const patched = bodyStr.replace(JSON.stringify(firstText), JSON.stringify(newText));
+      if (patched === bodyStr) return body; // shouldn't happen
+      return Buffer.from(patched, "utf8");
     } else {
-      // No billing header at all — inject one (legacy path, SDK 0.2.x already did this)
+      // No billing header at all — inject one. This legacy path (SDK 0.2.x) predates
+      // extended thinking, so full re-serialization is safe.
       req.system = [
         { type: "text", text: `x-anthropic-billing-header: cc_version=${nativeCcVersion}; cc_entrypoint=cli; cch=00000;` },
         ...(req.system ?? []),
       ];
+      return Buffer.from(JSON.stringify(req), "utf8");
     }
-    return Buffer.from(JSON.stringify(req), "utf8");
   } catch {
     return body;
   }
@@ -217,7 +264,8 @@ export function injectBillingHeader(body: Buffer, host: string, path: string, is
 export function stripCacheScope(body: Buffer, host: string, path: string): Buffer {
   if (host !== "api.anthropic.com" || !path.includes("/messages")) return body;
   try {
-    const req = JSON.parse(body.toString("utf8")) as {
+    const bodyStr = body.toString("utf8");
+    const req = JSON.parse(bodyStr) as {
       system?: Array<{ cache_control?: Record<string, unknown> }>;
       messages?: Array<{
         role?: string;
@@ -245,7 +293,8 @@ export function stripCacheScope(body: Buffer, host: string, path: string): Buffe
     }
 
     if (!modified) return body;
-    return Buffer.from(JSON.stringify(req), "utf8");
+    // Preserve original messages bytes to avoid re-serializing thinking block signatures.
+    return Buffer.from(reserializePreservingMessages(req as Record<string, unknown>, bodyStr), "utf8");
   } catch {
     return body;
   }
