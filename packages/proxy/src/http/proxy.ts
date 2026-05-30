@@ -219,7 +219,10 @@ export function stripCacheScope(body: Buffer, host: string, path: string): Buffe
   try {
     const req = JSON.parse(body.toString("utf8")) as {
       system?: Array<{ cache_control?: Record<string, unknown> }>;
-      messages?: Array<{ content: string | Array<{ cache_control?: Record<string, unknown> }> }>;
+      messages?: Array<{
+        role?: string;
+        content: string | Array<{ type?: string; cache_control?: Record<string, unknown> }>;
+      }>;
     };
     let modified = false;
 
@@ -229,8 +232,15 @@ export function stripCacheScope(body: Buffer, host: string, path: string): Buffe
 
     for (const blk of req.system ?? []) stripScope(blk.cache_control);
     for (const msg of req.messages ?? []) {
+      // Never touch assistant messages — thinking/redacted_thinking blocks must
+      // remain byte-identical to the original API response or the API rejects with 400.
+      if (msg.role === "assistant") continue;
       if (Array.isArray(msg.content)) {
-        for (const item of msg.content) stripScope(item.cache_control);
+        for (const item of msg.content) {
+          // Extra guard: skip thinking blocks regardless of role.
+          if (item.type === "thinking" || item.type === "redacted_thinking") continue;
+          stripScope(item.cache_control);
+        }
       }
     }
 
