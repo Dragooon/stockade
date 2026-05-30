@@ -273,36 +273,17 @@ export function stripCacheScope(body: Buffer, host: string, path: string): Buffe
   if (host !== "api.anthropic.com" || !path.includes("/messages")) return body;
   try {
     const bodyStr = body.toString("utf8");
-    const req = JSON.parse(bodyStr) as {
-      system?: Array<{ cache_control?: Record<string, unknown> }>;
-      messages?: Array<{
-        role?: string;
-        content: string | Array<{ type?: string; cache_control?: Record<string, unknown> }>;
-      }>;
-    };
-    let modified = false;
-
-    function stripScope(cc: Record<string, unknown> | undefined): void {
-      if (cc?.scope) { delete cc.scope; modified = true; }
-    }
-
-    for (const blk of req.system ?? []) stripScope(blk.cache_control);
-    for (const msg of req.messages ?? []) {
-      // Never touch assistant messages — thinking/redacted_thinking blocks must
-      // remain byte-identical to the original API response or the API rejects with 400.
-      if (msg.role === "assistant") continue;
-      if (Array.isArray(msg.content)) {
-        for (const item of msg.content) {
-          // Extra guard: skip thinking blocks regardless of role.
-          if (item.type === "thinking" || item.type === "redacted_thinking") continue;
-          stripScope(item.cache_control);
-        }
-      }
-    }
-
-    if (!modified) return body;
-    // Preserve original messages bytes to avoid re-serializing thinking block signatures.
-    return Buffer.from(reserializePreservingMessages(req as Record<string, unknown>, bodyStr), "utf8");
+    // Remove "scope":"<value>" from cache_control objects via string replacement.
+    // Inside JSON strings, " is encoded as \", so a bare "scope" token can only
+    // appear as an actual JSON key — never inside a string value. This means we
+    // can safely regex-strip it without touching thinking/redacted_thinking block bytes.
+    // Three passes handle scope as non-first key, first key, or only key respectively.
+    const stripped = bodyStr
+      .replace(/,\s*"scope"\s*:\s*"(?:[^"\\]|\\.)*"/g, "")
+      .replace(/"scope"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*/g, "")
+      .replace(/"scope"\s*:\s*"(?:[^"\\]|\\.)*"/g, "");
+    if (stripped === bodyStr) return body;
+    return Buffer.from(stripped, "utf8");
   } catch {
     return body;
   }
