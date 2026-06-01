@@ -210,6 +210,22 @@ export class SessionManager {
     return this.sessions.get(scope);
   }
 
+  /**
+   * Refresh the idle timer on worker activity (called per turn by the bridge).
+   *
+   * Without this, the idle timer is only reset by a new inbound user message
+   * (ensureSession), so it measures time-since-last-message rather than
+   * time-since-last-activity. A long-running task that emits many turns but no
+   * new user message looks "idle" and gets closed mid-flight — racing the
+   * dispatch auto-continue, which then cold-boots a fresh, history-less session.
+   */
+  touch(scope: string): void {
+    const session = this.sessions.get(scope);
+    if (!session) return;
+    clearTimeout(session.idleTimer);
+    session.idleTimer = this.startIdleTimer(scope);
+  }
+
   /** Return all active scopes for a given agentId. Used for worker-restart recovery. */
   getScopesByAgentId(agentId: string): Set<string> {
     const scopes = new Set<string>();

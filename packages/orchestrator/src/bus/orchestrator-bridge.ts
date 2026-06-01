@@ -118,28 +118,12 @@ export class OrchestratorBridge {
     const correlationId = randomUUID();
 
     return new Promise<ChannelResponse>((resolve) => {
-      const timeoutHandle = setTimeout(() => {
-        const p = this.pending.get(correlationId);
-        if (!p) return; // already resolved
-        this.pending.delete(correlationId);
-        if (p.autoContinueRetries < MAX_AUTO_CONTINUE) {
-          const attempt = p.autoContinueRetries + 1;
-          log(`[bus] ⏱ timeout ${scope.slice(0, 30)} — auto-continuing (${attempt}/${MAX_AUTO_CONTINUE})`);
-          const continueMeta = { ...this.buildRetryMeta(p), _autoContinueRetries: attempt };
-          this.sendAndWait(p.scope, "continue", continueMeta).then(resolve).catch(() =>
-            resolve({ text: "Error: dispatch timed out" })
-          );
-        } else {
-          resolve({ text: "Error: dispatch timed out" });
-        }
-      }, this.timeoutMs);
-
       this.pending.set(correlationId, {
         resolve,
         scope,
         originalText: promptText,
         meta: sessionMeta,
-        timeoutHandle,
+        timeoutHandle: this.armTimeout(correlationId),
         onPartial,
         autoContinueRetries,
       });
@@ -227,6 +211,32 @@ export class OrchestratorBridge {
   }
 
   /**
+   * Arm (or re-arm) the dispatch timeout for a pending correlation. On expiry,
+   * auto-continues a possibly-stuck dispatch. The timer is reset on every worker
+   * turn (see evt:turn) so a dispatch that is actively making progress is never
+   * declared timed-out — only a genuinely silent/hung dispatch trips it. This
+   * prevents the spurious "continue" that, combined with an idle-close, used to
+   * cold-boot a fresh, history-less session.
+   */
+  private armTimeout(correlationId: string): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      const p = this.pending.get(correlationId);
+      if (!p) return; // already resolved
+      this.pending.delete(correlationId);
+      if (p.autoContinueRetries < MAX_AUTO_CONTINUE) {
+        const attempt = p.autoContinueRetries + 1;
+        log(`[bus] ⏱ timeout ${p.scope.slice(0, 30)} — auto-continuing (${attempt}/${MAX_AUTO_CONTINUE})`);
+        const continueMeta = { ...this.buildRetryMeta(p), _autoContinueRetries: attempt };
+        this.sendAndWait(p.scope, "continue", continueMeta).then(p.resolve).catch(() =>
+          p.resolve({ text: "Error: dispatch timed out" })
+        );
+      } else {
+        p.resolve({ text: "Error: dispatch timed out" });
+      }
+    }, this.timeoutMs);
+  }
+
+  /**
    * Build the meta to use for a retried dispatch (worker_restart or stale_session).
    * Forwards the FULL original SessionMeta — dropping `agentId`, `parentAgentId`,
    * `parentCwd`, or `forceParentCwd` causes inline subagents to be re-dispatched
@@ -254,6 +264,16 @@ export class OrchestratorBridge {
         break;
 
       case "evt:turn": {
+        // Worker made progress. Refresh the session idle timer and reset the
+        // dispatch timeout(s) for this scope, so an actively-working session is
+        // never idle-closed or declared timed-out mid-task (which previously
+        // raced into a cold, history-less session — see armTimeout / touch).
+        this.sessionManager.touch(scope);
+        for (const [cid, p] of this.pending) {
+          if (p.scope !== scope) continue;
+          clearTimeout(p.timeoutHandle);
+          p.timeoutHandle = this.armTimeout(cid);
+        }
         const parts = [`${event.input}in/${event.output}out`];
         if (event.cacheRead > 0) parts.push(`cache_read:${event.cacheRead}`);
         if (event.cacheCreate > 0) parts.push(`cache_create:${event.cacheCreate}`);
