@@ -569,6 +569,27 @@ export class DiscordAdapter {
       this.inFlightMessages.delete(contentKey);
     };
 
+    // Bound every Discord REST send: a stalled send (rate-limit / network stall
+    // that neither resolves nor rejects) must never deadlock delivery. A hung
+    // partial send used to freeze `await sendChain` below, leaving the final
+    // reply unposted and cleanup() unreached — which leaked the typing indicator
+    // ("MadgeBot is typing…" forever) and stranded the thread.
+    const SEND_TIMEOUT_MS = 15_000;
+    const sendWithTimeout = (arg: unknown): Promise<unknown> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        Promise.resolve((ch as any).send(arg)).catch((err: unknown) => {
+          console.error(`[discord] send failed scope=${scope.slice(0, 30)}:`, err instanceof Error ? err.message : String(err));
+        }),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            console.error(`[discord] send TIMED OUT after ${SEND_TIMEOUT_MS}ms scope=${scope.slice(0, 30)} — abandoning send so delivery can proceed`);
+            resolve();
+          }, SEND_TIMEOUT_MS);
+        }),
+      ]).finally(() => { if (timer) clearTimeout(timer); });
+    };
+
     // Serialize partial sends so chunks arrive in order even if the next
     // partial fires before the previous send resolves.
     let sendChain: Promise<unknown> = Promise.resolve();
@@ -576,7 +597,7 @@ export class DiscordAdapter {
       const chunks = splitMessage(text, 2000);
       sendChain = sendChain.then(async () => {
         for (const chunk of chunks) {
-          await ch.send(chunk).catch(() => {});
+          await sendWithTimeout(chunk);
         }
       });
     };
@@ -585,43 +606,48 @@ export class DiscordAdapter {
     // The session persists per-scope; this message is injected into the running
     // session (or queued for the next turn) without blocking the channel handler.
     this.opts.onMessage(channelMessage, askApproval, onPartial).then(async (response) => {
-      // Wait for any in-flight partial sends to land before posting final.
-      await sendChain.catch(() => {});
-      cleanup();
-      const { text, files, stopReason } = response;
-      const fileSummary = files?.map((f) => `${f.filename}(${f.content ? `b64:${Math.floor(f.content.length*0.75)}b` : `path:${f.path}`})`).join(", ") ?? "none";
-      console.log(`[discord] response received scope=${scope.slice(0, 30)} text_len=${text?.length ?? 0} files=[${fileSummary}]`);
-      const attachments = files?.map(toAttachment) ?? [];
-      const hasText = !!text?.trim();
-      if (!hasText) {
-        // Files arrive only with the terminal result; if the text was streamed
-        // mid-turn, send the files as a follow-up so they aren't dropped.
-        if (attachments.length > 0) {
-          try {
-            await ch.send({ files: attachments });
+      try {
+        // Wait for any in-flight partial sends to land before posting final —
+        // bounded, so a slow/stuck partial can never block the terminal reply.
+        await Promise.race([
+          sendChain.catch(() => {}),
+          new Promise<void>((r) => setTimeout(r, SEND_TIMEOUT_MS)),
+        ]);
+        const { text, files, stopReason } = response;
+        const fileSummary = files?.map((f) => `${f.filename}(${f.content ? `b64:${Math.floor(f.content.length*0.75)}b` : `path:${f.path}`})`).join(", ") ?? "none";
+        console.log(`[discord] response received scope=${scope.slice(0, 30)} text_len=${text?.length ?? 0} files=[${fileSummary}]`);
+        const attachments = files?.map(toAttachment) ?? [];
+        const hasText = !!text?.trim();
+        if (!hasText) {
+          // Files arrive only with the terminal result; if the text was streamed
+          // mid-turn, send the files as a follow-up so they aren't dropped.
+          if (attachments.length > 0) {
+            await sendWithTimeout({ files: attachments });
             console.log(`[discord] follow-up files sent (${attachments.length})`);
-          } catch (err) {
-            console.error(`[discord] follow-up files send FAILED:`, err instanceof Error ? err.message : String(err));
+            return;
+          }
+          // end_turn = agent chose to stay silent (shared channel filtering, intentional no-op).
+          // Anything else (max_turns, error, error_max_turns, …) is a silent failure — surface it.
+          const normalSilent = !stopReason || stopReason === "end_turn";
+          if (!normalSilent) {
+            await sendWithTimeout(`⚠ Agent finished with no message (stop_reason: \`${stopReason}\`). Re-prompt or increase \`max_turns\`.`);
           }
           return;
         }
-        // end_turn = agent chose to stay silent (shared channel filtering, intentional no-op).
-        // Anything else (max_turns, error, error_max_turns, …) is a silent failure — surface it.
-        const normalSilent = !stopReason || stopReason === "end_turn";
-        if (!normalSilent) {
-          await ch.send(`⚠ Agent finished with no message (stop_reason: \`${stopReason}\`). Re-prompt or increase \`max_turns\`.`).catch(() => {});
+        const chunks = splitMessage(text, 2000);
+        await sendWithTimeout({ content: chunks[0], files: attachments });
+        for (const chunk of chunks.slice(1)) {
+          await sendWithTimeout(chunk);
         }
-        return;
-      }
-      const chunks = splitMessage(text, 2000);
-      await ch.send({ content: chunks[0], files: attachments });
-      for (const chunk of chunks.slice(1)) {
-        await ch.send(chunk);
+      } finally {
+        // ALWAYS clear the typing interval + in-flight guard, even if every send
+        // above timed out. Missing this is exactly what stranded the thread.
+        cleanup();
       }
     }).catch(async (err) => {
       cleanup();
       const errMsg = err instanceof Error ? err.message : String(err);
-      await ch.send(`Error: ${errMsg}`).catch(() => {});
+      await sendWithTimeout(`Error: ${errMsg}`);
     });
   }
 
