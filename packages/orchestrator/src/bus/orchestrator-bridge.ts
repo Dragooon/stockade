@@ -35,6 +35,13 @@ function log(msg: string): void {
 /** How many times a timed-out dispatch may be auto-continued before giving up. */
 const MAX_AUTO_CONTINUE = 5;
 
+// Subagent dispatches emit a turn every few seconds while healthy. If one goes
+// silent this long it is almost certainly wedged (e.g. an MCP tool call that
+// hung with no abort path — a browse subagent stuck on a stalled apply page).
+// Fail the parent's dispatch fast instead of letting it block for the full
+// top-level timeout (which, with auto-continue, stranded Madge for hours).
+const SUBAGENT_INACTIVITY_TIMEOUT_MS = 600_000; // 10 min
+
 interface Pending {
   resolve: (result: ChannelResponse) => void;
   scope: string;
@@ -123,7 +130,7 @@ export class OrchestratorBridge {
         scope,
         originalText: promptText,
         meta: sessionMeta,
-        timeoutHandle: this.armTimeout(correlationId),
+        timeoutHandle: this.armTimeout(correlationId, scope),
         onPartial,
         autoContinueRetries,
       });
@@ -218,11 +225,30 @@ export class OrchestratorBridge {
    * prevents the spurious "continue" that, combined with an idle-close, used to
    * cold-boot a fresh, history-less session.
    */
-  private armTimeout(correlationId: string): ReturnType<typeof setTimeout> {
+  private armTimeout(correlationId: string, scope: string): ReturnType<typeof setTimeout> {
+    const isSubagent = scope.startsWith("subagent:");
+    const timeoutMs = isSubagent ? SUBAGENT_INACTIVITY_TIMEOUT_MS : this.timeoutMs;
     return setTimeout(() => {
       const p = this.pending.get(correlationId);
       if (!p) return; // already resolved
       this.pending.delete(correlationId);
+      if (isSubagent) {
+        // A wedged subagent can't be rescued by auto-continue — the injected
+        // "continue" just queues behind the stuck turn and never runs. Free the
+        // parent with a clean error and signal the worker to abort the scope so a
+        // recovered tool call doesn't resume a zombie session.
+        const mins = Math.round(timeoutMs / 60_000);
+        log(`[bus] ⏱ subagent ${p.scope.slice(0, 38)} silent ${mins}m — wedged, failing dispatch`);
+        this.bus.publishControl(p.meta.agentId, {
+          kind: "control",
+          action: "abort",
+          scope: p.scope,
+          reason: `inactivity ${mins}m`,
+          timestamp: new Date().toISOString(),
+        }).catch(() => {});
+        p.resolve({ text: `Error: subagent timed out — no activity for ${mins} min (likely a hung tool call). Parent freed; retry or proceed without it.` });
+        return;
+      }
       if (p.autoContinueRetries < MAX_AUTO_CONTINUE) {
         const attempt = p.autoContinueRetries + 1;
         log(`[bus] ⏱ timeout ${p.scope.slice(0, 30)} — auto-continuing (${attempt}/${MAX_AUTO_CONTINUE})`);
@@ -233,7 +259,7 @@ export class OrchestratorBridge {
       } else {
         p.resolve({ text: "Error: dispatch timed out" });
       }
-    }, this.timeoutMs);
+    }, timeoutMs);
   }
 
   /**
@@ -272,7 +298,7 @@ export class OrchestratorBridge {
         for (const [cid, p] of this.pending) {
           if (p.scope !== scope) continue;
           clearTimeout(p.timeoutHandle);
-          p.timeoutHandle = this.armTimeout(cid);
+          p.timeoutHandle = this.armTimeout(cid, p.scope);
         }
         const parts = [`${event.input}in/${event.output}out`];
         if (event.cacheRead > 0) parts.push(`cache_read:${event.cacheRead}`);
