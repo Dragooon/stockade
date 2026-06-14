@@ -69,8 +69,15 @@ export interface SessionMeta {
   userId: string;
   userPlatform: string;
   askApproval?: AskApprovalFn;
-  /** When true: don't resume or persist SDK session (scheduler isolated tasks). */
+  /** When true: don't RESUME an existing SDK session (start fresh). Used by both
+   * scheduler isolated tasks AND stale-session retries. Does NOT by itself prevent
+   * persisting the freshly-created session id — see `ephemeral` for that. */
   noSession?: boolean;
+  /** When true: never persist the SDK session id to sessions.db (scheduler isolated
+   * tasks only). Stale-session retries must NOT set this, otherwise the recovered
+   * session id is never written back and the scope re-resumes the dead id forever
+   * (permanent history-less cold-loop). */
+  ephemeral?: boolean;
   /** Override agentId (for sub-agents where scope doesn't resolve via router). */
   agentId?: string;
   /** Parent agent's cwd (inline sub-agents share workspace). */
@@ -95,8 +102,10 @@ export interface ManagedSession {
   proxyToken?: string;
   sdkSessionId: string | null;
   /** Ephemeral session — its sdkSessionId is never persisted to sessions.db.
-   * Set true for scheduler tasks dispatched with meta.noSession so a fresh
-   * SDK session per fire never overwrites the user's resume mapping. */
+   * Set true ONLY for scheduler tasks dispatched with meta.ephemeral so a fresh
+   * SDK session per fire never overwrites the user's resume mapping. NOTE: this is
+   * deliberately NOT set for stale-session retries — those must persist their
+   * recovered id so the conversation regains continuity on the next message. */
   isolated: boolean;
   idleTimer: ReturnType<typeof setTimeout>;
 }
@@ -319,6 +328,11 @@ export class SessionManager {
         CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
         MAX_THINKING_TOKENS: agentConfig.model?.includes("opus") ? "128000" : "64000",
         REDIS_URL: deps.redisUrl,
+        // Safety margin for slow MCP server cold-starts (e.g. chrome-devtools-mcp
+        // connecting to Chrome). The SDK drops MCP servers that don't finish
+        // initializing within this window; the default is too short for a
+        // browser-attaching server on a loaded container.
+        MCP_TIMEOUT: "60000",
       };
 
       if (deps.proxy && agentConfig.sandboxed) {
@@ -474,7 +488,7 @@ export class SessionManager {
         sandboxed: effectiveSandboxed,
         proxyToken,
         sdkSessionId: sdkSessionId ?? null,
-        isolated: !!meta.noSession,
+        isolated: !!meta.ephemeral,
         idleTimer: this.startIdleTimer(scope),
       };
 

@@ -301,6 +301,7 @@ async function executeTask(task: ScheduledTask): Promise<string> {
     userId: task.userId,
     userPlatform: task.userPlatform,
     noSession: isolated,
+    ephemeral: isolated, // never persist a scheduled fire's SDK session to the user's row
   });
 
   // Tear down the ephemeral session immediately — its in-memory ManagedSession

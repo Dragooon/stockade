@@ -96,6 +96,7 @@ export class OrchestratorBridge {
       userPlatform: (meta["userPlatform"] as string) ?? "internal",
       askApproval: meta["askApproval"] as SessionMeta["askApproval"],
       noSession: (meta["noSession"] as boolean) ?? false,
+      ephemeral: (meta["ephemeral"] as boolean) ?? false,
       agentId: meta["agentId"] as string | undefined,
       parentCwd: meta["parentCwd"] as string | undefined,
       parentAgentId: meta["parentAgentId"] as string | undefined,
@@ -125,12 +126,13 @@ export class OrchestratorBridge {
     const correlationId = randomUUID();
 
     return new Promise<ChannelResponse>((resolve) => {
+      const timeoutHandle = this.armTimeout(correlationId, scope);
       this.pending.set(correlationId, {
         resolve,
         scope,
         originalText: promptText,
         meta: sessionMeta,
-        timeoutHandle: this.armTimeout(correlationId, scope),
+        timeoutHandle,
         onPartial,
         autoContinueRetries,
       });
@@ -239,13 +241,15 @@ export class OrchestratorBridge {
         // recovered tool call doesn't resume a zombie session.
         const mins = Math.round(timeoutMs / 60_000);
         log(`[bus] ⏱ subagent ${p.scope.slice(0, 38)} silent ${mins}m — wedged, failing dispatch`);
-        this.bus.publishControl(p.meta.agentId, {
-          kind: "control",
-          action: "abort",
-          scope: p.scope,
-          reason: `inactivity ${mins}m`,
-          timestamp: new Date().toISOString(),
-        }).catch(() => {});
+        if (p.meta.agentId) {
+          this.bus.publishControl(p.meta.agentId, {
+            kind: "control",
+            action: "abort",
+            scope: p.scope,
+            reason: `inactivity ${mins}m`,
+            timestamp: new Date().toISOString(),
+          }).catch(() => {});
+        }
         p.resolve({ text: `Error: subagent timed out — no activity for ${mins} min (likely a hung tool call). Parent freed; retry or proceed without it.` });
         return;
       }
@@ -268,8 +272,15 @@ export class OrchestratorBridge {
    * `parentCwd`, or `forceParentCwd` causes inline subagents to be re-dispatched
    * as standalone, hitting the wrong worker container and creating dual workers
    * for the same scope (root cause of "Unknown callback token" failures).
+   *
+   * `persistRecovery` controls whether the fresh session's id is written back to
+   * sessions.db. Default false (ephemeral) for worker_restart / auto-continue,
+   * where the existing db binding is still resumable and must be preserved. The
+   * stale_session path passes true: there the old binding is dead, so the recovery
+   * MUST persist or the scope re-resumes the dead id on every future message
+   * (permanent history-less cold-loop).
    */
-  private buildRetryMeta(p: Pending): Record<string, unknown> {
+  private buildRetryMeta(p: Pending, persistRecovery = false): Record<string, unknown> {
     return {
       userId: p.meta.userId,
       userPlatform: p.meta.userPlatform,
@@ -278,7 +289,8 @@ export class OrchestratorBridge {
       parentCwd: p.meta.parentCwd,
       parentAgentId: p.meta.parentAgentId,
       forceParentCwd: p.meta.forceParentCwd,
-      noSession: true, // don't try to resume the SDK session
+      noSession: true,            // don't try to resume the (dead/stale) SDK session
+      ephemeral: !persistRecovery, // but DO persist the recovery when asked (stale path)
       onPartial: p.onPartial,
     };
   }
@@ -386,7 +398,10 @@ export class OrchestratorBridge {
           // Re-dispatch via sendAndWait — preserves full meta so inline subagents
           // are not silently downgraded to standalone (which would fork a second
           // worker for the same scope and produce "Unknown callback token" errors).
-          return this.sendAndWait(scope, p.originalText, this.buildRetryMeta(p));
+          // persistRecovery=true: the old binding is dead (that's why it went
+          // stale), so the fresh session's id MUST be written back to sessions.db
+          // or this scope re-resumes the dead id forever (history-less cold-loop).
+          return this.sendAndWait(scope, p.originalText, this.buildRetryMeta(p, true));
         }).then((result) => {
           p.resolve(result);
         }).catch((err) => {

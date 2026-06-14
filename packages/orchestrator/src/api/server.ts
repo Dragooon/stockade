@@ -279,11 +279,12 @@ export function startCallbackServer(
   app.post("/dispatch", async (c) => {
     if (!bridge) return c.json({ error: "Redis bridge not initialized" }, 503);
 
-    const { agentId, prompt, scope: reqScope, userId } = await c.req.json() as {
+    const { agentId, prompt, scope: reqScope, userId, deliver } = await c.req.json() as {
       agentId: string;
       prompt: string;
       scope?: string;
       userId?: string;
+      deliver?: boolean;
     };
 
     if (!agentId || !prompt) {
@@ -297,9 +298,23 @@ export function startCallbackServer(
       userId: userId ?? "mail",
       userPlatform: "terminal",
       noSession: !reqScope, // fresh session unless caller provides a scope to reuse
+      ephemeral: !reqScope, // and don't persist throwaway no-scope api:<uuid> sessions
     });
 
-    return c.json({ result, scope });
+    // Optionally deliver the reply to the originating channel (same path the
+    // scheduler uses). Lets a scripted trigger post into the real Discord
+    // thread instead of only returning over HTTP. Requires a real channel scope.
+    let delivered = false;
+    if (deliver && reqScope && sendToChannel && result?.text) {
+      try {
+        await sendToChannel(reqScope, result.text, result.files);
+        delivered = true;
+      } catch (err) {
+        console.error(`[dispatch] channel delivery failed for ${reqScope.slice(0, 40)}:`, err instanceof Error ? err.message : err);
+      }
+    }
+
+    return c.json({ result, scope, delivered });
   });
 
   const server = serve({ fetch: app.fetch, port: CALLBACK_PORT }, () => {

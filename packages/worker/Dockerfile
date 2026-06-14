@@ -31,6 +31,12 @@ RUN pip3 install --break-system-packages tavily-cli
 # Install agentmail-cli for programmatic email
 RUN npm install -g agentmail-cli@0.7.11
 
+# Install chrome-devtools-mcp baked-in (pinned) so the browser MCP server starts
+# fast and deterministically. Previously launched via `npx -y chrome-devtools-mcp@latest`,
+# which re-resolved @latest against the npm registry on every cold start (30–78s through
+# the runtime proxy) and lost the SDK's MCP-init race → mcp__chrome__* tools never registered.
+RUN npm install -g chrome-devtools-mcp@1.2.0
+
 # Install gogcli (Google CLI: Gmail, Calendar, Drive, etc.) — linux amd64 binary
 RUN curl -fsSL https://github.com/steipete/gogcli/releases/download/v0.14.0/gogcli_0.14.0_linux_amd64.tar.gz \
     | tar -xz -C /tmp \
