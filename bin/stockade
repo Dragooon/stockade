@@ -57,8 +57,16 @@ while [ "$EXIT_CODE" -eq 75 ]; do
   echo "[stockade] building..."
   pnpm build 2>&1 | tail -1
   echo "[stockade] starting orchestrator..."
+  # Disable errexit around the orchestrator run: a graceful-restart request
+  # exits 75 (and any crash exits non-zero). Under `set -e` a bare non-zero
+  # command aborts the whole launcher BEFORE the line below can capture the
+  # code into the loop guard — which fires the EXIT trap ("shutting down...")
+  # and takes the platform fully offline instead of restarting. Capture the
+  # code with errexit off, then restore it.
+  set +e
   node --import tsx packages/orchestrator/src/index.ts
   EXIT_CODE=$?
+  set -e
   if [ "$EXIT_CODE" -eq 75 ]; then
     echo "[stockade] orchestrator requested restart, restarting..."
     sleep 1
