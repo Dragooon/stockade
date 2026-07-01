@@ -29,6 +29,20 @@ export function setRedisBridge(bridge: WorkerRedisBridge): void {
 /** Active sessions keyed by worker session ID. */
 const sessions = new Map<string, WorkerSession>();
 
+/**
+ * Maps a Redis scope → its current persistent worker session ID.
+ *
+ * A persistent session subscribes to stockade:msg:{scope}. If the orchestrator
+ * re-POSTs /sessions for a scope while this worker container keeps running
+ * (e.g. after an orchestrator restart, whose in-memory session map starts
+ * empty), a second WorkerSession would stack another subscription on the same
+ * channel — and every inbound message would then fan out to BOTH loops,
+ * producing duplicate ("double-firing") replies. This grows by one per
+ * orchestrator restart. Tracking the live session per scope lets us evict the
+ * superseded one so exactly one loop answers each scope.
+ */
+const scopeToSessionId = new Map<string, string>();
+
 app.get("/health", (c) => {
   return c.json({ ok: true, workerId, sessions: sessions.size });
 });
@@ -41,10 +55,35 @@ app.post("/sessions", async (c) => {
   }
 
   const request = parsed.data;
+
+  // Scope-dedupe: a persistent session for this scope may already be running
+  // (orchestrator restarted and re-POSTed while this container survived). Abort
+  // the superseded one before subscribing a new loop, otherwise both stay
+  // subscribed to stockade:msg:{scope} and every message double-fires. abort()
+  // wakes the old loop, which unsubscribes only its own handler — the new
+  // session's handler (subscribed below) is unaffected.
+  if (request.redisMode && request.scope) {
+    const priorId = scopeToSessionId.get(request.scope);
+    if (priorId) {
+      const prior = sessions.get(priorId);
+      if (prior) {
+        prior.abort();
+        sessions.delete(priorId);
+        console.log(
+          `[worker] Evicted superseded session ${priorId.slice(0, 8)} for scope ${request.scope.slice(0, 40)}`,
+        );
+      }
+      scopeToSessionId.delete(request.scope);
+    }
+  }
+
   const workerSessionId = randomUUID();
   const session = new WorkerSession();
 
   sessions.set(workerSessionId, session);
+  if (request.redisMode && request.scope) {
+    scopeToSessionId.set(request.scope, workerSessionId);
+  }
 
   // Start session: Redis mode (persistent loop) or SSE mode (one-shot)
   if (request.redisMode && redisBridge) {
@@ -58,7 +97,14 @@ app.post("/sessions", async (c) => {
 
   // Auto-remove session when it finishes (with a delay for late SSE connects)
   const cleanup = () => {
-    setTimeout(() => sessions.delete(workerSessionId), 30_000);
+    setTimeout(() => {
+      sessions.delete(workerSessionId);
+      // Only clear the scope mapping if it still points at this session — a
+      // newer session may have superseded it (which already re-pointed it).
+      if (request.scope && scopeToSessionId.get(request.scope) === workerSessionId) {
+        scopeToSessionId.delete(request.scope);
+      }
+    }, 30_000);
   };
   // Check periodically if done (can't subscribe here without conflicting)
   const pollDone = setInterval(() => {
@@ -140,6 +186,9 @@ app.delete("/sessions/:id", (c) => {
   if (session) {
     session.abort();
     sessions.delete(id);
+    for (const [scope, sid] of scopeToSessionId) {
+      if (sid === id) scopeToSessionId.delete(scope);
+    }
     console.log(`[worker] Session ${id.slice(0, 8)} deleted`);
   }
 
