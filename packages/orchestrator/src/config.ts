@@ -60,6 +60,9 @@ const channelBindingSchema = z.object({
   server: z.string(),
   agent: z.string(),
   channels: z.union([z.string(), z.array(z.string())]),
+  // Per-binding overrides: this channel runs on this model/effort instead of the agent's default.
+  model: z.string().optional(),
+  effort: z.enum(["low", "medium", "high", "max"]).optional(),
 });
 
 const pathsConfigSchema = z.object({

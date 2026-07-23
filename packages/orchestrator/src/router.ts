@@ -1,17 +1,31 @@
 import type { PlatformConfig } from "./types.js";
 
+/** Result of resolving a scope: the handling agent plus any per-binding overrides. */
+export interface ResolvedBinding {
+  agentId: string;
+  /** Per-binding model override (undefined → use the agent's default model). */
+  model?: string;
+  /** Per-binding effort override (undefined → use the agent's default effort). */
+  effort?: "low" | "medium" | "high" | "max";
+}
+
 /**
- * Resolve a scope string to the agent ID that should handle it.
+ * Resolve a scope string to the agent that should handle it, plus any
+ * per-binding model/effort overrides.
  *
  * For terminal scopes ("terminal:..."), uses platform.channels.terminal.agent.
- * For discord scopes ("discord:<server>:<channel>:..."), matches against bindings.
+ * For discord scopes ("discord:<server>:<channel>:..."), matches against bindings
+ * in order — the FIRST matching binding wins, so channel-specific bindings must be
+ * listed before a `channels: "*"` wildcard. Threads inherit their parent channel's
+ * binding because the parent channel id sits at parts[2] for both direct messages
+ * and thread messages.
  *
  * Throws if no matching binding is found.
  */
-export function resolveAgent(
+export function resolveBinding(
   scope: string,
   config: PlatformConfig
-): string {
+): ResolvedBinding {
   const parts = scope.split(":");
   const platform = parts[0];
 
@@ -20,7 +34,7 @@ export function resolveAgent(
     if (!termConfig) {
       throw new Error(`No terminal channel configured`);
     }
-    return termConfig.agent;
+    return { agentId: termConfig.agent };
   }
 
   if (platform === "discord") {
@@ -36,11 +50,13 @@ export function resolveAgent(
       if (binding.server !== serverId) continue;
 
       const channels = binding.channels;
-      if (channels === "*") return binding.agent;
-      if (typeof channels === "string" && channels === channelId)
-        return binding.agent;
-      if (Array.isArray(channels) && channels.includes(channelId))
-        return binding.agent;
+      const matched =
+        channels === "*" ||
+        (typeof channels === "string" && channels === channelId) ||
+        (Array.isArray(channels) && channels.includes(channelId));
+      if (matched) {
+        return { agentId: binding.agent, model: binding.model, effort: binding.effort };
+      }
     }
 
     throw new Error(
@@ -49,4 +65,15 @@ export function resolveAgent(
   }
 
   throw new Error(`Unknown platform in scope: ${platform}`);
+}
+
+/**
+ * Resolve a scope string to the agent ID that should handle it.
+ * Thin wrapper over {@link resolveBinding} for callers that only need the agent.
+ */
+export function resolveAgent(
+  scope: string,
+  config: PlatformConfig
+): string {
+  return resolveBinding(scope, config).agentId;
 }

@@ -81,6 +81,10 @@ export interface ChannelBinding {
   server: string;
   agent: string;
   channels: string | string[];
+  /** Per-binding model override — this channel runs on this model instead of the agent's default. */
+  model?: string;
+  /** Per-binding effort override — reasoning depth for this channel. */
+  effort?: "low" | "medium" | "high" | "max";
 }
 
 /**

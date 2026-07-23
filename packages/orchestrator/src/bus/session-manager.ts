@@ -27,7 +27,7 @@ import {
   deleteCallbackSession,
   updateCallbackSession,
 } from "../api/sessions.js";
-import { resolveAgent } from "../router.js";
+import { resolveAgent, resolveBinding } from "../router.js";
 import {
   buildSystemPrompt,
   buildSdkSettings,
@@ -251,19 +251,34 @@ export class SessionManager {
 
     // ── Resolve agent ──
     let agentId: string;
+    // Per-binding overrides (e.g. a channel pinned to a specific model/effort).
+    // Only sourced from binding resolution — an explicit meta.agentId (/agent: prefix,
+    // subagent, self-spawn) keeps that agent's own defaults.
+    let bindingOverride: { model?: string; effort?: AgentConfig["effort"] } = {};
     if (meta.agentId) {
       agentId = meta.agentId;
     } else {
       try {
-        agentId = resolveAgent(scope, deps.platform);
+        const binding = resolveBinding(scope, deps.platform);
+        agentId = binding.agentId;
+        bindingOverride = { model: binding.model, effort: binding.effort };
       } catch {
         // Sub-agent scopes: "subagent:{agentId}:..." or "self-spawn:{agentId}:..."
         agentId = scope.split(":")[1] ?? "unknown";
       }
     }
 
-    const agentConfig: AgentConfig = deps.allAgents.agents[agentId];
-    if (!agentConfig) throw new Error(`Unknown agent: ${agentId}`);
+    const baseConfig: AgentConfig = deps.allAgents.agents[agentId];
+    if (!baseConfig) throw new Error(`Unknown agent: ${agentId}`);
+    // Apply per-binding model/effort override without mutating the shared config object.
+    const agentConfig: AgentConfig =
+      bindingOverride.model || bindingOverride.effort
+        ? {
+            ...baseConfig,
+            ...(bindingOverride.model ? { model: bindingOverride.model } : {}),
+            ...(bindingOverride.effort ? { effort: bindingOverride.effort } : {}),
+          }
+        : baseConfig;
 
     // ── Concurrency slot ──
     await deps.gate.acquire(scope);
