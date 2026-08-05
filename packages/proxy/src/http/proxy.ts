@@ -70,12 +70,19 @@ function reqWrite(entry: object): void {
 const loggedSessions = new Set<string>();
 
 /** Extract lightweight request metadata for cache analysis. */
-function extractRequestMeta(body: Buffer): { model: string; msg_count: number; user_turns: number; req_bytes: number } | null {
+function extractRequestMeta(body: Buffer): { model: string; effort?: string; thinking?: string; msg_count: number; user_turns: number; req_bytes: number } | null {
   try {
-    const req = JSON.parse(body.toString("utf8")) as { model?: string; messages?: { role: string }[] };
+    const req = JSON.parse(body.toString("utf8")) as {
+      model?: string;
+      output_config?: { effort?: string };
+      thinking?: { type?: string };
+      messages?: { role: string }[];
+    };
     const messages = req.messages ?? [];
     return {
       model: req.model ?? "unknown",
+      ...(req.output_config?.effort && { effort: req.output_config.effort }),
+      ...(req.thinking?.type && { thinking: req.thinking.type }),
       msg_count: messages.length,
       user_turns: messages.filter((m) => m.role === "user").length,
       req_bytes: body.length,
@@ -664,6 +671,8 @@ async function handleMitmRequest(
       ...(stockadeAgent   && { agent:   stockadeAgent }),
       ...(stockadeScope   && { scope:   stockadeScope }),
       model: requestMeta.model,
+      ...(requestMeta.effort && { effort: requestMeta.effort }),
+      ...(requestMeta.thinking && { thinking: requestMeta.thinking }),
       user_turns: requestMeta.user_turns,
       msg_count: requestMeta.msg_count,
       req_bytes: requestMeta.req_bytes,
