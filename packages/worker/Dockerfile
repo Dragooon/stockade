@@ -37,6 +37,23 @@ RUN npm install -g agentmail-cli@0.7.11
 # the runtime proxy) and lost the SDK's MCP-init race → mcp__chrome__* tools never registered.
 RUN npm install -g chrome-devtools-mcp@1.2.0
 
+# Patch getElementByUid to tolerate the displayed "uid=" prefix. The snapshot renders
+# elements as `uid=1_34`, but the internal lookup map is keyed by the bare id `1_34`, so
+# passing the whole displayed token (which the model naturally copies) to click/fill/
+# upload_file missed the map and threw "Element uid not found" — while snapshot/navigate/
+# screenshot/evaluate (which never resolve a uid) kept working. Strip a leading `uid=` so
+# both forms resolve. Idempotent; fails the build loudly if the source shape changes.
+RUN node -e ' \
+  const fs=require("fs"); \
+  const f="/usr/local/lib/node_modules/chrome-devtools-mcp/build/src/McpPage.js"; \
+  let s=fs.readFileSync(f,"utf8"); \
+  if(s.includes("uid.slice(4)")){process.exit(0);} \
+  const n="        const node = this.textSnapshot.idToNode.get(uid);"; \
+  if(!s.includes(n)){console.error("uid-prefix patch: needle not found");process.exit(1);} \
+  s=s.replace(n,"        if (typeof uid === \"string\" && uid.startsWith(\"uid=\")) uid = uid.slice(4);\n"+n); \
+  fs.writeFileSync(f,s); \
+  '
+
 # Install gogcli (Google CLI: Gmail, Calendar, Drive, etc.) — linux amd64 binary
 RUN curl -fsSL https://github.com/steipete/gogcli/releases/download/v0.14.0/gogcli_0.14.0_linux_amd64.tar.gz \
     | tar -xz -C /tmp \
