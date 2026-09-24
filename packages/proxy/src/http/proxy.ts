@@ -224,6 +224,17 @@ export function downsizeImages(body: Buffer, host: string, path: string): Buffer
 // injects it to keep worker requests classified as CLI traffic by Anthropic.
 let nativeCcVersion = "2.1.146.0000"; // fallback — kept in sync via updateCcVersionCache
 
+/** Numeric dotted-version compare ("2.1.148.902" vs "2.1.281"): >0 if a is newer. */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
 /** Sniff the cc_version from a native CLI session and cache it for worker injection. */
 function updateCcVersionCache(body: Buffer, isWorker: boolean, host: string, path: string): void {
   if (isWorker || host !== "api.anthropic.com" || !path.includes("/messages")) return;
@@ -232,7 +243,7 @@ function updateCcVersionCache(body: Buffer, isWorker: boolean, host: string, pat
     const text = req.system?.[0]?.text ?? "";
     if (!text.startsWith("x-anthropic-billing-header:")) return;
     const m = text.match(/cc_version=([^;]+)/);
-    if (m?.[1]) nativeCcVersion = m[1];
+    if (m?.[1] && compareVersions(m[1], nativeCcVersion) > 0) nativeCcVersion = m[1];
   } catch { /* ignore */ }
 }
 
@@ -252,9 +263,14 @@ export function injectBillingHeader(body: Buffer, host: string, path: string, is
 
     if (firstText.startsWith("x-anthropic-billing-header:")) {
       // SDK injected a billing header — rewrite it with cli entrypoint and native version.
+      // Never DOWNGRADE the version: the API gates new models on cc_version ("Claude Code
+      // 2.1.148 does not support this model; 2.1.280 or newer is required"), and the SDK's
+      // bundled binary can be newer than the last native session the proxy saw.
+      const sdkVersion = firstText.match(/cc_version=([^;]+)/)?.[1] ?? "";
+      const ccVersion = compareVersions(nativeCcVersion, sdkVersion) >= 0 ? nativeCcVersion : sdkVersion;
       const newText = firstText
         .replace(/cc_entrypoint=[^;]+/, "cc_entrypoint=cli")
-        .replace(/cc_version=[^;]+/, `cc_version=${nativeCcVersion}`);
+        .replace(/cc_version=[^;]+/, `cc_version=${ccVersion}`);
       if (newText === firstText) return body; // already cli, nothing to do
       // Patch only the text value in the original buffer to avoid re-serializing the
       // whole body and corrupting thinking/redacted_thinking block signatures.
