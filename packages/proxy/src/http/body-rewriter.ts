@@ -70,6 +70,38 @@ export async function rewriteBody(
   return { body: Buffer.from(result, "utf-8"), replaced: true };
 }
 
+/**
+ * Scan request header values for apw-ref tokens and replace each with the
+ * real credential. Lets an agent authenticate to ANY host with
+ * `-H "Authorization: Bearer $(apw read <key>)"` — no per-host route needed.
+ * Same one-time-use / scope rules as bodies. Mutates and returns `headers`.
+ */
+export async function rewriteHeaders(
+  headers: Record<string, string>,
+  provider: Provider,
+): Promise<Record<string, string>> {
+  for (const [name, raw] of Object.entries(headers)) {
+    if (typeof raw !== "string" || !raw.includes("apw-ref:")) continue;
+    const matches = raw.match(REF_PATTERN);
+    if (!matches) continue;
+    let value = raw;
+    for (const refStr of new Set(matches)) {
+      const ref = consumeRef(refStr);
+      if (!ref) {
+        console.warn(`[header-rewriter] invalid/expired/consumed ref in ${name}: ${refStr.slice(0, 40)}...`);
+        continue;
+      }
+      if (!validateToken(ref.gatewayToken)) {
+        console.warn(`[header-rewriter] gateway token revoked for ref in ${name}`);
+        continue;
+      }
+      value = replaceAll(value, refStr, await resolveCredential(provider, ref.credentialKey));
+    }
+    headers[name] = value;
+  }
+  return headers;
+}
+
 /** Safe literal string replacement (avoids regex special char issues). */
 function replaceAll(source: string, search: string, replacement: string): string {
   let result = "";

@@ -3,7 +3,7 @@ import { serve } from "@hono/node-server";
 import ssh2 from "ssh2";
 const { Client: SshClient } = ssh2;
 import type { ProxyConfig, GatewayToken } from "../shared/types.js";
-import { resolveCredential, storeCredential, invalidateCache, listCredentials } from "../shared/credentials.js";
+import { resolveCredential, storeCredential, invalidateCache, listCredentials, shapeCredential } from "../shared/credentials.js";
 import {
   issueToken,
   validateToken,
@@ -91,10 +91,33 @@ export function startGateway(getConfig: () => ProxyConfig) {
     return c.json({ ref: ref.ref, expiresAt: ref.expiresAt });
   });
 
+  // ── GET /gateway/shape/* — Describe an item's structure ──
+  // Returns field labels/types (and non-secret values like username/url) so
+  // the agent can work out which `item/field` key to read. Secret values are
+  // never included.
+  app.get("/gateway/shape/*", async (c) => {
+    const key = new URL(c.req.url).pathname.replace(/^\/gateway\/shape\//, "");
+    const rawToken = c.get("rawToken") as string;
+
+    if (!checkCredentialScope(rawToken, key)) {
+      console.log(`[gateway] shape denied: key="${key}"`);
+      return c.json({ error: "Credential scope denied for this key" }, 403);
+    }
+
+    try {
+      const shape = await shapeCredential(getConfig().provider, key);
+      console.log(`[gateway] shape: key="${key}"`);
+      return c.json(shape as object);
+    } catch (err: any) {
+      console.error(`[gateway] shape failed: key="${key}"`, err.message);
+      return c.json({ error: `Failed to describe credential: ${err.message}` }, 500);
+    }
+  });
+
   // ── GET /gateway/reveal/* — Reveal a credential's raw value ──
-  // Returns the plaintext credential. Intended for scenarios where the agent
-  // needs the actual value (e.g. filling a browser form). This command should
-  // be gated by "ask" permission in the agent's permission rules.
+  // Returns the plaintext credential, for when the agent needs the value
+  // itself (e.g. filling a browser form). The vault is the agent's to use;
+  // apw exists to keep secrets out of transcripts by default, not to block them.
   app.get("/gateway/reveal/*", async (c) => {
     const key = new URL(c.req.url).pathname.replace(/^\/gateway\/reveal\//, "");
     const rawToken = c.get("rawToken") as string;

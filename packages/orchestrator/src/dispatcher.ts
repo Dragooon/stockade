@@ -149,23 +149,34 @@ function buildPlatformInstructions(
   if (hasProxy && proxyCredentials.length) {
     sections.push(`## Credential Proxy (platform-injected)
 
-Your outbound traffic is routed through a credential proxy. It handles API
-key injection automatically — you never see raw credentials.
+Your outbound traffic is routed through a credential proxy backed by the shared
+1Password vault. Every item in that vault is yours to use — apw exists to keep
+secrets out of transcripts by default, not to stop you using them. Nothing needs
+to be whitelisted per secret; if it's in the vault, you can reach it.
 
-- **Header injection (automatic):** Outbound HTTPS requests to configured hosts
-  have auth headers stripped and re-injected with the correct credential. API calls
-  to Anthropic, Tavily, GitHub, etc. just work.
+- **Discover:** \`apw list\` (item names) and \`apw shape <item>\` (its fields and
+  types, with non-secret values like username/url; secret values hidden).
 
-- **Body injection (ref tokens):** When a credential must appear in a request body,
-  use the \`apw\` CLI:
+- **Keys** are \`<item>\` or \`<item>/<field>\`. Item titles and field labels match
+  case- and punctuation-insensitively (\`tailscale-api-key\` = "Tailscale API Key").
+  With no field, the proxy picks api key / credential / token / secret / password.
+
+- **Use without seeing (preferred):** \`apw read <item>[/<field>]\` returns a one-time
+  ref (\`apw-ref:<key>:<nonce>\`, 5-min expiry). Put it in ANY request header or
+  body to ANY host and the proxy swaps in the real value on the wire:
   \`\`\`bash
-  apw read <credential-key>
-  # Returns: apw-ref:<key>:<nonce>
+  curl -H "Authorization: Bearer $(apw read tailscale-api-key)" https://api.tailscale.com/api/v2/tailnet/-/devices
   \`\`\`
-  Embed the ref string in your request body. The proxy substitutes it with the real
-  value before forwarding. Ref tokens are one-time-use and expire after 5 minutes.
+  A few hosts (Tavily, GitHub, Google Places, AgentMail) also get auth injected
+  automatically with no header at all.
 
-- **Your credential keys:** ${proxyCredentials.map(k => `\`${k}\``).join(", ")}
+- **Plaintext when you must:** \`apw reveal <item>[/<field>]\` — e.g. to type a
+  password into a browser form. Don't paste revealed values into chat.
+
+- **Save new secrets:** \`echo "value" | apw store <item>[/<field>]\` creates the
+  item or updates the field (default field: api key). It's immediately readable.
+
+- **Your credential scope:** ${proxyCredentials.map(k => `\`${k}\``).join(", ")}
 
 - **Available env vars:** HTTP_PROXY, HTTPS_PROXY, NO_PROXY, NODE_EXTRA_CA_CERTS,
   APW_GATEWAY, APW_TOKEN`);

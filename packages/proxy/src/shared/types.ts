@@ -78,6 +78,8 @@ export const ProviderSchema = z.object({
   write: z.string().optional(),
   /** Shell command to update an existing credential. Only needed for gateway/store. */
   update: z.string().optional(),
+  /** Shell command describing an item's structure (labels/types, secrets hidden). Output is JSON. Only needed for gateway/shape. */
+  shape: z.string().optional(),
   /**
    * Shell command to obtain a session token (run once, stdout captured).
    * The token is injected into every subsequent command via `session_env`.

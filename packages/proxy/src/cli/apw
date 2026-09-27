@@ -1,9 +1,17 @@
 #!/bin/sh
 # apw — Agent Platform credential store CLI
-# Reads value from stdin, stores via the gateway API.
+# Thin client for the proxy gateway; the vault itself is only ever touched
+# on the host. Keys are <item> or <item>/<field> — any item in the vault,
+# no per-key config needed.
 #
 # Usage:
-#   echo "secret_value" | apw store <key> [--host H --header H --format F]
+#   apw list                       — item names in the vault
+#   apw shape <item>               — fields/types of an item (secrets hidden)
+#   apw read  <item>[/<field>]     — one-time ref token; put it in any header
+#                                    or body, the proxy swaps in the real value
+#   apw reveal <item>[/<field>]    — the plaintext value
+#   echo "value" | apw store <item>[/<field>]   — create or update
+#   apw ssh [user@]host [cmd...]   — run a command via the SSH proxy
 #
 # Env vars:
 #   APW_GATEWAY  — Gateway URL (e.g., http://localhost:10256)
@@ -43,10 +51,32 @@ case "$COMMAND" in
     fi
     ;;
 
+  shape)
+    KEY="${1:-}"
+    if [ -z "$KEY" ]; then
+      echo "Usage: apw shape <item>" >&2
+      exit 1
+    fi
+
+    RESPONSE=$(curl -s -w "\n%{http_code}" \
+      -H "Authorization: Bearer $APW_TOKEN" \
+      "${APW_GATEWAY}/gateway/shape/${KEY}")
+
+    HTTP_CODE=$(printf '%s\n' "$RESPONSE" | tail -n1)
+    BODY_RESP=$(printf '%s\n' "$RESPONSE" | sed '$d')
+
+    if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+      printf '%s\n' "$BODY_RESP"
+    else
+      echo "Error ($HTTP_CODE): $BODY_RESP" >&2
+      exit 1
+    fi
+    ;;
+
   reveal)
     KEY="${1:-}"
     if [ -z "$KEY" ]; then
-      echo "Usage: apw reveal <key>" >&2
+      echo "Usage: apw reveal <item>[/<field>]" >&2
       exit 1
     fi
 
@@ -196,12 +226,13 @@ sys.exit(d.get('exitCode', 0))
     ;;
 
   *)
-    echo "Usage:" >&2
-    echo "  apw list                                    — list available credential keys" >&2
-    echo "  apw read <key>                              — get a ref token for a credential" >&2
-    echo "  apw reveal <key>                            — get the raw credential value" >&2
-    echo "  apw store <key> [--host H --header H --format F]  — store a credential from stdin" >&2
-    echo "  apw ssh [user@]host [command...]            — run a command via the SSH proxy" >&2
+    echo "Usage:  (keys are <item> or <item>/<field>; any item in the vault)" >&2
+    echo "  apw list                          — list item names in the vault" >&2
+    echo "  apw shape <item>                  — fields/types of an item (secrets hidden)" >&2
+    echo "  apw read <item>[/<field>]         — one-time ref token; usable in any header or body" >&2
+    echo "  apw reveal <item>[/<field>]       — the plaintext value" >&2
+    echo "  apw store <item>[/<field>]        — create/update from stdin" >&2
+    echo "  apw ssh [user@]host [command...]  — run a command via the SSH proxy" >&2
     exit 1
     ;;
 esac

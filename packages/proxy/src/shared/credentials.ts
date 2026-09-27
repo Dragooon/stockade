@@ -80,6 +80,17 @@ export async function listCredentials(provider: Provider): Promise<string[]> {
 }
 
 /**
+ * Describe an item's structure via the provider's `shape` command.
+ * Returns the parsed JSON. Never cached — it carries no secret values and
+ * agents call it to discover what to read, so it should reflect the vault.
+ */
+export async function shapeCredential(provider: Provider, key: string): Promise<unknown> {
+  if (!provider.shape) throw new Error("Provider has no shape command configured");
+  const cmd = provider.shape.replace(/\{key\}/g, key);
+  return JSON.parse(await execProviderCommand(cmd, provider));
+}
+
+/**
  * Store a credential via the provider's `update` command.
  * Falls back to `write` if update fails (key doesn't exist yet).
  * Invalidates the cache entry on success.

@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
 import { config as loadEnv } from "dotenv";
 import { loadProxyConfig } from "./shared/config.js";
 import { watchProxyConfig } from "./shared/watch.js";
@@ -12,6 +13,12 @@ const PLATFORM_HOME = join(homedir(), ".stockade");
 loadEnv({ path: join(PLATFORM_HOME, ".env") });
 let config = loadProxyConfig(PLATFORM_HOME);
 const getConfig = () => config;
+
+// Node's happy-eyeballs gives each upstream address only 250ms to complete a
+// TCP handshake before moving on. From here, hosts with ~300ms RTT (e.g.
+// api.tailscale.com at 308ms) time out on EVERY address and the MITM returns
+// 502 "fetch failed / ETIMEDOUT" even though curl reaches them fine.
+setDefaultAutoSelectFamilyAttemptTimeout(2000);
 
 console.log("[proxy] starting all servers...");
 

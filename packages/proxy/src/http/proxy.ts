@@ -9,7 +9,7 @@ import type { ProxyConfig } from "../shared/types.js";
 import { evaluatePolicy } from "../shared/policy.js";
 import { resolveCredential } from "../shared/credentials.js";
 import { stripHeaders, injectCredential, matchRoute } from "./injector.js";
-import { rewriteBody } from "./body-rewriter.js";
+import { rewriteBody, rewriteHeaders } from "./body-rewriter.js";
 import { ensureCA, generateCert, type CaBundle } from "./tls.js";
 
 const META_LOG = join(homedir(), ".stockade", "logs", "cache-meta.ndjson");
@@ -392,6 +392,9 @@ async function handleHttpRequest(
     headers = injectCredential(headers, route, value);
   }
 
+  // Ref token substitution in headers (any host, no route needed)
+  headers = await rewriteHeaders(headers, config.provider);
+
   // Forward the request
   const targetUrl = url.toString();
   let body = await collectBody(req);
@@ -548,6 +551,9 @@ async function handleMitmRequest(
     const value = await resolveCredential(config.provider, route.credential);
     headers = injectCredential(headers, route, value);
   }
+
+  // Ref token substitution in headers (any host, no route needed)
+  headers = await rewriteHeaders(headers, config.provider);
 
   // Collect request body
   let body = await collectBody(req);
