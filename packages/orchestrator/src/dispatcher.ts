@@ -130,6 +130,16 @@ function buildPlatformInstructions(
 ): string {
   const sections: string[] = [];
 
+  sections.push(`## Message Sender (platform-injected)
+
+Channels are shared by several people. Every chat message starts with a line the
+platform adds, e.g. \`[sender: shitiz | discord name: Dragooon | discord id: 274195702220062720]\`.
+That line is the ground truth for who wrote that message. Check it on every turn,
+since the sender can change from one message to the next in the same conversation.
+Never infer the sender from topic, tone, or memory. When saving a memory about a
+person's preferences, attribute it to the sender named on that message.
+Messages without the line come from the platform itself (sub-agent tasks, scheduled tasks).`);
+
   // Inject sub-agent roster when this agent has a subagents list
   if (agentConfig.subagents?.length && allAgents) {
     const lines = agentConfig.subagents.map((id) => {

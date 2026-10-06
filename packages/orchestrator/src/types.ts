@@ -154,6 +154,8 @@ export interface ChannelMessage {
   content: string;
   userId: string;
   platform: string;
+  /** Sender's display name on the platform (e.g. Discord server nickname) */
+  userName?: string;
   /** File attachments from the channel (images, text files, etc.) */
   attachments?: ChannelAttachment[];
 }

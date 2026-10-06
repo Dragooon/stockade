@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 
 import { loadConfig } from "./config.js";
 import { resolveAgent } from "./router.js";
-import { checkAccess } from "./rbac.js";
+import { checkAccess, resolveUser } from "./rbac.js";
 import { initSessionsTable, getSessionId, setSessionId, deleteSession } from "./sessions.js";
 import type { DispatchContext } from "./dispatcher.js";
 import { TerminalAdapter } from "./channels/terminal.js";
@@ -367,7 +367,17 @@ async function handleMessage(
     }
   }
 
-  return bridge.sendAndWait(enqueueScope, msg.content, {
+  // Tag every message with its sender. Channels are shared by several people
+  // and sessions are per-channel, so without this the agent has to guess who
+  // is talking (and routinely guesses wrong).
+  const sender = resolveUser(msg.userId, msg.platform, config.platform);
+  const senderTag = [
+    `sender: ${sender?.username ?? "unknown"}`,
+    ...(msg.userName ? [`${msg.platform} name: ${msg.userName}`] : []),
+    `${msg.platform} id: ${msg.userId}`,
+  ].join(" | ");
+
+  return bridge.sendAndWait(enqueueScope, `[${senderTag}]\n${msg.content}`, {
     userId: msg.userId,
     userPlatform: msg.platform,
     askApproval,

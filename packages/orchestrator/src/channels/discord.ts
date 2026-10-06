@@ -548,6 +548,7 @@ export class DiscordAdapter {
       content: content || "(see attached file)",
       userId: message.author.id,
       platform: "discord",
+      userName: message.member?.displayName ?? message.author.globalName ?? message.author.username,
       ...(attachments.length > 0 ? { attachments } : {}),
     };
 
