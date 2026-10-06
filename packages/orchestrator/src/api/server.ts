@@ -11,6 +11,9 @@
  *   POST   /cb/:token/scheduler/tasks       — create a scheduled task
  *   PATCH  /cb/:token/scheduler/tasks/:id   — pause / resume a task
  *   DELETE /cb/:token/scheduler/tasks/:id   — delete a task
+ *
+ *   POST /cb/:token/sessions/list|search|read — past-session history, bounded
+ *                                               by the calling user's permissions
  */
 
 import { randomUUID } from "node:crypto";
@@ -31,6 +34,7 @@ import type { DispatchContext } from "../dispatcher.js";
 import type { OrchestratorBridge } from "../bus/orchestrator-bridge.js";
 import type { TaskStore, ScheduleType, ContextMode } from "../scheduler/types.js";
 import type { ChannelFile } from "../types.js";
+import type { SessionHistoryService } from "../session-history.js";
 
 export const CALLBACK_PORT = 7420;
 
@@ -40,6 +44,7 @@ export function startCallbackServer(
   buildDispatchContext: (token: string) => DispatchContext | null,
   taskStore?: TaskStore,
   sendToChannel?: (scope: string, text: string, files?: ChannelFile[]) => Promise<void>,
+  sessionHistory?: SessionHistoryService,
 ): () => void {
   const app = new Hono();
 
@@ -274,6 +279,25 @@ export function startCallbackServer(
     taskStore.deleteTask(id);
     return c.json({ ok: true });
   });
+
+  // ── Session history: list / search / read past sessions ──
+  for (const op of ["list", "search", "read"] as const) {
+    app.post(`/cb/:token/sessions/${op}`, async (c) => {
+      const token = c.req.param("token");
+      const ctx = getCallbackSession(token);
+      if (!ctx) return c.json({ error: "Unknown callback token" }, 404);
+      if (!sessionHistory) return c.json({ error: "Session history not enabled" }, 503);
+
+      const args = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const caller = { agentId: ctx.agentId, userId: ctx.userId, userPlatform: ctx.userPlatform, scope: ctx.scope };
+      try {
+        const text = await sessionHistory[op](caller, args as never);
+        return c.json({ text });
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      }
+    });
+  }
 
   // ── Direct dispatch (testing / scripting) ──
   app.post("/dispatch", async (c) => {

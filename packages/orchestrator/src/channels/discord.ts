@@ -4,14 +4,20 @@ import {
   AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   Client,
   ComponentType,
   EmbedBuilder,
   GatewayIntentBits,
   MessageFlags,
+  MessageType,
+  PermissionFlagsBits,
   REST,
   Routes,
   SlashCommandBuilder,
+  type AnyThreadChannel,
+  type Channel,
+  type GuildBasedChannel,
   type Message,
   type TextBasedChannel,
   type ChatInputCommandInteraction,
@@ -27,6 +33,25 @@ const ASK_TIMEOUT_MS = 10 * 60_000;
 
 /** Max attachment size — matches Discord's file upload limit. */
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25 MB
+
+/** How long a channel view-permission check is cached (session history access). */
+const VIEW_CACHE_MS = 5 * 60_000;
+
+/** A thread started from an existing message, dispatched as the thread's first prompt. */
+interface ThreadStart {
+  thread: AnyThreadChannel;
+  /** Thread creator — the person asking. */
+  userId: string;
+  userName: string;
+}
+
+function isForumLike(type: ChannelType | undefined): boolean {
+  return type === ChannelType.GuildForum || type === ChannelType.GuildMedia;
+}
+
+function fmtUtc(d: Date): string {
+  return `${d.toISOString().slice(0, 16).replace("T", " ")}Z`;
+}
 
 const RESIZE_SCRIPT = [
   "import sys, io",
@@ -118,6 +143,10 @@ export class DiscordAdapter {
   private processedMessages = new Set<string>();
   /** Track message IDs we are currently processing (prevents re-entrant dispatch). */
   private inFlightMessages = new Set<string>();
+  /** Thread id → the message it was started from (null = forum post / standalone thread). */
+  private threadOrigins = new Map<string, ChannelMessage["threadOrigin"] | null>();
+  /** `${userId}:${channelId}` → cached view-permission result. */
+  private viewCache = new Map<string, { ok: boolean; at: number }>();
 
   constructor(config: DiscordConfig, opts: DiscordAdapterOptions) {
     this.config = config;
@@ -160,8 +189,12 @@ export class DiscordAdapter {
       }
     });
 
-    this.client.on("threadCreate", async (thread) => {
-      if (thread.joinable) await thread.join();
+    this.client.on("threadCreate", async (thread, newlyCreated) => {
+      if (thread.joinable) await thread.join().catch(() => {});
+      if (!newlyCreated) return;
+      await this.handleThreadStart(thread).catch((err) =>
+        console.error(`[discord] thread start ${thread.id} failed:`, err instanceof Error ? err.message : err),
+      );
     });
 
     await this.client.login(this.config.token);
@@ -482,16 +515,29 @@ export class DiscordAdapter {
 
   // ── Message handler (processes all messages in bound channels) ──
 
-  private async handleMessage(message: Message): Promise<void> {
-    // Block external bots; allow the bot's own [TEST] prefixed messages
-    if (message.author.bot) {
-      const isSelf = message.author.id === this.client.user?.id;
-      if (!isSelf || !message.content.startsWith("[TEST]")) return;
+  /**
+   * Handle one user message. With `threadStart`, `message` is the message a new
+   * thread was started from: it is dispatched into the thread's own scope, as
+   * the thread creator, and the reply goes to the thread.
+   */
+  private async handleMessage(message: Message, threadStart?: ThreadStart): Promise<void> {
+    if (!threadStart) {
+      // Only real posts are prompts. System messages (thread created, pins,
+      // joins, …) are not: "X started a thread" used to be dispatched into the
+      // parent channel, so the agent answered there instead of in the thread.
+      if (message.type !== MessageType.Default && message.type !== MessageType.Reply) return;
+
+      // Block external bots; allow the bot's own [TEST] prefixed messages
+      if (message.author.bot) {
+        const isSelf = message.author.id === this.client.user?.id;
+        if (!isSelf || !message.content.startsWith("[TEST]")) return;
+      }
     }
 
     // Dedup: skip if we've already processed this message
-    if (this.processedMessages.has(message.id)) return;
-    this.processedMessages.add(message.id);
+    const dedupKey = threadStart ? `thread-start:${threadStart.thread.id}` : message.id;
+    if (this.processedMessages.has(dedupKey)) return;
+    this.processedMessages.add(dedupKey);
     // Prune old entries to prevent memory leak (keep last 100)
     if (this.processedMessages.size > 100) {
       const entries = [...this.processedMessages];
@@ -503,18 +549,19 @@ export class DiscordAdapter {
     const serverId = message.guildId;
     if (!serverId) return;
 
-    const isThread = message.channel.isThread();
+    const channel = threadStart?.thread ?? message.channel;
+    const isThread = channel.isThread();
 
     // Prevent concurrent dispatch for the same logical message.
-    const contentKey = `${message.author.id}:${message.content}`;
+    const contentKey = threadStart ? dedupKey : `${message.author.id}:${message.content}`;
     if (this.inFlightMessages.has(contentKey)) return;
     this.inFlightMessages.add(contentKey);
     // Auto-clear after processing (in the finally block below)
 
-    const channelId = message.channelId;
+    const channelId = threadStart ? threadStart.thread.id : message.channelId;
     const binding = this.findBinding(serverId, channelId);
     const parentChannelId = isThread
-      ? (message.channel as unknown as { parentId: string }).parentId
+      ? (channel as AnyThreadChannel).parentId!
       : channelId;
     const effectiveBinding =
       binding ?? this.findBinding(serverId, parentChannelId);
@@ -525,11 +572,21 @@ export class DiscordAdapter {
       : discordScope(serverId, channelId);
 
     // Strip bot mention if present (user may still @mention even though it's not required)
-    const content = message.content
+    const stripped = message.content
       .replace(new RegExp(`<@!?${this.client.user!.id}>`, "g"), "")
       .trim();
 
-    if (!content && message.attachments.size === 0) return;
+    if (!stripped && message.attachments.size === 0 && !threadStart) return;
+
+    const authorName = message.member?.displayName ?? message.author.globalName ?? message.author.username;
+    const content = threadStart
+      ? `Started a new thread "${threadStart.thread.name}" from this message by ${authorName} (${fmtUtc(message.createdAt)}):\n${stripped}`
+      : stripped;
+    const location = this.describeChannel(channel);
+    // The thread-start prompt already quotes the origin message.
+    const threadOrigin = isThread && !threadStart
+      ? await this.threadOriginOf(channel as AnyThreadChannel)
+      : undefined;
 
     // Download attachments (images as base64, text files as string)
     const attachments: ChannelAttachment[] = [];
@@ -543,22 +600,26 @@ export class DiscordAdapter {
       if (downloaded) attachments.push(downloaded);
     }
 
+    const userId = threadStart?.userId ?? message.author.id;
     const channelMessage: ChannelMessage = {
       scope,
       content: content || "(see attached file)",
-      userId: message.author.id,
+      userId,
       platform: "discord",
-      userName: message.member?.displayName ?? message.author.globalName ?? message.author.username,
+      userName: threadStart?.userName ?? authorName,
+      locationLabel: location.label,
+      ...(location.parentLabel ? { parentLabel: location.parentLabel } : {}),
+      ...(threadOrigin ? { threadOrigin } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
     };
 
     const askApproval = this.createApprovalChannel(
-      message.channel as TextBasedChannel,
-      message.author.id,
+      channel as TextBasedChannel,
+      userId,
     );
 
     // Keep typing indicator alive throughout dispatch (refreshes every 8s)
-    const ch = message.channel as any;
+    const ch = channel as any;
     const startTyping = () => {
       try { ch.sendTyping?.(); } catch { /* ignore */ }
     };
@@ -650,6 +711,123 @@ export class DiscordAdapter {
       const errMsg = err instanceof Error ? err.message : String(err);
       await sendWithTimeout(`Error: ${errMsg}`);
     });
+  }
+
+  /**
+   * A thread started from an existing message (text/announcement channels).
+   * Nothing is posted in the new thread, so the starter message becomes the
+   * thread's first prompt, in the thread's own (fresh) session. Forum posts and
+   * standalone threads open with a real message, which messageCreate handles.
+   */
+  private async handleThreadStart(thread: AnyThreadChannel): Promise<void> {
+    if (!thread.parent || isForumLike(thread.parent.type)) return;
+    const starter = await thread.fetchStarterMessage().catch(() => null);
+    if (!starter) return; // standalone thread
+    if (starter.author.bot) {
+      const isSelfTest = starter.author.id === this.client.user?.id && starter.content.startsWith("[TEST]");
+      if (!isSelfTest) return;
+    }
+    const ownerId = thread.ownerId ?? starter.author.id;
+    const owner = await thread.guild.members.fetch(ownerId).catch(() => null);
+    console.log(`[discord] thread "${thread.name}" (${thread.id}) started from message ${starter.id} — dispatching into thread`);
+    await this.handleMessage(starter, {
+      thread,
+      userId: ownerId,
+      userName: owner?.displayName ?? owner?.user.username ?? ownerId,
+    });
+  }
+
+  /** Human-readable location of a channel or thread. */
+  private describeChannel(channel: unknown): { label: string; parentLabel?: string } {
+    const ch = channel as AnyThreadChannel | (GuildBasedChannel & { name?: string });
+    if ("isThread" in ch && ch.isThread()) {
+      const parentLabel = `#${ch.parent?.name ?? ch.parentId}`;
+      const kind = isForumLike(ch.parent?.type) ? "forum post" : "thread";
+      return { label: `${kind} "${ch.name}" in ${parentLabel}`, parentLabel };
+    }
+    return { label: `#${(ch as { name?: string }).name ?? (ch as { id: string }).id}` };
+  }
+
+  /** The message a (non-forum) thread was started from, if any. Cached per thread. */
+  private async threadOriginOf(thread: AnyThreadChannel): Promise<ChannelMessage["threadOrigin"]> {
+    if (this.threadOrigins.has(thread.id)) return this.threadOrigins.get(thread.id) ?? undefined;
+    let origin: ChannelMessage["threadOrigin"] | null = null;
+    if (!isForumLike(thread.parent?.type)) {
+      let starter: Message | null = null;
+      try { starter = await thread.fetchStarterMessage(); } catch { /* standalone thread or no access */ }
+      if (starter) {
+        origin = {
+          authorName: starter.member?.displayName ?? starter.author.globalName ?? starter.author.username,
+          createdAt: starter.createdAt.toISOString(),
+          content: starter.content.slice(0, 1500),
+        };
+      }
+    }
+    this.threadOrigins.set(thread.id, origin);
+    if (this.threadOrigins.size > 500) {
+      this.threadOrigins.delete(this.threadOrigins.keys().next().value!);
+    }
+    return origin ?? undefined;
+  }
+
+  /**
+   * May this Discord user read the conversation held in `scope`? Bounds session
+   * history access by the asker's own channel permissions (View Channel + Read
+   * Message History; private threads also need membership). Unknown or deleted
+   * channels are denied. Cached for VIEW_CACHE_MS.
+   */
+  async canUserView(userId: string, scope: string): Promise<boolean> {
+    const parts = scope.split("#")[0].split(":");
+    if (parts[0] !== "discord" || parts.length < 3) return false;
+    const serverId = parts[1];
+    const key = `${userId}:${scope}`;
+    const cached = this.viewCache.get(key);
+    if (cached && Date.now() - cached.at < VIEW_CACHE_MS) return cached.ok;
+
+    let ok = false;
+    try {
+      const guild = await this.client.guilds.fetch(serverId);
+      const member = await guild.members.fetch(userId);
+      const channel = await this.scopeChannel(parts);
+      if (channel && "permissionsFor" in channel) {
+        const perms = (channel as GuildBasedChannel).permissionsFor(member);
+        ok = !!perms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory]);
+        if (ok && channel.type === ChannelType.PrivateThread && !perms!.has(PermissionFlagsBits.ManageThreads)) {
+          ok = await (channel as AnyThreadChannel).members.fetch({ member: userId }).then(() => true, () => false);
+        }
+      }
+    } catch {
+      ok = false;
+    }
+    this.viewCache.set(key, { ok, at: Date.now() });
+    return ok;
+  }
+
+  /** Human-readable location for a scope, e.g. `thread "X" in #general`. */
+  async describeScope(scope: string): Promise<string> {
+    const parts = scope.split("#")[0].split(":");
+    if (parts[0] !== "discord" || parts.length < 3) return scope;
+    const threadId = parts.length >= 4 && /^\d+$/.test(parts[3]) ? parts[3] : undefined;
+    const channel = await this.scopeChannel(parts);
+    if (channel) return this.describeChannel(channel).label;
+    return threadId ? `thread ${threadId} in <#${parts[2]}>` : `<#${parts[2]}>`;
+  }
+
+  /**
+   * The channel or thread a discord scope's conversation lives in, or null if
+   * it is gone or inaccessible. Old sessions were keyed per user
+   * (`discord:<server>:<channel>:<userId>`); those map to the channel itself.
+   */
+  private async scopeChannel(parts: string[]): Promise<Channel | null> {
+    const fetch = (id: string) => this.client.channels.fetch(id).catch(() => null);
+    const sub = parts.length >= 4 && /^\d+$/.test(parts[3]) ? parts[3] : undefined;
+    if (!sub) return fetch(parts[2]);
+    const thread = await fetch(sub);
+    if (thread) return thread;
+    if (parts.length === 4 && await this.client.users.fetch(sub).then(() => true, () => false)) {
+      return fetch(parts[2]);
+    }
+    return null;
   }
 
   private findBinding(

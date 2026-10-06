@@ -58,6 +58,11 @@ export const CORE_PLATFORM_TOOLS = new Set([
   "mcp__scheduler__list",
   "mcp__scheduler__update",
   "mcp__scheduler__delete",
+  // Session history (mcp__sessions__ server) — the orchestrator itself bounds
+  // results by the calling user's channel permissions.
+  "mcp__sessions__list",
+  "mcp__sessions__search",
+  "mcp__sessions__read",
 ]);
 
 /** Returns true if the tool should bypass all permission checks. */

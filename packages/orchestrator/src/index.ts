@@ -7,9 +7,16 @@ import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { loadConfig } from "./config.js";
-import { resolveAgent } from "./router.js";
+import { resolveAgent, resolveBinding } from "./router.js";
 import { checkAccess, resolveUser } from "./rbac.js";
 import { initSessionsTable, getSessionId, setSessionId, deleteSession } from "./sessions.js";
+import {
+  initSessionHistoryTable,
+  recordSessionHistory,
+  SessionHistoryService,
+  TranscriptIndex,
+  type SessionsCaller,
+} from "./session-history.js";
 import type { DispatchContext } from "./dispatcher.js";
 import { TerminalAdapter } from "./channels/terminal.js";
 import { DiscordAdapter } from "./channels/discord.js";
@@ -106,6 +113,7 @@ console.log(`[paths] agents_dir=${paths.agents_dir}`);
 // 2. Set up sessions DB
 const db = new Database(paths.sessions_db);
 initSessionsTable(db);
+initSessionHistoryTable(db);
 initSchedulerTables(db);
 const taskStore = new SQLiteTaskStore(db);
 
@@ -237,7 +245,10 @@ const sessionManager = new SessionManager({
   schedulerEnabled: true,
   redisUrl: redisConfig.url,
   getSessionId: (scope) => getSessionId(db, scope),
-  setSessionId: (scope, id) => setSessionId(db, scope, id),
+  setSessionId: (scope, id) => {
+    setSessionId(db, scope, id);
+    recordSessionHistory(db, scope, id, sessionManager.get(scope)?.agentId ?? null);
+  },
   deleteSessionId: (scope) => deleteSession(db, scope),
 });
 
@@ -255,6 +266,38 @@ function sendToChannel(scope: string, text: string, files?: ChannelFile[]): Prom
   const sender = channelSenders.get(platform);
   return sender ? sender(scope, text, files) : Promise.resolve();
 }
+
+// 3b. Session history — every session each scope has had, searchable by agents
+// through mcp__sessions__*, bounded by the asking user's own permissions.
+let discordAdapter: DiscordAdapter | null = null;
+const transcriptIndex = new TranscriptIndex(resolve(paths.data_dir, "session-index.db"), paths.agents_dir);
+
+async function userCanViewScope(caller: SessionsCaller, scope: string): Promise<boolean> {
+  const user = resolveUser(caller.userId, caller.userPlatform, config.platform);
+  if (!user || !checkAccess(caller.userId, caller.userPlatform, caller.agentId, config.platform)) return false;
+  if (scope.startsWith("terminal:")) return scope.split(":")[2] === user.username;
+  if (scope.startsWith("discord:")) {
+    const discordId = caller.userPlatform === "discord"
+      ? caller.userId
+      : config.platform.rbac.users[user.username]?.identities.discord;
+    return !!discordId && !!discordAdapter && discordAdapter.canUserView(discordId, scope);
+  }
+  return false;
+}
+
+const sessionHistory = new SessionHistoryService({
+  db,
+  index: transcriptIndex,
+  getCurrentSessionId: (scope) => getSessionId(db, scope),
+  canView: userCanViewScope,
+  describe: async (scope) => {
+    if (scope.startsWith("discord:") && discordAdapter) return discordAdapter.describeScope(scope);
+    if (scope.startsWith("terminal:")) return `terminal session of ${scope.split(":")[2]}`;
+    return scope;
+  },
+});
+// Build/catch up the transcript index in the background (yields between chunks).
+for (const id of Object.keys(config.agents.agents)) void transcriptIndex.refresh(id);
 
 // 3c. Start orchestrator callback server (port 7420)
 // Workers call back here for permission checks and agent MCP tool invocations.
@@ -279,6 +322,7 @@ const stopCallbackServer = startCallbackServer(
   },
   taskStore,
   sendToChannel,
+  sessionHistory,
 );
 
 /**
@@ -377,13 +421,56 @@ async function handleMessage(
     `${msg.platform} id: ${msg.userId}`,
   ].join(" | ");
 
-  return bridge.sendAndWait(enqueueScope, `[${senderTag}]\n${msg.content}`, {
+  // A brand-new Discord session (new thread, first message after /new, …) has
+  // no memory: tell the agent where it is and which earlier sessions exist.
+  const isFresh = msg.platform === "discord" && !sessionManager.get(enqueueScope) && !getSessionId(db, enqueueScope);
+  const header = isFresh ? `${buildSessionStartHeader(msg, enqueueScope, agentId)}\n` : "";
+
+  return bridge.sendAndWait(enqueueScope, `${header}[${senderTag}]\n${msg.content}`, {
     userId: msg.userId,
     userPlatform: msg.platform,
     askApproval,
     attachments: msg.attachments,
     onPartial,
   });
+}
+
+/** Header for the first message of a fresh session — where it is, settings, earlier sessions. */
+function buildSessionStartHeader(msg: ChannelMessage, scope: string, agentId: string): string {
+  const parts = scope.split(":");
+  const isThread = parts.length >= 4 && /^\d+$/.test(parts[3]);
+  const where = msg.locationLabel ?? scope;
+  let binding: ReturnType<typeof resolveBinding> | undefined;
+  try { binding = resolveBinding(scope, config.platform); } catch { /* unbound */ }
+  const settings = [
+    `agent ${agentId}`,
+    ...(binding?.model ? [`model ${binding.model}`] : []),
+    ...(binding?.effort ? [`effort ${binding.effort}`] : []),
+  ].join(", ");
+  const day = (ts: string | null) => (ts ? ts.slice(0, 10) : "?");
+  const fmtSessions = (list: ReturnType<SessionHistoryService["scopeSessions"]>) =>
+    list.slice(0, 5).map((s) =>
+      `${s.sessionId} (${day(s.firstTs)} → ${day(s.lastTs)}${s.title ? `, "${s.title.replace(/\s+/g, " ").slice(0, 60)}"` : ""})`,
+    ).join("; ");
+
+  const lines = ["[platform: session start]", `New session with no memory of earlier conversations, in ${where} (scope ${scope}).`];
+  if (isThread) {
+    const parent = msg.parentLabel ?? "the parent channel";
+    lines.push(`The thread inherits ${parent}'s settings (${settings}) and permissions.`);
+    if (msg.threadOrigin) {
+      const o = msg.threadOrigin;
+      lines.push(`The thread was started from a message by ${o.authorName} (${o.createdAt.slice(0, 16).replace("T", " ")}Z): "${o.content}"`);
+    }
+    const parentSessions = sessionHistory.scopeSessions(parts.slice(0, 3).join(":"), agentId);
+    if (parentSessions.length) lines.push(`${parent} sessions, newest first: ${fmtSessions(parentSessions)}`);
+  } else {
+    lines.push(`Settings: ${settings}.`);
+  }
+  const ownSessions = sessionHistory.scopeSessions(scope, agentId);
+  if (ownSessions.length) lines.push(`Earlier sessions here, newest first: ${fmtSessions(ownSessions)}`);
+  lines.push("If the message depends on earlier discussion, load it with mcp__sessions__list / search / read before answering. Otherwise just answer.");
+  lines.push("[/platform]");
+  return lines.join("\n");
 }
 
 // 5. Start channels
@@ -423,6 +510,7 @@ if (config.platform.channels.discord?.enabled) {
     agents: config.agents,
   });
   await adapter.start();
+  discordAdapter = adapter;
   channelSenders.set("discord", (scope, text, files?) => adapter.send(scope, text, files));
   console.log("Discord channel started");
 }

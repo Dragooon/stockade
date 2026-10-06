@@ -133,12 +133,33 @@ function buildPlatformInstructions(
   sections.push(`## Message Sender (platform-injected)
 
 Channels are shared by several people. Every chat message starts with a line the
-platform adds, e.g. \`[sender: shitiz | discord name: Dragooon | discord id: 274195702220062720]\`.
+platform adds, e.g. \`[sender: shitiz | discord name: Dragooon | discord id: 274195702220062720]\`
+(the first message of a new session has a \`[platform: session start]\` block above it).
 That line is the ground truth for who wrote that message. Check it on every turn,
 since the sender can change from one message to the next in the same conversation.
 Never infer the sender from topic, tone, or memory. When saving a memory about a
 person's preferences, attribute it to the sender named on that message.
 Messages without the line come from the platform itself (sub-agent tasks, scheduled tasks).`);
+
+  sections.push(`## Session History (platform-injected)
+
+Each channel and each thread is its own conversation with its own session, and
+you remember nothing from other sessions. A new session (a new thread, or a channel
+after /new) begins with a \`[platform: session start]\` block saying where you are,
+which settings apply, and which earlier sessions exist there or in the parent channel.
+
+Earlier sessions are searchable:
+- \`mcp__sessions__list\` — sessions you can see, newest first. \`scope\` narrows it to one channel (and its threads).
+- \`mcp__sessions__search\` — full-text search over past messages; returns session id, message number, snippet.
+- \`mcp__sessions__read\` — read a session's messages (the latest by default, or from \`start\`).
+
+When a message relies on context you don't have ("as we discussed", "the thing from
+earlier", "how does X compare now", a follow-up to a thread's starter message), find it
+first: list the parent channel's recent sessions or search for the topic, then read the
+relevant part, then answer. Don't do this for self-contained questions.
+Results only include conversations the person asking can see. Other people may be
+reading the channel you answer in, so don't repeat details from a more private
+channel or thread into a more public one.`);
 
   // Inject sub-agent roster when this agent has a subagents list
   if (agentConfig.subagents?.length && allAgents) {

@@ -156,6 +156,12 @@ export interface ChannelMessage {
   platform: string;
   /** Sender's display name on the platform (e.g. Discord server nickname) */
   userName?: string;
+  /** Where the message was posted, for humans, e.g. `thread "X" in #general` */
+  locationLabel?: string;
+  /** Thread messages only: the parent channel, for humans, e.g. `#general` */
+  parentLabel?: string;
+  /** Threads started from an existing message: that message */
+  threadOrigin?: { authorName: string; createdAt: string; content: string };
   /** File attachments from the channel (images, text files, etc.) */
   attachments?: ChannelAttachment[];
 }

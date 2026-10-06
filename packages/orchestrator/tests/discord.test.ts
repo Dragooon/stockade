@@ -36,6 +36,9 @@ vi.mock("discord.js", () => {
       GuildMessageReactions: 8,
     },
     MessageFlags: { Ephemeral: 64 },
+    MessageType: { Default: 0, Reply: 19, ThreadCreated: 18, ThreadStarterMessage: 21 },
+    ChannelType: { GuildText: 0, PublicThread: 11, PrivateThread: 12, GuildForum: 15, GuildMedia: 16 },
+    PermissionFlagsBits: { ViewChannel: 1024n, ReadMessageHistory: 65536n, ManageThreads: 17179869184n },
     REST: vi.fn().mockImplementation(() => ({
       setToken: vi.fn().mockReturnThis(),
     })),
@@ -73,6 +76,7 @@ const discordConfig: DiscordConfig = {
 /** Create a mock Discord message */
 function mockMessage(overrides: Record<string, unknown> = {}) {
   const defaults = {
+    type: 0,
     author: { bot: false, id: "user-42" },
     guildId: "server-1",
     channelId: "any-channel",
@@ -154,6 +158,7 @@ describe("DiscordAdapter", () => {
     expect(onMessage).toHaveBeenCalledWith(
       expect.objectContaining({ content: "Hello without mention" }),
       expect.objectContaining({ askUser: expect.any(Function), notifyAutoApproved: expect.any(Function) }),
+      expect.any(Function), // onPartial
     );
   });
 
@@ -184,8 +189,10 @@ describe("DiscordAdapter", () => {
         platform: "discord",
       }),
       expect.objectContaining({ askUser: expect.any(Function), notifyAutoApproved: expect.any(Function) }),
+      expect.any(Function), // onPartial
     );
 
+    await new Promise((r) => setTimeout(r, 0)); // delivery is fire-and-forget
     expect((msg.channel as any).send).toHaveBeenCalledWith({ content: "Response", files: [] });
   });
 
@@ -214,6 +221,7 @@ describe("DiscordAdapter", () => {
         content: "Thread msg",
       }),
       expect.objectContaining({ askUser: expect.any(Function), notifyAutoApproved: expect.any(Function) }),
+      expect.any(Function), // onPartial
     );
   });
 
@@ -275,6 +283,69 @@ describe("DiscordAdapter", () => {
     await handler(msg);
 
     expect((msg.channel as any).send).toHaveBeenCalledWith("Error: Agent down");
+  });
+
+  it("ignores system messages such as 'X started a thread'", async () => {
+    const adapter = new DiscordAdapter(discordConfig, { onMessage });
+    await adapter.start();
+    const handler = getMessageHandler();
+
+    await handler(mockMessage({ type: 18, content: "How does Hermes compare?" }));
+
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it("dispatches the starter message of a new thread into the thread, as the thread owner", async () => {
+    onMessage.mockResolvedValue({ text: "Thread answer" });
+    const adapter = new DiscordAdapter(discordConfig, { onMessage });
+    await adapter.start();
+    const threadHandler = mockOn.mock.calls.find((c) => c[0] === "threadCreate")![1] as (
+      thread: unknown, newlyCreated: boolean,
+    ) => Promise<void>;
+
+    const starter = mockMessage({
+      id: "thread-77",
+      channelId: "general",
+      content: "How does current Hermes do vs Stockade?",
+      author: { bot: false, id: "user-42", username: "dragooon" },
+      createdAt: new Date("2026-10-05T10:00:00Z"),
+    });
+    const thread = {
+      id: "thread-77",
+      name: "Hermes vs Stockade",
+      ownerId: "user-42",
+      parentId: "general",
+      parent: { type: 0, name: "general" },
+      joinable: false,
+      isThread: () => true,
+      fetchStarterMessage: vi.fn().mockResolvedValue(starter),
+      guild: { members: { fetch: vi.fn().mockResolvedValue({ displayName: "Dragooon", user: { username: "dragooon" } }) } },
+      sendTyping: vi.fn().mockResolvedValue(undefined),
+      send: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await threadHandler(thread, true);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: "discord:server-1:general:thread-77",
+        userId: "user-42",
+        userName: "Dragooon",
+        locationLabel: 'thread "Hermes vs Stockade" in #general',
+        parentLabel: "#general",
+        content: expect.stringContaining("How does current Hermes do vs Stockade?"),
+      }),
+      expect.anything(),
+      expect.any(Function),
+    );
+    expect(thread.send).toHaveBeenCalledWith({ content: "Thread answer", files: [] });
+    expect((starter.channel as any).send).not.toHaveBeenCalled();
+
+    // An existing thread being re-seen (newlyCreated=false) is not dispatched again.
+    onMessage.mockClear();
+    await threadHandler(thread, false);
+    expect(onMessage).not.toHaveBeenCalled();
   });
 });
 

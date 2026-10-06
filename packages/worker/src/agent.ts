@@ -376,6 +376,62 @@ schedule_type options:
     tools: [schedulerCreateTool, schedulerListTool, schedulerDeleteTool, schedulerUpdateTool],
   });
 
+  // ── Session history MCP server: gives the agent mcp__sessions__list/search/read ──
+  // The orchestrator only returns sessions the current user may see.
+  const sessionsCall = async (op: string, args: Record<string, unknown>) => {
+    try {
+      const res = await httpCallback("POST", `${cbBase}/sessions/${op}`, JSON.stringify(args), 60_000);
+      const data = JSON.parse(res.text) as { text?: string; error?: string };
+      const text = res.status >= 200 && res.status < 300 ? data.text ?? "" : `Error: ${data.error ?? res.text}`;
+      return { content: [{ type: "text" as const, text }] };
+    } catch (err) {
+      return { content: [{ type: "text" as const, text: `Session history ${op} failed: ${err instanceof Error ? err.message : String(err)}` }] };
+    }
+  };
+
+  const sessionsListTool = tool(
+    "list",
+    `List your earlier conversation sessions (newest first) that the current user can see.
+Each line: session id | where it happened | first → last activity | message count | title.
+Pass scope (e.g. the parent channel scope from the [platform: session start] block) to list one channel's sessions; scope prefixes also match its threads.`,
+    {
+      scope: z.string().optional().describe("Only sessions in this scope or under it (e.g. discord:<server>:<channel>)"),
+      limit: z.number().optional().describe("Max sessions (default 20, max 100)"),
+    },
+    (args) => sessionsCall("list", args),
+  );
+
+  const sessionsSearchTool = tool(
+    "search",
+    `Full-text search across your earlier sessions that the current user can see.
+Plain words are ANDed; "exact phrase", prefix*, OR / NOT also work.
+Returns matching messages with session id, scope, time, seq and a snippet — open the context with mcp__sessions__read.`,
+    {
+      query: z.string().describe("Search terms"),
+      scope: z.string().optional().describe("Only sessions in this scope or under it"),
+      limit: z.number().optional().describe("Max hits (default 15, max 50)"),
+    },
+    (args) => sessionsCall("search", args),
+  );
+
+  const sessionsReadTool = tool(
+    "read",
+    `Read the messages of an earlier session. Without start, returns the last messages.
+Use start (a seq from search/list output) to read around a hit.`,
+    {
+      session_id: z.string().describe("Session id from list/search (a unique prefix works)"),
+      start: z.number().optional().describe("First message seq to return (default: the last \`limit\` messages)"),
+      limit: z.number().optional().describe("Messages to return (default 30, max 100)"),
+    },
+    (args) => sessionsCall("read", args),
+  );
+
+  const sessionsMcpServer = createSdkMcpServer({
+    name: "sessions",
+    version: "1.0.0",
+    tools: [sessionsListTool, sessionsSearchTool, sessionsReadTool],
+  });
+
   // ── Build query options ──
   const resolvedCwd = request.cwd ?? process.env.AGENT_WORKSPACE ?? process.cwd();
   const options: Record<string, unknown> = {
@@ -394,7 +450,7 @@ schedule_type options:
     allowDangerouslySkipPermissions: true,
     disallowedTools: request.disallowedTools,
     settings: request.sdkSettings,
-    mcpServers: { agent: agentMcpServer, scheduler: schedulerMcpServer, host: hostMcpServer },
+    mcpServers: { agent: agentMcpServer, scheduler: schedulerMcpServer, host: hostMcpServer, sessions: sessionsMcpServer },
   };
 
   if (request.tools) options.tools = request.tools;
