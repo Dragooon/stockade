@@ -87,6 +87,8 @@ const {
   invalidateCache,
   invalidateSession,
   getCacheSize,
+  listCredentials,
+  shapeCredential,
 } = await import("../src/shared/credentials.js");
 
 const provider: Provider = {
@@ -234,6 +236,44 @@ describe("resolveCredential — overrides", () => {
     await resolveCredential(withOverrides, "special-key");
 
     expect(getLastCommand()).toBe("first-backend special-key");
+  });
+});
+
+describe("legacy override slugs in list and shape", () => {
+  const seedbox: Provider = {
+    ...provider,
+    list: "op item list",
+    shape: 'op-field shape "{key}"',
+    overrides: [
+      { match: "seedbox-ssh-key", read: 'op read "op://Shared/Ultra.cc Seedbox/SSH Password" || op read "op://Shared/Ultra.cc Seedbox/password"' },
+    ],
+  };
+
+  beforeEach(() => {
+    mockClearAll();
+    invalidateCache();
+  });
+
+  it("lists an item under its slug only when the override reads that exact item", async () => {
+    mockResolve(JSON.stringify([{ title: "Ultra.cc Seedbox" }, { title: "Ultra.cc" }]));
+
+    expect(await listCredentials(seedbox)).toEqual(["Ultra.cc", "seedbox-ssh-key"]);
+  });
+
+  it("shapes the item a slug's override reads", async () => {
+    mockResolve('{"item":"Ultra.cc Seedbox","fields":[]}');
+
+    await shapeCredential(seedbox, "seedbox-ssh-key");
+
+    expect(getLastCommand()).toBe('op-field shape "Ultra.cc Seedbox"');
+  });
+
+  it("shapes any other key as given", async () => {
+    mockResolve('{"item":"Ultra.cc","fields":[]}');
+
+    await shapeCredential(seedbox, "Ultra.cc");
+
+    expect(getLastCommand()).toBe('op-field shape "Ultra.cc"');
   });
 });
 

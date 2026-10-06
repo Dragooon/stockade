@@ -4,6 +4,7 @@ import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
 import { config as loadEnv } from "dotenv";
 import { loadProxyConfig } from "./shared/config.js";
 import { watchProxyConfig } from "./shared/watch.js";
+import { invalidateCache } from "./shared/credentials.js";
 import { startHttpProxy } from "./http/proxy.js";
 import { startSshTunnel } from "./ssh/tunnel.js";
 import { startGateway } from "./gateway/api.js";
@@ -34,6 +35,8 @@ const gatewayServer = startGateway(getConfig);
 // Hot reload config on file changes
 const stopWatch = watchProxyConfig(PLATFORM_HOME, (next) => {
   config = next;
+  // An edited override changes where a key reads from; don't serve the old value.
+  invalidateCache();
 });
 
 // Graceful shutdown

@@ -68,7 +68,8 @@ export async function listCredentials(provider: Provider): Promise<string[]> {
   const result: string[] = [];
 
   for (const item of items) {
-    const override = overrides.find((o) => o.read.includes(item.title));
+    // Delimited, so "Ultra.cc" doesn't match an override reading "Ultra.cc Seedbox".
+    const override = overrides.find((o) => o.read.includes(`/${item.title}/`));
     if (override) {
       result.push(override.match);
     } else {
@@ -86,7 +87,11 @@ export async function listCredentials(provider: Provider): Promise<string[]> {
  */
 export async function shapeCredential(provider: Provider, key: string): Promise<unknown> {
   if (!provider.shape) throw new Error("Provider has no shape command configured");
-  const cmd = provider.shape.replace(/\{key\}/g, key);
+  // A legacy override slug (seedbox-ssh-key) isn't an item title: describe the
+  // item its read command points at (op://<vault>/<item>/...).
+  const override = (provider.overrides ?? []).find((o) => o.match === key);
+  const item = override?.read.match(/op:\/\/[^/"]+\/([^/"]+)\//)?.[1] ?? key;
+  const cmd = provider.shape.replace(/\{key\}/g, item);
   return JSON.parse(await execProviderCommand(cmd, provider));
 }
 
