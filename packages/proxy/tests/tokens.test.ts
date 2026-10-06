@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   issueToken,
   validateToken,
@@ -6,6 +9,7 @@ import {
   checkStoreScope,
   revokeToken,
   clearAllTokens,
+  initTokenStore,
 } from "../src/gateway/tokens.js";
 
 describe("gateway tokens", () => {
@@ -88,5 +92,56 @@ describe("gateway tokens", () => {
     const issued = issueToken("main", ["key1"], undefined, 10);
     vi.advanceTimersByTime(11_000);
     expect(checkCredentialScope(issued.token, "key1")).toBe(false);
+  });
+});
+
+describe("gateway token store", () => {
+  let dir: string;
+  let store: string;
+
+  beforeEach(() => {
+    clearAllTokens();
+    dir = mkdtempSync(join(tmpdir(), "apw-tokens-"));
+    store = join(dir, "gateway-tokens.json");
+  });
+
+  afterEach(() => {
+    clearAllTokens();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Drop the in-memory tokens and load the file, as a fresh proxy process would. */
+  function restart() {
+    clearAllTokens();
+    initTokenStore(store);
+  }
+
+  it("keeps issued tokens across a restart", () => {
+    initTokenStore(store);
+    const issued = issueToken("main", ["*"], ["Agent/*"], 3600);
+    restart();
+    expect(validateToken(issued.token)).toMatchObject({ agentId: "main", credentials: ["*"], storeKeys: ["Agent/*"] });
+    expect(checkCredentialScope(issued.token, "seedbox-ssh-key")).toBe(true);
+  });
+
+  it("doesn't bring back revoked or expired tokens", () => {
+    initTokenStore(store);
+    const revoked = issueToken("main", ["*"], undefined, 3600);
+    const expiring = issueToken("main", ["*"], undefined, 1);
+    revokeToken(revoked.token);
+    const t = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(t + 2_000);
+    restart();
+    expect(validateToken(revoked.token)).toBeNull();
+    expect(validateToken(expiring.token)).toBeNull();
+    vi.restoreAllMocks();
+  });
+
+  it("starts empty when the file is missing or unreadable", () => {
+    initTokenStore(store);
+    expect(validateToken("apw-main-0000")).toBeNull();
+    writeFileSync(store, "not json");
+    restart();
+    expect(issueToken("main", [], undefined, 60).token).toMatch(/^apw-main-/);
   });
 });

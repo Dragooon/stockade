@@ -1,7 +1,42 @@
 import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { GatewayToken } from "../shared/types.js";
 
 const tokens = new Map<string, GatewayToken>();
+let storePath: string | null = null;
+
+/**
+ * Keep tokens in a file so they survive a proxy restart. A worker gets its
+ * token once, when its session starts, and holds it in env for the session's
+ * life; with memory-only tokens every restart left live agents with a dead
+ * token ("Invalid or expired token") until their session was recycled.
+ */
+export function initTokenStore(path: string): void {
+  storePath = path;
+  if (!existsSync(path)) return;
+  try {
+    const now = Date.now();
+    for (const entry of JSON.parse(readFileSync(path, "utf-8")) as GatewayToken[]) {
+      if (entry.expiresAt > now) tokens.set(entry.token, entry);
+    }
+  } catch (err) {
+    console.warn(`[tokens] couldn't load ${path}: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+function persist(): void {
+  if (!storePath) return;
+  try {
+    const now = Date.now();
+    const live = [...tokens.values()].filter((t) => t.expiresAt > now);
+    mkdirSync(dirname(storePath), { recursive: true });
+    writeFileSync(`${storePath}.tmp`, JSON.stringify(live), { mode: 0o600 });
+    renameSync(`${storePath}.tmp`, storePath);
+  } catch (err) {
+    console.warn(`[tokens] couldn't save ${storePath}: ${err instanceof Error ? err.message : err}`);
+  }
+}
 
 /**
  * Issue a new gateway token for an agent.
@@ -21,6 +56,7 @@ export function issueToken(
     expiresAt: Date.now() + ttl * 1000,
   };
   tokens.set(token, entry);
+  persist();
   return entry;
 }
 
@@ -34,6 +70,7 @@ export function validateToken(
   if (!entry) return null;
   if (entry.expiresAt <= Date.now()) {
     tokens.delete(token);
+    persist();
     return null;
   }
   return {
@@ -78,12 +115,13 @@ export function checkStoreScope(
  * Revoke a token.
  */
 export function revokeToken(token: string): void {
-  tokens.delete(token);
+  if (tokens.delete(token)) persist();
 }
 
-/** Visible for testing — clear all tokens */
+/** Visible for testing — clear all tokens and detach the file store */
 export function clearAllTokens(): void {
   tokens.clear();
+  storePath = null;
 }
 
 function globMatch(pattern: string, value: string): boolean {

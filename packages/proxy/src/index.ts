@@ -5,6 +5,7 @@ import { config as loadEnv } from "dotenv";
 import { loadProxyConfig } from "./shared/config.js";
 import { watchProxyConfig } from "./shared/watch.js";
 import { invalidateCache } from "./shared/credentials.js";
+import { initTokenStore } from "./gateway/tokens.js";
 import { startHttpProxy } from "./http/proxy.js";
 import { startSshTunnel } from "./ssh/tunnel.js";
 import { startGateway } from "./gateway/api.js";
@@ -14,6 +15,7 @@ const PLATFORM_HOME = join(homedir(), ".stockade");
 loadEnv({ path: join(PLATFORM_HOME, ".env") });
 let config = loadProxyConfig(PLATFORM_HOME);
 const getConfig = () => config;
+initTokenStore(join(PLATFORM_HOME, "proxy", "gateway-tokens.json"));
 
 // Node's happy-eyeballs gives each upstream address only 250ms to complete a
 // TCP handshake before moving on. From here, hosts with ~300ms RTT (e.g.
