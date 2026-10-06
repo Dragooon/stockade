@@ -267,6 +267,14 @@ function sendToChannel(scope: string, text: string, files?: ChannelFile[]): Prom
   return sender ? sender(scope, text, files) : Promise.resolve();
 }
 
+// Follow-ups: what an agent says when a background task it started finishes after
+// its reply. Sub-agent scopes have no channel sender, so theirs go nowhere.
+bridge.onFollowup((scope, response) => {
+  sendToChannel(scope, response.text, response.files).catch((err: unknown) =>
+    console.error(`[bus] Failed to deliver follow-up to ${scope.slice(0, 40)}:`, err)
+  );
+});
+
 // 3b. Session history — every session each scope has had, searchable by agents
 // through mcp__sessions__*, bounded by the asking user's own permissions.
 let discordAdapter: DiscordAdapter | null = null;

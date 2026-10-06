@@ -78,6 +78,11 @@ export interface BusEventResult {
   sdkSessionId: string;
   stopReason: string;
   files?: Array<{ filename: string; contentType: string; path: string; content?: string }>;
+  /** Agent called mcp__agent__no_reply: post nothing (files still go). */
+  silent?: boolean;
+  /** A turn after the reply, woken by a background task finishing: nobody is
+   *  waiting on it, so it goes to the channel as a new message. */
+  followup?: boolean;
   timestamp: string;
 }
 

@@ -53,6 +53,8 @@ export const CORE_PLATFORM_TOOLS = new Set([
   "mcp__agent__message",
   // File delivery (mcp__agent__ server)
   "mcp__agent__send_file",
+  // Staying silent in shared channels (mcp__agent__ server)
+  "mcp__agent__no_reply",
   // Scheduler (mcp__scheduler__ server)
   "mcp__scheduler__create",
   "mcp__scheduler__list",

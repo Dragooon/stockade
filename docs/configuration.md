@@ -131,7 +131,9 @@ channels:
         channels: ["channel-id-1", "channel-id-2"]
 ```
 
-Agents receive all messages in bound channels. The system prompt determines when to respond vs stay silent.
+Agents receive all messages in bound channels. The system prompt determines when to respond vs stay silent. To stay silent, the agent calls `mcp__agent__no_reply`: the worker drops the turn's final text and the channel posts nothing. A new message arriving after the call, or any other tool call after it, cancels the silence.
+
+If the agent leaves a background task running (`run_in_background`), the worker keeps the CLI alive after the reply. When the task finishes, the CLI wakes the agent, and whatever it says is posted to the channel as a new message. The wait ends after 50 minutes, or when the session closes.
 
 ## Containers
 

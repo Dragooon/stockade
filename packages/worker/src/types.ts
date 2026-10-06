@@ -56,7 +56,7 @@ export type WorkerEvent =
   | { type: "tool_start"; name: string }
   | { type: "tool_end"; name: string; elapsedMs: number }
   | { type: "assistant_text"; text: string }
-  | { type: "result"; text: string; sessionId: string; stopReason: string; files?: Array<{ filename: string; contentType: string; path: string; content?: string }> }
+  | { type: "result"; text: string; sessionId: string; stopReason: string; files?: Array<{ filename: string; contentType: string; path: string; content?: string }>; silent?: boolean }
   | { type: "error"; message: string }
   | { type: "stale_session" };
 

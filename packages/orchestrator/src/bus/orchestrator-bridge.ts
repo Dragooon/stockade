@@ -59,6 +59,8 @@ interface Pending {
 export class OrchestratorBridge {
   /** correlationId → pending promise */
   private readonly pending = new Map<string, Pending>();
+  /** Posts a follow-up (a result nobody is waiting on) to the scope's channel. */
+  private followupHandler?: (scope: string, response: ChannelResponse) => void;
 
   constructor(
     readonly bus: EventBus,
@@ -164,6 +166,14 @@ export class OrchestratorBridge {
    */
   async closeSession(scope: string, reason: string): Promise<void> {
     await this.sessionManager.closeSession(scope, reason);
+  }
+
+  /**
+   * Deliver follow-ups: turns the agent takes after its reply, woken by a
+   * background task it started finishing (see the worker's runAgentSession).
+   */
+  onFollowup(handler: (scope: string, response: ChannelResponse) => void): void {
+    this.followupHandler = handler;
   }
 
   /** Graceful shutdown — clear pending promises and stop Redis. */
@@ -348,8 +358,17 @@ export class OrchestratorBridge {
       case "evt:result": {
         const p = this.pending.get(event.correlationId);
         const preview = event.text.slice(0, 100).replace(/\n/g, " ");
-        const emptyMark = event.text.length === 0 ? " ⚠ EMPTY" : "";
-        log(`[bus] ← ${scope.slice(0, 30)} | session=${event.sdkSessionId.slice(0, 12)} | stop=${event.stopReason} | "${preview}${event.text.length > 100 ? "…" : ""}"${emptyMark}`);
+        const emptyMark = event.silent ? " (silent: no_reply)" : event.text.length === 0 ? " ⚠ EMPTY" : "";
+        const followMark = event.followup ? " (follow-up)" : "";
+        log(`[bus] ← ${scope.slice(0, 30)} | session=${event.sdkSessionId.slice(0, 12)} | stop=${event.stopReason} | "${preview}${event.text.length > 100 ? "…" : ""}"${emptyMark}${followMark}`);
+
+        if (event.followup) {
+          // Nobody is waiting on it: post it as a new message, or nothing if empty.
+          if (!event.silent && (event.text.trim() || event.files?.length)) {
+            this.followupHandler?.(scope, { text: event.text, files: event.files, stopReason: event.stopReason });
+          }
+          break;
+        }
 
         // Guard: if the correlationId has no pending (e.g. stale-session recovery
         // already consumed it), do NOT coalesce — other pendings for this scope
@@ -370,7 +389,7 @@ export class OrchestratorBridge {
         }
         clearTimeout(p.timeoutHandle);
         this.pending.delete(event.correlationId);
-        p.resolve({ text: event.text, files: event.files, stopReason: event.stopReason });
+        p.resolve({ text: event.text, files: event.files, stopReason: event.stopReason, ...(event.silent ? { silent: true } : {}) });
         break;
       }
 

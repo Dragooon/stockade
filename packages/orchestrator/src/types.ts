@@ -246,6 +246,8 @@ export interface ChannelResponse {
   files?: ChannelFile[];
   /** SDK stop_reason from the terminal result event ("end_turn", "max_turns", "error_max_turns", etc). */
   stopReason?: string;
+  /** Agent chose not to reply (mcp__agent__no_reply): post nothing, not even a warning. */
+  silent?: boolean;
 }
 
 /** Resolved user info from RBAC */

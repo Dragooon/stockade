@@ -19,9 +19,16 @@ export class ConversationChannel {
   private waiters: Array<() => void> = [];
   private _closed = false;
   private _sessionId = "";
+  private _pushed = 0;
+  private closeHandlers: Array<() => void> = [];
 
   get closed(): boolean {
     return this._closed;
+  }
+
+  /** Total messages ever pushed (consumed or not). */
+  get pushedCount(): number {
+    return this._pushed;
   }
 
   /** Number of messages buffered but not yet consumed by query(). */
@@ -37,6 +44,7 @@ export class ConversationChannel {
   /** Push a user message into the running query() loop. */
   push(text: string): void {
     if (this._closed) return;
+    this._pushed++;
     this.buffer.push({
       type: "user",
       message: { role: "user", content: text },
@@ -51,6 +59,13 @@ export class ConversationChannel {
     if (this._closed) return;
     this._closed = true;
     this.drain();
+    for (const fn of this.closeHandlers.splice(0)) fn();
+  }
+
+  /** Run fn when the channel closes (right away if it already has). */
+  onClose(fn: () => void): void {
+    if (this._closed) fn();
+    else this.closeHandlers.push(fn);
   }
 
   private drain(): void {

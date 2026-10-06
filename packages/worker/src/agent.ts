@@ -60,6 +60,12 @@ function httpPost(url: string, body: string, timeoutMs: number): Promise<{ statu
 
 const DEFAULT_MODEL = "sonnet";
 const DEFAULT_MAX_TURNS = 20;
+const NO_REPLY_TOOL = "mcp__agent__no_reply";
+// Background follow-ups (see the agent loop): how long the CLI is kept after the
+// reply while background tasks run, and after the last one ends. Under the
+// orchestrator's 1 h session idle timeout, which would close the session anyway.
+const FOLLOWUP_WAIT_MS = 50 * 60_000;
+const FOLLOWUP_GRACE_MS = 3 * 60_000;
 
 const STALE_SESSION_PATTERNS = [
   "No conversation found",
@@ -93,7 +99,8 @@ function formatModelUsage(modelUsage: Record<string, Record<string, unknown>>): 
  * message (and any mid-session injections) before / during the loop.
  *
  * On stale session: emits `stale_session` and returns (orchestrator retries).
- * On success: emits `result` and returns.
+ * On success: emits `result` and returns, unless background tasks are still
+ * running: then it stays to emit one more `result` per later turn (follow-ups).
  * On error: propagates the error (caller emits `error`).
  */
 export async function runAgentSession(
@@ -208,10 +215,22 @@ Omit session to start a fresh ephemeral sub-agent each time (default).`,
     },
   );
 
+  // The tool itself does nothing: the stream loop below spots the call and drops
+  // the turn's final text, so nothing reaches the channel.
+  const noReplyTool = tool(
+    "no_reply",
+    `Stay silent: end this turn without posting anything to the channel.
+Use it when a message isn't for you, e.g. people talking to each other, or an acknowledgement that needs no answer.
+Call it on its own, then end your turn. Any text you write after it is discarded, so don't explain the silence.
+Calling another tool afterwards cancels it, and so does a new message arriving before you finish.`,
+    {},
+    async () => ({ content: [{ type: "text" as const, text: "Silent: nothing will be posted for this turn. End your turn now without writing anything." }] }),
+  );
+
   const agentMcpServer = createSdkMcpServer({
     name: "agent",
     version: "1.0.0",
-    tools: [agentStartTool, agentStopTool, agentMessageTool, sendFileTool],
+    tools: [agentStartTool, agentStopTool, agentMessageTool, sendFileTool, noReplyTool],
   });
 
   // ── Host-bash MCP server: run a whitelisted command on the Docker host ──
@@ -511,15 +530,46 @@ Use start (a seq from search/list output) to read around a hit.`,
 
   // ── Run the agent loop ──
   let sdkSessionId = "";
-  let resultText = "";
-  let stopReason = "unknown";
   let turns = 0;
   let toolStart = 0;
   let prevUsage = { input: -1, output: -1, cacheRead: -1, cacheCreate: -1 };
   let emittedStarted = false;
+  // no_reply bookkeeping. seenPushes = channel messages the model's latest input
+  // could include; silentAt = seenPushes when it chose silence (-1 = not silent).
+  // A message pushed after that point may be unseen, so the silence no longer holds.
+  let seenPushes = channel.pushedCount;
+  let silentAt = -1;
+  // Background follow-ups. A run_in_background task outlives the turn that started
+  // it, and when it ends the CLI wakes the model with a task-notification turn. So
+  // while tasks are live the CLI keeps running after the reply, and each later turn
+  // is emitted as another result (the session posts it as a follow-up). Breaking on
+  // the first result killed the CLI, and with it every promised "results coming".
+  let liveTasks = 0;
+  let replied = false;
+  let inTurn = true;
+  let stopping = false;
+  let waitTimer: ReturnType<typeof setTimeout> | undefined;
+  const q = query({ prompt: channel as any, options: options as any });
+  const stop = (why: string) => {
+    if (stopping) return;
+    stopping = true;
+    clearTimeout(waitTimer);
+    console.log(`[worker] follow-up wait over (${why}): closing the CLI`);
+    (q as any).close?.();
+  };
+  // Idle after the reply: wait for live tasks, but not forever (a server started in
+  // the background never ends). With none left, give a just-finished task's
+  // notification turn a moment to start.
+  const armWait = () => {
+    clearTimeout(waitTimer);
+    const ms = liveTasks > 0 ? FOLLOWUP_WAIT_MS : FOLLOWUP_GRACE_MS;
+    const why = liveTasks > 0 ? `${liveTasks} task(s) still running after ${ms / 60_000} min` : "no tasks left";
+    waitTimer = setTimeout(() => stop(why), ms);
+  };
+  channel.onClose(() => { if (replied) stop("session closed"); });
 
   try {
-    for await (const message of query({ prompt: channel as any, options: options as any })) {
+    for await (const message of q) {
       const m = message as Record<string, unknown>;
 
       if (m.session_id) {
@@ -530,7 +580,22 @@ Use start (a seq from search/list output) to read around a hit.`,
         }
       }
 
+      // A turn after the reply (follow-up, or a message sent meanwhile) has started.
+      // It sees what was pushed before it; anything later gets a queued turn of its own.
+      if (!inTurn && (m.type === "assistant" || m.type === "user" || (m.type === "system" && m.subtype === "init"))) {
+        inTurn = true;
+        seenPushes = channel.pushedCount;
+        clearTimeout(waitTimer);
+      }
+
       if (m.type === "assistant") {
+        // Before the usage dedupe below: the SDK can split one API response into
+        // several messages with identical usage, and the tool_use may be in a later one.
+        const blocks: any[] = (m as any).message?.content ?? [];
+        const choseSilence = blocks.some((b) => b.type === "tool_use" && b.name === NO_REPLY_TOOL);
+        for (const b of blocks) {
+          if (b.type === "tool_use") silentAt = b.name === NO_REPLY_TOOL ? seenPushes : -1;
+        }
         const betaMsg = (m as any).message;
         if (betaMsg?.usage) {
           const u = betaMsg.usage;
@@ -562,38 +627,79 @@ Use start (a seq from search/list output) to read around a hit.`,
           if (block.type === "tool_use") {
             toolStart = Date.now();
             emit({ type: "tool_start", name: block.name });
-          } else if (block.type === "text" && hasToolUse) {
+          } else if (block.type === "text" && hasToolUse && !choseSilence) {
             const text = typeof block.text === "string" ? block.text : "";
             if (text.trim()) {
               emit({ type: "assistant_text", text });
             }
           }
         }
-      } else if (m.type === "user" && toolStart) {
-        emit({ type: "tool_end", name: "", elapsedMs: Date.now() - toolStart });
-        toolStart = 0;
+      } else if (m.type === "user") {
+        // A tool result goes back to the model with anything pushed so far.
+        seenPushes = channel.pushedCount;
+        if (toolStart) {
+          emit({ type: "tool_end", name: "", elapsedMs: Date.now() - toolStart });
+          toolStart = 0;
+        }
+      } else if (m.type === "system" && m.subtype === "background_tasks_changed") {
+        // The full set of live tasks after each change. Ambient ones are CLI housekeeping.
+        liveTasks = (((m as any).tasks ?? []) as any[]).filter((t) => !t.ambient).length;
+        if (replied && !inTurn) armWait();
       } else if ("result" in m) {
+        // On resume, a background task orphaned by an earlier query is reported first,
+        // as a result with no model call: origin task-notification, num_turns 0, empty
+        // text. It is not the reply to our message; that turn follows. Breaking here
+        // posted an empty reply and killed the real one mid-flight.
+        const origin = (m as any).origin?.kind;
+        if (origin && origin !== "human" && Number((m as any).num_turns ?? 0) === 0) {
+          console.log(`[worker] skipped bookkeeping result (origin=${origin}, num_turns=0)`);
+          continue;
+        }
+        inTurn = false;
         // Strip <thinking> blocks the SDK injects when MAX_THINKING_TOKENS is set —
         // thinking is useful internally but must not leak to chat surfaces.
-        resultText = String((m as any).result ?? "").replace(/<thinking>[\s\S]*?<\/antml:thinking>\n*/g, "").trim();
-        stopReason = String((m as any).stop_reason ?? "unknown");
+        let resultText = String((m as any).result ?? "").replace(/<thinking>[\s\S]*?<\/antml:thinking>\n*/g, "").trim();
+        const stopReason = String((m as any).stop_reason ?? "unknown");
         const modelUsage = (m as any).modelUsage;
         if (modelUsage) {
           console.log(`[worker] usage: ${formatModelUsage(modelUsage)}`);
         }
         const emptyMark = resultText.length === 0 ? " ⚠ EMPTY" : "";
-        console.log(`[worker] result: turns=${turns} stop_reason=${stopReason} text_len=${resultText.length}${emptyMark}`);
-        break; // result is the terminal SDK event — exit the loop
+        console.log(`[worker] result: turns=${turns} stop_reason=${stopReason} text_len=${resultText.length}${origin ? ` origin=${origin}` : ""}${emptyMark}`);
+
+        const silent = silentAt >= 0 && silentAt === channel.pushedCount;
+        if (silent) {
+          console.log(`[worker] no_reply: suppressed final text (len=${resultText.length}) "${resultText.slice(0, 80).replace(/\n/g, " ")}"`);
+          resultText = "";
+        } else if (silentAt >= 0) {
+          console.log(`[worker] no_reply: cancelled, ${channel.pushedCount - silentAt} message(s) arrived after it`);
+        }
+        emit({ type: "result", text: resultText, sessionId: sdkSessionId, stopReason, files: pendingFiles.splice(0), ...(silent ? { silent } : {}) });
+        replied = true;
+        silentAt = -1;
+
+        const queued = Number((m as any).queued_turn_count ?? 0);
+        if (channel.closed || (liveTasks === 0 && queued === 0)) break;
+        console.log(`[worker] ${liveTasks} background task(s) live${queued ? `, ${queued} turn(s) queued` : ""}: keeping the CLI for follow-ups`);
+        armWait();
       }
     }
   } catch (err) {
-    if (isStaleSessionError(err) && request.sessionId && !request.forceNewSession) {
-      console.log(`[worker] Stale session ${request.sessionId} — signalling orchestrator to retry`);
-      emit({ type: "stale_session" });
-      return;
+    // close() from stop() may surface as an error from the iterator: that's us.
+    if (!stopping) {
+      if (isStaleSessionError(err) && request.sessionId && !request.forceNewSession) {
+        console.log(`[worker] Stale session ${request.sessionId} — signalling orchestrator to retry`);
+        emit({ type: "stale_session" });
+        return;
+      }
+      throw err;
     }
-    throw err;
+  } finally {
+    stopping = true;
+    clearTimeout(waitTimer);
   }
 
-  emit({ type: "result", text: resultText, sessionId: sdkSessionId, stopReason, files: pendingFiles });
+  if (!replied) {
+    emit({ type: "result", text: "", sessionId: sdkSessionId, stopReason: "unknown", files: pendingFiles.splice(0) });
+  }
 }

@@ -11,6 +11,7 @@
  *   publishes events to Redis. Session stays alive until abort() is called.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { ConversationChannel } from "./channel.js";
 import type { WorkerSessionRequest, WorkerEvent } from "./types.js";
@@ -30,6 +31,7 @@ export class WorkerSession {
   // Persistent-mode state
   private _aborted = false;
   private _wakeLoop: (() => void) | null = null;
+  private _queryChannel: ConversationChannel | null = null;
 
   get done(): boolean {
     return this._done || this._aborted;
@@ -69,6 +71,8 @@ export class WorkerSession {
     this._aborted = true;
     this._done = true;
     this.channel.close();
+    // Ends a query kept alive for background follow-ups (see runAgentSession).
+    this._queryChannel?.close();
     // Wake the persistent loop if it's waiting for the next message
     const wake = this._wakeLoop;
     this._wakeLoop = null;
@@ -153,6 +157,11 @@ export class WorkerSession {
     let queryRunning = false;
     // correlationId of the most recently received message.
     let currentCorrelationId = "";
+    // The correlationId the next result answers, and whether it has been answered.
+    // A query can outlive its reply while background tasks run: a message arriving
+    // then is answered by the next result, and a result nobody waits on is a follow-up.
+    let replyCid = "";
+    let replied = true;
 
     const messageHandler = (msg: { correlationId: string; text: string }) => {
       currentCorrelationId = msg.correlationId;
@@ -160,8 +169,12 @@ export class WorkerSession {
         // Mid-turn injection: push into the running query's channel so the agent
         // sees the message before producing its result. Update correlationId so
         // the result is attributed to this (last) message.
-        console.log(`[worker] msg received (mid-turn) cid=${msg.correlationId.slice(0, 8)}`);
+        console.log(`[worker] msg received (mid-turn) cid=${msg.correlationId.slice(0, 8)}${replied ? " after the reply" : ""}`);
         activeChannel.push(msg.text);
+        if (replied) {
+          replyCid = msg.correlationId;
+          replied = false;
+        }
       } else {
         // No query running — enqueue and wake the idle loop.
         pendingMessages.push(msg.text);
@@ -197,6 +210,9 @@ export class WorkerSession {
       // consuming the first message of the next query out of the buffer.
       const queryChannel = new ConversationChannel();
       activeChannel = queryChannel;
+      this._queryChannel = queryChannel;
+      replyCid = queryCorrelationId;
+      replied = false;
 
       // Collapse pending messages into a single user input so a burst of chat
       // messages produces one model turn instead of N. The bridge already
@@ -211,6 +227,14 @@ export class WorkerSession {
         if (ev.type === "started") {
           queryChannel.setSessionId(ev.sessionId);
           currentSessionId = ev.sessionId;
+        }
+
+        let cid = replyCid;
+        let followup = false;
+        if (ev.type === "result") {
+          followup = replied;
+          if (followup) cid = `followup:${randomUUID()}`;
+          replied = true;
         }
 
         // For result events with files, embed base64 content so the orchestrator
@@ -236,21 +260,21 @@ export class WorkerSession {
           ).then((filesWithContent) => {
             const okCount = filesWithContent.filter((f) => f.content).length;
             console.log(`[worker] publishing result with files: ok=${okCount}/${filesWithContent.length}`);
-            const busEvent = mapToBusEvent({ ...ev, files: filesWithContent }, scope, queryCorrelationId);
+            const busEvent = mapToBusEvent({ ...ev, files: filesWithContent }, scope, cid, followup);
             if (!busEvent) return;
             bridge.publishEvent(scope, busEvent).catch((err) => {
               console.error(`[worker] Failed to publish event for ${scope}:`, err.message);
             });
           }).catch((err) => {
             console.error(`[worker] file processing pipeline failed:`, err instanceof Error ? err.message : String(err));
-            const busEvent = mapToBusEvent(ev, scope, queryCorrelationId);
+            const busEvent = mapToBusEvent(ev, scope, cid, followup);
             if (!busEvent) return;
             bridge.publishEvent(scope, busEvent).catch(() => {});
           });
           return;
         }
 
-        const busEvent = mapToBusEvent(ev, scope, queryCorrelationId);
+        const busEvent = mapToBusEvent(ev, scope, cid, followup);
         if (!busEvent) return;
         bridge.publishEvent(scope, busEvent).catch((err) => {
           console.error(`[worker] Failed to publish event for ${scope}:`, err.message);
@@ -272,13 +296,15 @@ export class WorkerSession {
         bridge.publishEvent(scope, {
           kind: "evt:error",
           scope,
-          correlationId: queryCorrelationId,
+          correlationId: replyCid,
           message: errMsg,
           timestamp: new Date().toISOString(),
         }).catch(() => {});
       } finally {
         queryRunning = false;
         activeChannel = null;
+        this._queryChannel = null;
+        replied = true;
         queryChannel.close(); // Terminate any lingering SDK read-ahead iterator.
       }
     }
@@ -293,6 +319,7 @@ function mapToBusEvent(
   ev: WorkerEvent,
   scope: string,
   correlationId: string,
+  followup = false,
 ): BusWorkerEvent | null {
   const ts = new Date().toISOString();
   switch (ev.type) {
@@ -325,6 +352,8 @@ function mapToBusEvent(
         sdkSessionId: ev.sessionId,
         stopReason: ev.stopReason,
         files: ev.files,
+        ...(ev.silent ? { silent: true } : {}),
+        ...(followup ? { followup: true } : {}),
         timestamp: ts,
       };
     case "error":

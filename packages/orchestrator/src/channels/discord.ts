@@ -675,7 +675,7 @@ export class DiscordAdapter {
           sendChain.catch(() => {}),
           new Promise<void>((r) => setTimeout(r, SEND_TIMEOUT_MS)),
         ]);
-        const { text, files, stopReason } = response;
+        const { text, files, stopReason, silent } = response;
         const fileSummary = files?.map((f) => `${f.filename}(${f.content ? `b64:${Math.floor(f.content.length*0.75)}b` : `path:${f.path}`})`).join(", ") ?? "none";
         console.log(`[discord] response received scope=${scope.slice(0, 30)} text_len=${text?.length ?? 0} files=[${fileSummary}]`);
         const attachments = files?.map(toAttachment) ?? [];
@@ -688,9 +688,9 @@ export class DiscordAdapter {
             console.log(`[discord] follow-up files sent (${attachments.length})`);
             return;
           }
-          // end_turn = agent chose to stay silent (shared channel filtering, intentional no-op).
+          // no_reply / end_turn = agent chose to stay silent (shared channel filtering, intentional no-op).
           // Anything else (max_turns, error, error_max_turns, …) is a silent failure — surface it.
-          const normalSilent = !stopReason || stopReason === "end_turn";
+          const normalSilent = silent || !stopReason || stopReason === "end_turn";
           if (!normalSilent) {
             await sendWithTimeout(`⚠ Agent finished with no message (stop_reason: \`${stopReason}\`). Re-prompt or increase \`max_turns\`.`);
           }
