@@ -35,7 +35,7 @@ vi.mock("discord.js", () => {
       MessageContent: 4,
       GuildMessageReactions: 8,
     },
-    MessageFlags: { Ephemeral: 64 },
+    MessageFlags: { SuppressEmbeds: 4, Ephemeral: 64 },
     MessageType: { Default: 0, Reply: 19, ThreadCreated: 18, ThreadStarterMessage: 21 },
     ChannelType: { GuildText: 0, PublicThread: 11, PrivateThread: 12, GuildForum: 15, GuildMedia: 16 },
     PermissionFlagsBits: { ViewChannel: 1024n, ReadMessageHistory: 65536n, ManageThreads: 17179869184n },
@@ -193,7 +193,7 @@ describe("DiscordAdapter", () => {
     );
 
     await new Promise((r) => setTimeout(r, 0)); // delivery is fire-and-forget
-    expect((msg.channel as any).send).toHaveBeenCalledWith({ content: "Response", files: [] });
+    expect((msg.channel as any).send).toHaveBeenCalledWith({ content: "Response", files: [], flags: 4 });
   });
 
   it("responds to thread messages without mention", async () => {
@@ -282,7 +282,32 @@ describe("DiscordAdapter", () => {
     const msg = mockMessage();
     await handler(msg);
 
-    expect((msg.channel as any).send).toHaveBeenCalledWith("Error: Agent down");
+    expect((msg.channel as any).send).toHaveBeenCalledWith({ content: "Error: Agent down", flags: 4 });
+  });
+
+  it("posts agent text with link previews off: streamed, final, and scheduled", async () => {
+    const link = "Live at https://example.com/land/#search=S5";
+    onMessage.mockImplementation(async (_msg: unknown, _approval: unknown, onPartial: (t: string) => void) => {
+      onPartial(`Working on it. ${link}`);
+      return { text: link };
+    });
+    const adapter = new DiscordAdapter(discordConfig, { onMessage });
+    await adapter.start();
+
+    const msg = mockMessage();
+    await getMessageHandler()(msg);
+    await new Promise((r) => setTimeout(r, 0));
+    const sent = (msg.channel as any).send.mock.calls.map((c: unknown[]) => c[0]);
+    expect(sent).toEqual([
+      { content: `Working on it. ${link}`, flags: 4 },
+      { content: link, files: [], flags: 4 },
+    ]);
+
+    // Scheduler / background follow-ups / deliver:true go through send(scope, text).
+    const channel = { isSendable: () => true, send: vi.fn().mockResolvedValue(undefined) };
+    (adapter as any).client.channels = { fetch: vi.fn().mockResolvedValue(channel) };
+    await adapter.send("discord:server-1:any-channel", link);
+    expect(channel.send).toHaveBeenCalledWith({ content: link, files: [], flags: 4 });
   });
 
   it("ignores system messages such as 'X started a thread'", async () => {
@@ -339,7 +364,7 @@ describe("DiscordAdapter", () => {
       expect.anything(),
       expect.any(Function),
     );
-    expect(thread.send).toHaveBeenCalledWith({ content: "Thread answer", files: [] });
+    expect(thread.send).toHaveBeenCalledWith({ content: "Thread answer", files: [], flags: 4 });
     expect((starter.channel as any).send).not.toHaveBeenCalled();
 
     // An existing thread being re-seen (newlyCreated=false) is not dispatched again.
@@ -401,7 +426,7 @@ describe("Discord slash commands", () => {
       }),
       expect.objectContaining({ askUser: expect.any(Function), notifyAutoApproved: expect.any(Function) }),
     );
-    expect(interaction.editReply).toHaveBeenCalledWith({ content: "Slash response", files: [] });
+    expect(interaction.editReply).toHaveBeenCalledWith({ content: "Slash response", files: [], flags: 4 });
   });
 
   it("/new calls onSessionReset and confirms", async () => {

@@ -45,6 +45,14 @@ interface ThreadStart {
   userName: string;
 }
 
+/**
+ * A bot text message with link previews off: otherwise Discord adds a preview
+ * card under every URL the agent posts. Attachments still show.
+ */
+function textMessage(content: string, files?: AttachmentBuilder[]) {
+  return { content, ...(files ? { files } : {}), flags: MessageFlags.SuppressEmbeds as const };
+}
+
 function isForumLike(type: ChannelType | undefined): boolean {
   return type === ChannelType.GuildForum || type === ChannelType.GuildMedia;
 }
@@ -224,9 +232,9 @@ export class DiscordAdapter {
       if (!channel || !channel.isSendable()) return;
       const chunks = splitMessage(text, 2000);
       const attachments = files?.map(toAttachment) ?? [];
-      await (channel as any).send({ content: chunks[0], files: attachments });
+      await (channel as any).send(textMessage(chunks[0], attachments));
       for (const chunk of chunks.slice(1)) {
-        await (channel as any).send(chunk);
+        await (channel as any).send(textMessage(chunk));
       }
     } catch (err) {
       console.error(`[discord] Failed to deliver scheduled task result to ${targetId}:`, err instanceof Error ? err.message : err);
@@ -464,13 +472,13 @@ export class DiscordAdapter {
         const { text, files } = response;
         const chunks = splitMessage(text, 2000);
         const attachments = files?.map(toAttachment) ?? [];
-        await interaction.editReply({ content: chunks[0], files: attachments });
+        await interaction.editReply(textMessage(chunks[0], attachments));
         for (const chunk of chunks.slice(1)) {
-          await interaction.followUp(chunk);
+          await interaction.followUp(textMessage(chunk));
         }
       }).catch(async (err) => {
         const errMsg = err instanceof Error ? err.message : String(err);
-        await interaction.editReply(`Error: ${errMsg}`).catch(() => {});
+        await interaction.editReply(textMessage(`Error: ${errMsg}`)).catch(() => {});
       });
       return;
     }
@@ -503,13 +511,13 @@ export class DiscordAdapter {
       const { text, files } = response;
       const chunks = splitMessage(text, 2000);
       const attachments = files?.map(toAttachment) ?? [];
-      await interaction.editReply({ content: chunks[0], files: attachments });
+      await interaction.editReply(textMessage(chunks[0], attachments));
       for (const chunk of chunks.slice(1)) {
-        await interaction.followUp(chunk);
+        await interaction.followUp(textMessage(chunk));
       }
     }).catch(async (err) => {
       const errMsg = err instanceof Error ? err.message : String(err);
-      await interaction.editReply(`Error: ${errMsg}`).catch(() => {});
+      await interaction.editReply(textMessage(`Error: ${errMsg}`)).catch(() => {});
     });
   }
 
@@ -659,7 +667,7 @@ export class DiscordAdapter {
       const chunks = splitMessage(text, 2000);
       sendChain = sendChain.then(async () => {
         for (const chunk of chunks) {
-          await sendWithTimeout(chunk);
+          await sendWithTimeout(textMessage(chunk));
         }
       });
     };
@@ -692,14 +700,14 @@ export class DiscordAdapter {
           // Anything else (max_turns, error, error_max_turns, …) is a silent failure — surface it.
           const normalSilent = silent || !stopReason || stopReason === "end_turn";
           if (!normalSilent) {
-            await sendWithTimeout(`⚠ Agent finished with no message (stop_reason: \`${stopReason}\`). Re-prompt or increase \`max_turns\`.`);
+            await sendWithTimeout(textMessage(`⚠ Agent finished with no message (stop_reason: \`${stopReason}\`). Re-prompt or increase \`max_turns\`.`));
           }
           return;
         }
         const chunks = splitMessage(text, 2000);
-        await sendWithTimeout({ content: chunks[0], files: attachments });
+        await sendWithTimeout(textMessage(chunks[0], attachments));
         for (const chunk of chunks.slice(1)) {
-          await sendWithTimeout(chunk);
+          await sendWithTimeout(textMessage(chunk));
         }
       } finally {
         // ALWAYS clear the typing interval + in-flight guard, even if every send
@@ -709,7 +717,7 @@ export class DiscordAdapter {
     }).catch(async (err) => {
       cleanup();
       const errMsg = err instanceof Error ? err.message : String(err);
-      await sendWithTimeout(`Error: ${errMsg}`);
+      await sendWithTimeout(textMessage(`Error: ${errMsg}`));
     });
   }
 
