@@ -79,7 +79,7 @@ describe("DockerClient", () => {
       expect(args).toContain("--network");
       expect(args).toContain("agent-net");
       expect(args).toContain("-p");
-      expect(args).toContain("3001:3001/tcp");
+      expect(args).toContain("127.0.0.1:3001:3001/tcp");
       expect(args).toContain("-e");
       expect(args).toContain("PORT=3001");
       expect(args).toContain("-e");

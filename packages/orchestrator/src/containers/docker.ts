@@ -45,9 +45,10 @@ export class DockerClient {
     // the worker itself is PID 1 and Node never reaps zombies → PID table bloat.
     const args = ["create", "--init", "--name", opts.name, "--network", opts.network];
 
-    // Ports
+    // Ports — loopback only. The worker API runs prompts with the agent's
+    // credentials, so it must not be reachable from the LAN.
     for (const [container, host] of Object.entries(opts.ports)) {
-      args.push("-p", `${host}:${container}`);
+      args.push("-p", `127.0.0.1:${host}:${container}`);
     }
 
     // Environment variables

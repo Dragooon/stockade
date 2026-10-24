@@ -160,7 +160,7 @@ export class ContainerManager implements WorkerManager {
     logProc.on("exit", () => this.logProcs.delete(key));
     this.logProcs.set(key, logProc);
 
-    const url = `http://localhost:${port}`;
+    const url = `http://127.0.0.1:${port}`;
     const state: ContainerState = {
       containerId,
       key,
@@ -430,7 +430,7 @@ export class ContainerManager implements WorkerManager {
       const port = parseInt(portStr, 10);
       if (isNaN(port) || !this.portAllocator.isAvailable(port)) continue;
 
-      const url = `http://localhost:${port}`;
+      const url = `http://127.0.0.1:${port}`;
 
       if (c.state === "running") {
         // Verify it's actually healthy before adding
@@ -560,7 +560,7 @@ export class ContainerManager implements WorkerManager {
 
     while (Date.now() < deadline) {
       try {
-        const res = await fetch(`http://localhost:${port}/health`, {
+        const res = await fetch(`http://127.0.0.1:${port}/health`, {
           signal: AbortSignal.timeout(interval_ms),
         });
         if (res.ok) return;
