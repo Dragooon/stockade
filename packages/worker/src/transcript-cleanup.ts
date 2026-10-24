@@ -46,17 +46,29 @@ function sessionPath(sessionId: string, cwd: string, home: string): string {
  *
  * Returns true if the file was modified, false otherwise.
  */
+export interface TranscriptIo {
+  read(path: string): Promise<string>;
+  write(path: string, content: string): Promise<void>;
+}
+
+const localIo: TranscriptIo = {
+  read: (path) => readFile(path, "utf8"),
+  write: (path, content) => writeFile(path, content, "utf8"),
+};
+
 export async function trimDanglingToolUse(
   sessionId: string,
   cwd: string,
   /** Home of the user the CLI runs as (run-as sessions write their transcripts there). */
   home: string = homedir(),
+  /** How to read/write the file; run-as sessions go through the owner (transcripts are 0600). */
+  io: TranscriptIo = localIo,
 ): Promise<boolean> {
   const path = sessionPath(sessionId, cwd, home);
 
   let raw: string;
   try {
-    raw = await readFile(path, "utf8");
+    raw = await io.read(path);
   } catch {
     return false; // No transcript yet — fresh session, nothing to clean.
   }
@@ -146,7 +158,7 @@ export async function trimDanglingToolUse(
   const droppedCount = records.length - cutIdx;
   const kept = records.slice(0, cutIdx).map((r) => r.line);
   const newContent = kept.length > 0 ? kept.join("\n") + "\n" : "";
-  await writeFile(path, newContent, "utf8");
+  await io.write(path, newContent);
 
   console.log(
     `[worker] resume cleanup: dropped ${droppedCount} record(s) with dangling tool_use(s) ` +

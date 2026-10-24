@@ -19,7 +19,7 @@ import { runAgentSession } from "./agent.js";
 import type { WorkerRedisBridge } from "./redis-bridge.js";
 import type { BusWorkerEvent } from "./bus-types.js";
 import { trimDanglingToolUse } from "./transcript-cleanup.js";
-import { readFileAs } from "./run-as.js";
+import { readFileAs, writeFileAs } from "./run-as.js";
 
 export type EventListener = (event: WorkerEvent) => void;
 
@@ -139,7 +139,11 @@ export class WorkerSession {
     if (currentSessionId) {
       const cwd = request.cwd ?? process.env.AGENT_WORKSPACE ?? process.cwd();
       try {
-        await trimDanglingToolUse(currentSessionId, cwd, request.runAs?.home);
+        const runAs = request.runAs;
+        await trimDanglingToolUse(currentSessionId, cwd, runAs?.home, runAs ? {
+          read: async (p) => (await readFileAs(runAs.user, p)).toString("utf8"),
+          write: (p, content) => writeFileAs(runAs.user, p, content),
+        } : undefined);
       } catch (err) {
         console.error(`[worker] transcript cleanup failed for ${currentSessionId}:`, err instanceof Error ? err.message : String(err));
       }

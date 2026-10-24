@@ -7,6 +7,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -125,7 +126,12 @@ export class HostWorkerManager implements WorkerManager {
       WORKER_AUTH_TOKEN,
     };
 
-    const child = spawn("node", ["--import", "tsx", HOST_WORKER_SCRIPT], {
+    // The orchestrator may hold CAP_DAC_READ_SEARCH (to index agents' private
+    // transcripts); an isolated worker doesn't need it, so it's dropped here.
+    const [cmd, args] = isolated && existsSync("/usr/bin/setpriv")
+      ? ["/usr/bin/setpriv", ["--inh-caps=-all", "--ambient-caps=-all", "--", "node", "--import", "tsx", HOST_WORKER_SCRIPT]]
+      : ["node", ["--import", "tsx", HOST_WORKER_SCRIPT]];
+    const child = spawn(cmd, args, {
       env,
       cwd: WORKSPACE_ROOT,
       stdio: ["ignore", "pipe", "pipe"],

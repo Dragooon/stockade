@@ -67,6 +67,21 @@ export function runAsSpawner(target: RunAsTarget): (options: SpawnOptions) => Sp
   };
 }
 
+/** Replace a file's contents with `user`'s permissions (transcripts are private to their owner). */
+export function writeFileAs(user: string, path: string, content: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("sudo", sudoArgv(user, { PATH: "/usr/bin:/bin" }, "tee", ["--", path]), {
+      stdio: ["pipe", "ignore", "pipe"],
+      env: { PATH: "/usr/bin:/bin" },
+    });
+    let err = "";
+    child.stderr.on("data", (d: Buffer) => { err += d.toString(); });
+    child.on("error", reject);
+    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(err.trim() || `tee exited ${code}`))));
+    child.stdin.end(content);
+  });
+}
+
 /**
  * Read a file with `user`'s permissions (for send_file): the worker must not
  * hand the agent anything the agent couldn't read itself.
