@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import type { ContainersConfig } from "./types.js";
 import type { AgentConfig } from "../types.js";
+import { onHost } from "../host-url.js";
 
 export interface ProvisionResult {
   env: Record<string, string>;
@@ -41,7 +42,7 @@ export async function provisionContainer(
   let proxyAvailable = false;
 
   try {
-    const tokenRes = await fetch(`${proxyGatewayUrl}/token`, {
+    const tokenRes = await fetch(`${onHost(proxyGatewayUrl)}/token`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: AbortSignal.timeout(3000),
@@ -100,7 +101,7 @@ export async function provisionContainer(
       if (envVar && !env[envVar]) {
         try {
           const res = await fetch(
-            `http://${proxyHost}:10256/gateway/reveal/${credKey}`,
+            `http://${onHost(proxyHost)}:10256/gateway/reveal/${credKey}`,
             {
               headers: { Authorization: `Bearer ${gatewayToken}` },
               signal: AbortSignal.timeout(5000),
@@ -201,7 +202,7 @@ export async function provisionContainer(
     // Revoke gateway token (if we got one)
     if (gatewayToken) {
       try {
-        await fetch(`${proxyGatewayUrl}/token/${gatewayToken}`, {
+        await fetch(`${onHost(proxyGatewayUrl)}/token/${gatewayToken}`, {
           method: "DELETE",
         });
       } catch {

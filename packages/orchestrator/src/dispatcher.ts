@@ -29,6 +29,7 @@ import type {
   PlatformConfig,
 } from "./types.js";
 import type { WorkerManager } from "./workers/index.js";
+import { onHost } from "./host-url.js";
 import {
   createCallbackSession,
   deleteCallbackSession,
@@ -567,9 +568,12 @@ export async function dispatchToWorker(
     // token refresh via platform.claude.com (in NO_PROXY, bypasses MITM).
     // The proxy only injects credentials for 3rd-party routes (GitHub, Tavily, etc).
     const caCertPath = agentConfig.sandboxed ? "/certs/proxy-ca.crt" : context.proxy.caCertPath;
+    // Unsandboxed agents run on the host, where host.docker.internal is the LAN IP
+    const proxyHost = agentConfig.sandboxed ? context.proxy.host : onHost(context.proxy.host);
+    const gatewayUrl = agentConfig.sandboxed ? context.proxy.gatewayUrl : onHost(context.proxy.gatewayUrl);
     workerEnv = {
-      HTTP_PROXY: `http://${context.proxy.host}:10255`,
-      HTTPS_PROXY: `http://${context.proxy.host}:10255`,
+      HTTP_PROXY: `http://${proxyHost}:10255`,
+      HTTPS_PROXY: `http://${proxyHost}:10255`,
       NO_PROXY: "localhost,127.0.0.1,host.docker.internal,platform.claude.com,console.anthropic.com",
       NODE_EXTRA_CA_CERTS: caCertPath,
       CURL_CA_BUNDLE: caCertPath,
@@ -589,7 +593,7 @@ export async function dispatchToWorker(
 
     if (agentConfig.credentials?.length) {
       try {
-        const tokenRes = await fetch(`${context.proxy.gatewayUrl}/token`, {
+        const tokenRes = await fetch(`${onHost(context.proxy.gatewayUrl)}/token`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           signal: AbortSignal.timeout(3_000),
@@ -602,7 +606,7 @@ export async function dispatchToWorker(
         if (tokenRes.ok) {
           const data = (await tokenRes.json()) as { token: string };
           proxyToken = data.token;
-          workerEnv.APW_GATEWAY = context.proxy.gatewayUrl;
+          workerEnv.APW_GATEWAY = gatewayUrl;
           workerEnv.APW_TOKEN = data.token;
 
           // Resolve credential env vars for CLI tools (e.g. tavily)
@@ -613,7 +617,7 @@ export async function dispatchToWorker(
             const envVar = credentialEnvMap[credKey];
             if (envVar && !workerEnv[envVar]) {
               try {
-                const refRes = await fetch(`${context.proxy.gatewayUrl}/gateway/reveal/${credKey}`, {
+                const refRes = await fetch(`${onHost(context.proxy.gatewayUrl)}/gateway/reveal/${credKey}`, {
                   headers: { Authorization: `Bearer ${data.token}` },
                   signal: AbortSignal.timeout(5_000),
                 });
@@ -751,7 +755,7 @@ export async function dispatchToWorker(
   } finally {
     deleteCallbackSession(callbackToken);
     if (proxyToken && context.proxy) {
-      fetch(`${context.proxy.gatewayUrl}/token/${proxyToken}`, { method: "DELETE" }).catch(() => {});
+      fetch(`${onHost(context.proxy.gatewayUrl)}/token/${proxyToken}`, { method: "DELETE" }).catch(() => {});
     }
   }
 }

@@ -28,6 +28,7 @@ import {
   updateCallbackSession,
 } from "../api/sessions.js";
 import { resolveAgent, resolveBinding } from "../router.js";
+import { onHost } from "../host-url.js";
 import {
   buildSystemPrompt,
   buildSdkSettings,
@@ -371,7 +372,7 @@ export class SessionManager {
 
         if (agentConfig.credentials?.length) {
           try {
-            const tokenRes = await fetch(`${deps.proxy.gatewayUrl}/token`, {
+            const tokenRes = await fetch(`${onHost(deps.proxy.gatewayUrl)}/token`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               signal: AbortSignal.timeout(3_000),
@@ -395,7 +396,7 @@ export class SessionManager {
                 if (envVar && !workerEnv[envVar]) {
                   try {
                     const refRes = await fetch(
-                      `${deps.proxy.gatewayUrl}/gateway/reveal/${credKey}`,
+                      `${onHost(deps.proxy.gatewayUrl)}/gateway/reveal/${credKey}`,
                       {
                         headers: { Authorization: `Bearer ${data.token}` },
                         signal: AbortSignal.timeout(5_000),
@@ -544,7 +545,7 @@ export class SessionManager {
 
   private async revokeProxyToken(token: string | undefined): Promise<void> {
     if (!token || !this.deps.proxy) return;
-    await fetch(`${this.deps.proxy.gatewayUrl}/token/${token}`, {
+    await fetch(`${onHost(this.deps.proxy.gatewayUrl)}/token/${token}`, {
       method: "DELETE",
       signal: AbortSignal.timeout(3_000),
     }).catch(() => {});

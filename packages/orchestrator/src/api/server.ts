@@ -341,8 +341,10 @@ export function startCallbackServer(
     return c.json({ result, scope, delivered });
   });
 
-  const server = serve({ fetch: app.fetch, port: CALLBACK_PORT }, () => {
-    console.log(`[callback] Orchestrator callback server on port ${CALLBACK_PORT}`);
+  // Loopback only: /dispatch is unauthenticated. Containers still reach it via
+  // host.docker.internal, which Docker Desktop forwards to the host's loopback.
+  const server = serve({ fetch: app.fetch, port: CALLBACK_PORT, hostname: "127.0.0.1" }, () => {
+    console.log(`[callback] Orchestrator callback server on 127.0.0.1:${CALLBACK_PORT}`);
   });
 
   return () => {
