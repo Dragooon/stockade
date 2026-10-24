@@ -224,7 +224,9 @@ are reachable. If a request is blocked, ask the parent agent if access is needed
 
   // Always inject shared directory path (differs by sandboxing)
   {
-    const sharedPath = agentConfig.sandboxed ? "`/shared`" : "`$SHARED_DIR` (`~/.stockade/shared/`)";
+    const sharedPath = agentConfig.sandboxed
+      ? "`/shared`"
+      : `\`$SHARED_DIR\` (\`${agentConfig.host_user?.shared_dir ?? "~/.stockade/shared/"}\`)`;
     sections.push(`## Shared Directory (platform-injected)
 
 A shared read-write directory is available for file exchange and cross-agent persistence.

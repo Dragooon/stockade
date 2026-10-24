@@ -35,6 +35,7 @@ const memoryConfigSchema = z.object({
 const hostUserSchema = z.object({
   user: z.string(),
   workspace: z.string(),
+  shared_dir: z.string().optional(),
 });
 
 const agentConfigSchema = z.object({

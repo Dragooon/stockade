@@ -74,7 +74,12 @@ export interface AgentConfig {
    * cwd, because the SDK blocks all writes to <cwd>/.claude/skills.
    * The worker process itself never runs agent code.
    */
-  host_user?: { user: string; workspace: string };
+  host_user?: {
+    user: string;
+    workspace: string;
+    /** Shared scratch folder the run-as users can reach; given to sessions as $SHARED_DIR. */
+    shared_dir?: string;
+  };
   /**
    * OS user for /sudo sessions. Same layout as host_user with the sudo user's
    * home as cwd, so nothing the everyday user can write is auto-loaded as

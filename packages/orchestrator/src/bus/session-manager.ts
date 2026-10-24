@@ -442,6 +442,7 @@ export class SessionManager {
         // The persona (workspace CLAUDE.md) comes in through --add-dir.
         workerEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
         workerEnv.AGENT_WORKSPACE = hostAgentCwd;
+        if (agentConfig.host_user?.shared_dir) workerEnv.SHARED_DIR = agentConfig.host_user.shared_dir;
       }
 
       // ── Build system prompt + SDK settings ──
