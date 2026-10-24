@@ -13,6 +13,7 @@ import type { AgentConfig } from "./types.js";
 
 export interface RunAs {
   user: string;
+  uid?: number;
   home: string;
   /** SDK cwd: the user's home, never a folder another user can write. */
   cwd: string;
@@ -23,13 +24,18 @@ export interface RunAs {
   sudo: boolean;
 }
 
-/** Home directory of a local user, from /etc/passwd. */
-export function passwdHome(user: string, passwdFile = "/etc/passwd"): string {
+/** A local user's /etc/passwd entry (uid and home). */
+export function passwdEntry(user: string, passwdFile = "/etc/passwd"): { uid: number; home: string } {
   for (const line of readFileSync(passwdFile, "utf-8").split("\n")) {
     const f = line.split(":");
-    if (f[0] === user && f[5]) return f[5];
+    if (f[0] === user && f[5]) return { uid: Number(f[2]), home: f[5] };
   }
   throw new Error(`No such user: ${user}`);
+}
+
+/** Home directory of a local user, from /etc/passwd. */
+export function passwdHome(user: string, passwdFile = "/etc/passwd"): string {
+  return passwdEntry(user, passwdFile).home;
 }
 
 /**
@@ -50,7 +56,9 @@ export function resolveRunAs(
   const user = sudo ? agentConfig.sudo_user?.user : host.user;
   if (!user) throw new Error("This agent has no sudo user");
   const home = homeOf(user);
-  return { user, home, cwd: home, addDirs: [host.workspace], workspace: host.workspace, sudo };
+  let uid: number | undefined;
+  try { uid = passwdEntry(user).uid; } catch { /* tests with a fake homeOf */ }
+  return { user, uid, home, cwd: home, addDirs: [host.workspace], workspace: host.workspace, sudo };
 }
 
 /** Transcript folders (~/.claude/projects) of every OS user this agent runs as. */

@@ -510,7 +510,7 @@ export class SessionManager {
             callbackToken,
             sdkSettings,
             redisMode: true,
-            ...(runAs ? { runAs: { user: runAs.user, home: runAs.home } } : {}),
+            ...(runAs ? { runAs: { user: runAs.user, home: runAs.home, ...(runAs.uid !== undefined ? { uid: runAs.uid } : {}) } } : {}),
             ...(agentConfig.permission_mode ? { permissionMode: agentConfig.permission_mode } : {}),
           }),
           signal: AbortSignal.timeout(10_000),

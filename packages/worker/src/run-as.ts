@@ -11,11 +11,13 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import type { SpawnedProcess, SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 
 export interface RunAsTarget {
   user: string;
   home: string;
+  uid?: number;
 }
 
 /** Never passed to a run-as child, whatever the caller asked for. */
@@ -32,6 +34,8 @@ export function baseEnv(target: RunAsTarget): Record<string, string> {
     PATH: `${target.home}/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin`,
     LANG: process.env.LANG ?? "C.UTF-8",
     ...(process.env.TZ ? { TZ: process.env.TZ } : {}),
+    // Only when the user has a running user manager (lingering), e.g. for systemctl --user.
+    ...(target.uid !== undefined && existsSync(`/run/user/${target.uid}`) ? { XDG_RUNTIME_DIR: `/run/user/${target.uid}` } : {}),
   };
 }
 
