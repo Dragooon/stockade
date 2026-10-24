@@ -82,6 +82,13 @@ export interface AgentConfig {
    * (CLAUDE.md, skills and the shared memory folder are text, not code).
    */
   sudo_user?: { user: string };
+  /**
+   * Extra settings passed inline to the SDK (flag-settings scope), e.g.
+   * `autoMode` (which the SDK never reads from project settings) or
+   * `cleanupPeriodDays`. Merged over the platform's settings; `permissions`
+   * lists are concatenated.
+   */
+  sdk_settings?: Record<string, unknown>;
   /** SDK permission mode. Default: bypassPermissions (sandboxed/legacy behaviour). */
   permission_mode?: "auto" | "default" | "acceptEdits" | "dontAsk" | "bypassPermissions";
 }

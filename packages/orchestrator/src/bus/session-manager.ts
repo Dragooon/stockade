@@ -459,6 +459,17 @@ export class SessionManager {
         memoryDir,
         agentConfig.inline && !!isInline,
       );
+      if (runAs?.sudo) {
+        // Tell the auto-mode classifier this session has root.
+        const am = (sdkSettings.autoMode ?? {}) as { environment?: string[] };
+        sdkSettings.autoMode = {
+          ...am,
+          environment: [
+            ...(am.environment ?? ["$defaults"]),
+            `Sudo session: runs as OS user ${runAs.user} with passwordless sudo (root on this machine), opened by a human with sudo permission for the task they described. Root actions that serve that task are expected; anything else needs their explicit say-so.`,
+          ],
+        };
+      }
 
       // ── Resume: look up existing SDK session ID ──
       const sdkSessionId = meta.noSession ? null : deps.getSessionId(scope);

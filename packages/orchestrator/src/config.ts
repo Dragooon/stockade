@@ -65,6 +65,7 @@ const agentConfigSchema = z.object({
   /** OS user for /sudo sessions (needs host_user; shares its workspace and memory). */
   sudo_user: z.object({ user: z.string() }).optional(),
   permission_mode: z.enum(["auto", "default", "acceptEdits", "dontAsk", "bypassPermissions"]).optional(),
+  sdk_settings: z.record(z.string(), z.unknown()).optional(),
 });
 
 const channelBindingSchema = z.object({

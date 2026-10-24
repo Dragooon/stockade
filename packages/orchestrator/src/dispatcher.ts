@@ -366,7 +366,7 @@ export function buildSdkSettings(
   // entirely — 0 tokens — rather than just blocking invocation via PreToolUse).
   const { allow: skillAllow, deny: skillDeny } = extractSkillPermissions(agentConfig.permissions);
 
-  return {
+  const base: Record<string, unknown> = {
     autoMemoryEnabled: memoryEnabled,
     ...(memoryEnabled && memoryDir ? { autoMemoryDirectory: memoryDir } : {}),
     autoDreamEnabled: !inline && (agentConfig.memory?.autoDream ?? false),
@@ -387,6 +387,23 @@ export function buildSdkSettings(
       ],
     },
   };
+  return mergeSdkSettings(base, agentConfig.sdk_settings);
+}
+
+/** Merge an agent's sdk_settings over the platform's: permission lists concatenate, the rest overrides. */
+export function mergeSdkSettings(base: Record<string, unknown>, extra?: Record<string, unknown>): Record<string, unknown> {
+  if (!extra) return base;
+  const out: Record<string, unknown> = { ...base, ...extra };
+  const bp = (base.permissions ?? {}) as Record<string, string[] | undefined>;
+  const ep = (extra.permissions ?? {}) as Record<string, string[] | undefined>;
+  if (extra.permissions) {
+    const perms: Record<string, unknown> = { ...bp, ...ep };
+    for (const k of ["allow", "deny", "ask"]) {
+      if (bp[k] || ep[k]) perms[k] = [...(bp[k] ?? []), ...(ep[k] ?? [])];
+    }
+    out.permissions = perms;
+  }
+  return out;
 }
 
 /** Image MIME types accepted by the Anthropic API for inline content blocks. */
