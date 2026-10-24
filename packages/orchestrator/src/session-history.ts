@@ -120,7 +120,12 @@ export class TranscriptIndex {
   private db: Database.Database;
   private inflight = new Map<string, Promise<void>>();
 
-  constructor(dbPath: string, private agentsDir: string) {
+  constructor(
+    dbPath: string,
+    private agentsDir: string,
+    /** Transcript folders for an agent; default <agentsDir>/<id>/.claude/projects. */
+    private projectsDirsFor: (agentId: string) => string[] = (id) => [join(agentsDir, id, ".claude", "projects")],
+  ) {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(`
@@ -168,10 +173,16 @@ export class TranscriptIndex {
   }
 
   private async refreshAgent(agentId: string): Promise<void> {
-    const projectsDir = join(this.agentsDir, agentId, ".claude", "projects");
-    if (!existsSync(projectsDir)) return;
+    for (const dir of this.projectsDirsFor(agentId)) {
+      if (existsSync(dir)) await this.refreshDir(agentId, dir);
+    }
+  }
+
+  private async refreshDir(agentId: string, projectsDir: string): Promise<void> {
     const getRow = this.db.prepare("SELECT * FROM transcript_files WHERE session_id = ?");
-    for (const project of readdirSync(projectsDir)) {
+    let projects: string[];
+    try { projects = readdirSync(projectsDir); } catch { return; }
+    for (const project of projects) {
       let names: string[];
       try { names = readdirSync(join(projectsDir, project)); } catch { continue; }
       for (const name of names) {

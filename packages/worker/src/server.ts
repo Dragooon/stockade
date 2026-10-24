@@ -9,8 +9,8 @@
  *   GET    /health                — liveness check
  */
 
-import { Hono } from "hono";
-import { randomUUID } from "node:crypto";
+import { Hono, type MiddlewareHandler } from "hono";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { WorkerSessionRequestSchema } from "./types.js";
 import { WorkerSession } from "./session.js";
 import type { WorkerRedisBridge } from "./redis-bridge.js";
@@ -46,6 +46,22 @@ const scopeToSessionId = new Map<string, string>();
 app.get("/health", (c) => {
   return c.json({ ok: true, workerId, sessions: sessions.size });
 });
+
+// Host workers get a shared secret from the orchestrator (WORKER_AUTH_TOKEN):
+// without it any local user could start sessions here. /health stays open.
+const authToken = process.env.WORKER_AUTH_TOKEN;
+if (authToken) {
+  const expected = Buffer.from(`Bearer ${authToken}`);
+  const requireAuth: MiddlewareHandler = async (c, next) => {
+    const got = Buffer.from(c.req.header("authorization") ?? "");
+    if (got.length !== expected.length || !timingSafeEqual(got, expected)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    await next();
+  };
+  app.use("/sessions", requireAuth);
+  app.use("/sessions/*", requireAuth);
+}
 
 app.post("/sessions", async (c) => {
   const body = await c.req.json();

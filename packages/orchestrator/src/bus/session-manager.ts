@@ -37,6 +37,8 @@ import {
 import type { EventBus } from "./event-bus.js";
 import type { ConcurrencyGate } from "./concurrency-gate.js";
 import { appendLog } from "../log.js";
+import { resolveRunAs } from "../run-as.js";
+import { workerHeaders } from "../workers/auth.js";
 
 const LOG_DIR = join(homedir(), ".stockade", "logs");
 const LOG_FILE = join(LOG_DIR, "dispatch.log");
@@ -87,6 +89,9 @@ export interface SessionMeta {
   parentAgentId?: string;
   /** Force parent cwd even for self-spawns (loads settings normally). */
   forceParentCwd?: boolean;
+  /** /sudo session: Claude runs as the agent's sudo_user. Set only by the
+   * orchestrator for registered sudo scopes, never by agents or the scheduler. */
+  sudo?: boolean;
 }
 
 export interface ManagedSession {
@@ -108,6 +113,8 @@ export interface ManagedSession {
    * deliberately NOT set for stale-session retries — those must persist their
    * recovered id so the conversation regains continuity on the next message. */
   isolated: boolean;
+  /** Runs as the agent's sudo_user (see SessionMeta.sudo). */
+  sudo: boolean;
   idleTimer: ReturnType<typeof setTimeout>;
 }
 
@@ -126,6 +133,13 @@ export class SessionManager {
   async ensureSession(scope: string, meta: SessionMeta): Promise<ManagedSession> {
     const existing = this.sessions.get(scope);
     if (existing) {
+      // A scope is either a sudo scope or not, for its whole life. Never let a
+      // non-sudo dispatch (e.g. a scheduled task) ride an open sudo session.
+      if (existing.sudo !== !!meta.sudo) {
+        throw new Error(existing.sudo
+          ? "This scope has an open sudo session; only sudo dispatches may use it"
+          : "This scope has an open everyday session; close it before a sudo dispatch");
+      }
       // Refresh idle timer
       clearTimeout(existing.idleTimer);
       existing.idleTimer = this.startIdleTimer(scope);
@@ -286,10 +300,13 @@ export class SessionManager {
 
     try {
       // ── Resolve workspace paths ──
+      // host_user agents: Claude runs as that OS user (sudo_user for /sudo),
+      // cwd = the user's home, workspace added with --add-dir.
+      const runAs = agentConfig.sandboxed ? undefined : resolveRunAs(agentConfig, !!meta.sudo);
       const isInline = (agentConfig.inline || meta.forceParentCwd) && meta.parentCwd;
       const hostAgentCwd = isInline
         ? meta.parentCwd!
-        : resolve(deps.agentsDir, agentId);
+        : runAs?.workspace ?? resolve(deps.agentsDir, agentId);
 
       // Inline children run as a fresh query() inside the parent's already-running
       // worker container. Runtime characteristics (sandboxed, cwd, mounts, env)
@@ -304,9 +321,10 @@ export class SessionManager {
         : undefined;
       const effectiveSandboxed = parentConfig?.sandboxed ?? agentConfig.sandboxed ?? false;
 
-      // sdkCwd: platform root (avoids SDK Mjz() block on .claude/skills/)
-      const sdkCwd = effectiveSandboxed ? "/workspace" : deps.platformRoot;
-      const sdkAddDirs = effectiveSandboxed ? [] : [hostAgentCwd];
+      // sdkCwd: platform root, or the run-as user's home (both avoid the SDK's
+      // Mjz() block on <cwd>/.claude/skills/ for the workspace's skills).
+      const sdkCwd = effectiveSandboxed ? "/workspace" : runAs?.cwd ?? deps.platformRoot;
+      const sdkAddDirs = effectiveSandboxed ? [] : runAs ? [...new Set([...runAs.addDirs, hostAgentCwd])] : [hostAgentCwd];
       // agentCwd as seen inside worker (for permission rules and callbacks)
       const workerAgentCwd = effectiveSandboxed ? "/workspace" : hostAgentCwd;
 
@@ -418,6 +436,14 @@ export class SessionManager {
         workerEnv.AGENT_WORKSPACE = hostAgentCwd;
       }
 
+      if (runAs) {
+        // The bus address is the worker's business, not the agent's.
+        delete workerEnv.REDIS_URL;
+        // The persona (workspace CLAUDE.md) comes in through --add-dir.
+        workerEnv.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
+        workerEnv.AGENT_WORKSPACE = hostAgentCwd;
+      }
+
       // ── Build system prompt + SDK settings ──
       const hasProxyConfig = !!(deps.proxy && agentConfig.credentials?.length);
       const systemPrompt = buildSystemPrompt(
@@ -451,7 +477,7 @@ export class SessionManager {
       try {
         const sessRes = await fetch(`${workerUrl}/sessions`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: workerHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({
             prompt: "",           // No initial prompt — messages come via Redis
             systemPrompt,
@@ -472,6 +498,8 @@ export class SessionManager {
             callbackToken,
             sdkSettings,
             redisMode: true,
+            ...(runAs ? { runAs: { user: runAs.user, home: runAs.home } } : {}),
+            ...(agentConfig.permission_mode ? { permissionMode: agentConfig.permission_mode } : {}),
           }),
           signal: AbortSignal.timeout(10_000),
         });
@@ -505,6 +533,7 @@ export class SessionManager {
         proxyToken,
         sdkSessionId: sdkSessionId ?? null,
         isolated: !!meta.ephemeral,
+        sudo: !!meta.sudo,
         idleTimer: this.startIdleTimer(scope),
       };
 
@@ -525,7 +554,7 @@ export class SessionManager {
 
       sessionLog(
         `[session] created ${scope.slice(0, 40)} agent=${agentId} ` +
-        `worker=${workerSessionId.slice(0, 8)}`,
+        `worker=${workerSessionId.slice(0, 8)}${runAs ? ` as=${runAs.user}` : ""}`,
       );
       return session;
     } catch (err) {
@@ -554,6 +583,7 @@ export class SessionManager {
   private async deleteWorkerSession(workerUrl: string, workerSessionId: string): Promise<void> {
     await fetch(`${workerUrl}/sessions/${workerSessionId}`, {
       method: "DELETE",
+      headers: workerHeaders(),
       signal: AbortSignal.timeout(5_000),
     }).catch(() => {});
   }

@@ -30,6 +30,7 @@ import type {
 } from "./types.js";
 import type { WorkerManager } from "./workers/index.js";
 import { onHost } from "./host-url.js";
+import { workerHeaders } from "./workers/auth.js";
 import {
   createCallbackSession,
   deleteCallbackSession,
@@ -441,6 +442,7 @@ async function subscribeToEvents(
   timeoutMs: number,
 ): Promise<WorkerEvent & { type: "result" | "error" | "stale_session" }> {
   const res = await fetch(`${workerUrl}/sessions/${workerSessionId}/events`, {
+    headers: workerHeaders(),
     signal: AbortSignal.timeout(timeoutMs),
   });
 
@@ -698,7 +700,7 @@ export async function dispatchToWorker(
     try {
       sessRes = await fetch(`${workerUrl}/sessions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: workerHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(req),
         signal: AbortSignal.timeout(10_000),
       });
@@ -725,7 +727,7 @@ export async function dispatchToWorker(
     const terminal = await subscribeToEvents(workerUrl, workerSessionId, agentId, timeoutMs);
 
     // Cleanup worker session
-    fetch(`${workerUrl}/sessions/${workerSessionId}`, { method: "DELETE" }).catch(() => {});
+    fetch(`${workerUrl}/sessions/${workerSessionId}`, { method: "DELETE", headers: workerHeaders() }).catch(() => {});
 
     if (terminal.type === "stale_session") {
       return null as unknown as DispatchResult; // signal stale

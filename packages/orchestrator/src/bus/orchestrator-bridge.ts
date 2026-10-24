@@ -103,6 +103,7 @@ export class OrchestratorBridge {
       parentCwd: meta["parentCwd"] as string | undefined,
       parentAgentId: meta["parentAgentId"] as string | undefined,
       forceParentCwd: meta["forceParentCwd"] as boolean | undefined,
+      sudo: (meta["sudo"] as boolean | undefined) ?? false,
     };
 
     const attachments = meta["attachments"] as ChannelAttachment[] | undefined;
@@ -299,6 +300,7 @@ export class OrchestratorBridge {
       parentCwd: p.meta.parentCwd,
       parentAgentId: p.meta.parentAgentId,
       forceParentCwd: p.meta.forceParentCwd,
+      sudo: p.meta.sudo,
       noSession: true,            // don't try to resume the (dead/stale) SDK session
       ephemeral: !persistRecovery, // but DO persist the recovery when asked (stale path)
       onPartial: p.onPartial,

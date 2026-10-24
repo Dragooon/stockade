@@ -56,8 +56,11 @@ if (redisUrl) {
   console.log(`[worker] Redis bridge initialized (url=${redisUrl})`);
 }
 
-serve({ fetch: app.fetch, port }, () => {
-  console.log(`Worker ${workerId} listening on port ${port}`);
+// Host workers bind to loopback (WORKER_HOST=127.0.0.1); container workers
+// listen on all interfaces so Docker can publish the port.
+const hostname = process.env.WORKER_HOST;
+serve({ fetch: app.fetch, port, ...(hostname ? { hostname } : {}) }, () => {
+  console.log(`Worker ${workerId} listening on ${hostname ?? "*"}:${port}`);
   // Announce to the orchestrator that this worker process is ready.
   // The orchestrator uses this to invalidate stale sessions from the previous
   // worker process and retry any messages that were lost.

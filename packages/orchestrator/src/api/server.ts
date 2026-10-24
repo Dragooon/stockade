@@ -16,7 +16,7 @@
  *                                               by the calling user's permissions
  */
 
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { CronExpressionParser } from "cron-parser";
@@ -72,6 +72,8 @@ export function startCallbackServer(
       ctx.platformConfig.gatekeeper,
     );
 
+    // Agents in an SDK permission mode of their own (auto): the hook only denies.
+    const mode = ctx.agentConfig.permission_mode ?? "bypassPermissions";
     const hook = buildPreToolUseHook(
       ctx.userId,
       ctx.userPlatform,
@@ -81,12 +83,32 @@ export function startCallbackServer(
       ctx.platformRoot,
       ctx.askApproval,
       ctx.agentId,
+      mode !== "bypassPermissions",
     );
 
     const result = await hook({ tool_name, tool_input });
-    const decision = result.hookSpecificOutput.permissionDecision;
+    const decision = result.hookSpecificOutput.permissionDecision ?? `defer(${mode})`;
     console.log(`[pretooluse] ${decision} "${tool_name}" (${ctx.agentId})`);
     return c.json(result);
+  });
+
+  // ── canUseTool: the SDK's permission mode asks for a human ──
+  // (auto mode falling back to prompting, protected paths, …). Posts the
+  // channel's Approve/Deny buttons; no channel (scheduler, API) means deny.
+  app.post("/cb/:token/canusetool", async (c) => {
+    const ctx = getCallbackSession(c.req.param("token"));
+    if (!ctx) return c.json({ approved: false, reason: "Unknown callback token" });
+    const { tool_name, tool_input } = await c.req.json() as {
+      tool_name: string;
+      tool_input: Record<string, unknown>;
+    };
+    if (!ctx.askApproval) {
+      console.log(`[canusetool] deny "${tool_name}" (${ctx.agentId}): nobody to ask`);
+      return c.json({ approved: false, reason: "Needs human approval, but nobody can be asked here (scheduled or API run)" });
+    }
+    const approved = await ctx.askApproval(tool_name, tool_input ?? {}, ctx.agentId);
+    console.log(`[canusetool] ${approved ? "approved" : "denied"} "${tool_name}" (${ctx.agentId})`);
+    return c.json({ approved, ...(approved ? {} : { reason: "Denied by approver (or timed out)" }) });
   });
 
   // ── Host bash: run a whitelisted command on the host machine ──
@@ -97,6 +119,8 @@ export function startCallbackServer(
     const token = c.req.param("token");
     const ctx = getCallbackSession(token);
     if (!ctx) return c.json({ error: "Unknown callback token" }, 404);
+    // Host commands run as the platform user: never for run-as agents.
+    if (ctx.agentConfig.host_user) return c.json({ error: "Host commands are disabled for this agent" }, 403);
 
     const { command, cwd, timeoutMs } = await c.req.json() as {
       command: string;
@@ -300,27 +324,35 @@ export function startCallbackServer(
   }
 
   // ── Direct dispatch (testing / scripting) ──
+  // Acts as any user, so it needs STOCKADE_API_TOKEN (disabled without one).
+  const apiToken = process.env.STOCKADE_API_TOKEN;
   app.post("/dispatch", async (c) => {
     if (!bridge) return c.json({ error: "Redis bridge not initialized" }, 503);
+    const got = Buffer.from(c.req.header("authorization") ?? "");
+    const expected = Buffer.from(`Bearer ${apiToken ?? ""}`);
+    if (!apiToken || got.length !== expected.length || !timingSafeEqual(got, expected)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
 
-    const { agentId, prompt, scope: reqScope, userId, deliver } = await c.req.json() as {
+    const { agentId, prompt, scope: reqScope, userId, userPlatform, deliver } = await c.req.json() as {
       agentId: string;
       prompt: string;
       scope?: string;
       userId?: string;
+      userPlatform?: string;
       deliver?: boolean;
     };
 
-    if (!agentId || !prompt) {
-      return c.json({ error: "agentId and prompt are required" }, 400);
+    if (!agentId || !prompt || !userId) {
+      return c.json({ error: "agentId, prompt and userId are required" }, 400);
     }
 
     const scope = reqScope ?? `api:${agentId}:${randomUUID()}`;
 
     const result = await bridge.sendAndWait(scope, prompt, {
       agentId,
-      userId: userId ?? "mail",
-      userPlatform: "terminal",
+      userId,
+      userPlatform: userPlatform ?? "terminal",
       noSession: !reqScope, // fresh session unless caller provides a scope to reuse
       ephemeral: !reqScope, // and don't persist throwaway no-scope api:<uuid> sessions
     });
@@ -341,8 +373,8 @@ export function startCallbackServer(
     return c.json({ result, scope, delivered });
   });
 
-  // Loopback only: /dispatch is unauthenticated. Containers still reach it via
-  // host.docker.internal, which Docker Desktop forwards to the host's loopback.
+  // Loopback only. Containers still reach it via host.docker.internal, which
+  // Docker Desktop forwards to the host's loopback.
   const server = serve({ fetch: app.fetch, port: CALLBACK_PORT, hostname: "127.0.0.1" }, () => {
     console.log(`[callback] Orchestrator callback server on 127.0.0.1:${CALLBACK_PORT}`);
   });

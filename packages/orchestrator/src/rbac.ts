@@ -49,6 +49,20 @@ export function checkAccess(
 }
 
 /**
+ * Check a plain role permission such as "sudo" or "approve".
+ * Unknown users have none.
+ */
+export function hasPermission(
+  userId: string,
+  platform: string,
+  permission: string,
+  config: PlatformConfig
+): boolean {
+  const user = resolveUser(userId, platform, config);
+  return !!user && user.permissions.includes(permission);
+}
+
+/**
  * Match a tool rule pattern against a tool name and input.
  *
  * Supported patterns:
@@ -198,7 +212,8 @@ export function buildPermissionHook(
  */
 export interface PreToolUseHookOutput {
   hookEventName: "PreToolUse";
-  permissionDecision: "allow" | "deny";
+  /** Absent = no decision: the SDK's own permission mode decides (deferAllow). */
+  permissionDecision?: "allow" | "deny";
   permissionDecisionReason?: string;
   updatedInput?: Record<string, unknown>;
 }
@@ -227,6 +242,13 @@ export function buildPreToolUseHook(
   platformRoot?: string,
   askApproval?: AskApprovalFn,
   agentId?: string,
+  /**
+   * The agent runs in an SDK permission mode that decides by itself (auto,
+   * default, …). Then this hook only ever denies (or allows what a human just
+   * approved): a plain "allow" from a PreToolUse hook would skip the auto-mode
+   * classifier, so "nothing against it" becomes "no decision".
+   */
+  deferAllow = false,
 ): (input: { tool_name: string; tool_input: unknown }) => Promise<{
   hookSpecificOutput: PreToolUseHookOutput;
 }> {
@@ -328,9 +350,20 @@ export function buildPreToolUseHook(
             },
           };
         }
+        // A human approved this exact call: allow it outright.
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse" as const,
+            permissionDecision: "allow" as const,
+            updatedInput: input,
+          },
+        };
       }
     }
 
+    if (deferAllow) {
+      return { hookSpecificOutput: { hookEventName: "PreToolUse" as const } };
+    }
 
     return {
       hookSpecificOutput: {

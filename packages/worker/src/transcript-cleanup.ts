@@ -31,13 +31,13 @@ interface JsonlRecord {
 
 function projectsSlug(cwd: string): string {
   // SDK encodes a project dir into ~/.claude/projects/<slug>/. The slug is
-  // the absolute path with separators replaced by dashes. On Linux containers
-  // /workspace → -workspace.
-  return cwd.replace(/[\\/]/g, "-");
+  // the absolute path with every non-alphanumeric character replaced by a dash.
+  // On Linux containers /workspace → -workspace.
+  return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 
-function sessionPath(sessionId: string, cwd: string): string {
-  return join(homedir(), ".claude", "projects", projectsSlug(cwd), `${sessionId}.jsonl`);
+function sessionPath(sessionId: string, cwd: string, home: string): string {
+  return join(home, ".claude", "projects", projectsSlug(cwd), `${sessionId}.jsonl`);
 }
 
 /**
@@ -49,8 +49,10 @@ function sessionPath(sessionId: string, cwd: string): string {
 export async function trimDanglingToolUse(
   sessionId: string,
   cwd: string,
+  /** Home of the user the CLI runs as (run-as sessions write their transcripts there). */
+  home: string = homedir(),
 ): Promise<boolean> {
-  const path = sessionPath(sessionId, cwd);
+  const path = sessionPath(sessionId, cwd, home);
 
   let raw: string;
   try {

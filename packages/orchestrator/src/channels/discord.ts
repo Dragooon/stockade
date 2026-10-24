@@ -125,9 +125,15 @@ async function downloadAttachment(
 /** Build a Discord AttachmentBuilder from a ChannelFile.
  * Uses embedded base64 content when present (sandboxed agents whose filesystem
  * is not accessible from the host), otherwise reads from the path directly. */
-function toAttachment(f: ChannelFile): AttachmentBuilder {
-  const data = f.content ? Buffer.from(f.content, "base64") : f.path;
-  return new AttachmentBuilder(data as any, { name: f.filename });
+/**
+ * Attachments from the file content the worker embedded. A file without
+ * content is dropped, never read from its path here: the orchestrator runs as
+ * the platform user and could read files the agent itself can't.
+ */
+function toAttachments(files: ChannelFile[] | undefined): AttachmentBuilder[] {
+  return (files ?? []).flatMap((f) =>
+    f.content ? [new AttachmentBuilder(Buffer.from(f.content, "base64"), { name: f.filename })] : [],
+  );
 }
 
 export interface DiscordAdapterOptions {
@@ -141,6 +147,22 @@ export interface DiscordAdapterOptions {
   onSessionReset?: (scope: string) => void;
   /** Agent registry — used to expose agent names in /agent command. */
   agents?: AgentsConfig;
+  /**
+   * Who may press Approve/Deny (by Discord user id), and whom to ping when the
+   * sender can't. Without it, only the message sender can approve (legacy).
+   */
+  approvers?: {
+    canApprove: (discordUserId: string) => boolean;
+    mentionIds: () => string[];
+  };
+  /** /sudo: open a session that runs as the agent's sudo user, in its own thread. */
+  sudo?: {
+    canSudo: (discordUserId: string) => boolean;
+    /** Register a new sudo scope (a thread) opened by this user. */
+    open: (scope: string, discordUserId: string) => void;
+    /** Idle minutes after which a sudo thread stops accepting messages. */
+    idleMinutes: number;
+  };
 }
 
 export class DiscordAdapter {
@@ -231,7 +253,7 @@ export class DiscordAdapter {
       const channel = await this.client.channels.fetch(targetId);
       if (!channel || !channel.isSendable()) return;
       const chunks = splitMessage(text, 2000);
-      const attachments = files?.map(toAttachment) ?? [];
+      const attachments = toAttachments(files);
       await (channel as any).send(textMessage(chunks[0], attachments));
       for (const chunk of chunks.slice(1)) {
         await (channel as any).send(textMessage(chunk));
@@ -343,6 +365,21 @@ export class DiscordAdapter {
       ) as SlashCommandBuilder;
     commands.push(agentCmd);
 
+    // /sudo <task> — a session with root access, in its own thread
+    if (this.opts.sudo) {
+      commands.push(
+        new SlashCommandBuilder()
+          .setName("sudo")
+          .setDescription("Open a sudo session (Madge with root access) in a new private thread")
+          .addStringOption((opt) =>
+            opt
+              .setName("task")
+              .setDescription("What Madge should do with root access")
+              .setRequired(true)
+          ) as SlashCommandBuilder
+      );
+    }
+
     // /status — show current session info
     commands.push(
       new SlashCommandBuilder()
@@ -441,6 +478,12 @@ export class DiscordAdapter {
       return;
     }
 
+    // ── /sudo <task> ──
+    if (commandName === "sudo" && this.opts.sudo) {
+      await this.openSudoThread(interaction, serverId, isThread ? parentChannelId : channelId);
+      return;
+    }
+
     // ── /ask <message> ──
     if (commandName === "ask") {
       const content = interaction.options.getString("message", true);
@@ -471,7 +514,7 @@ export class DiscordAdapter {
       this.opts.onMessage(channelMessage, askApproval).then(async (response) => {
         const { text, files } = response;
         const chunks = splitMessage(text, 2000);
-        const attachments = files?.map(toAttachment) ?? [];
+        const attachments = toAttachments(files);
         await interaction.editReply(textMessage(chunks[0], attachments));
         for (const chunk of chunks.slice(1)) {
           await interaction.followUp(textMessage(chunk));
@@ -510,7 +553,7 @@ export class DiscordAdapter {
     this.opts.onMessage(channelMessage, askApproval).then(async (response) => {
       const { text, files } = response;
       const chunks = splitMessage(text, 2000);
-      const attachments = files?.map(toAttachment) ?? [];
+      const attachments = toAttachments(files);
       await interaction.editReply(textMessage(chunks[0], attachments));
       for (const chunk of chunks.slice(1)) {
         await interaction.followUp(textMessage(chunk));
@@ -535,11 +578,8 @@ export class DiscordAdapter {
       // parent channel, so the agent answered there instead of in the thread.
       if (message.type !== MessageType.Default && message.type !== MessageType.Reply) return;
 
-      // Block external bots; allow the bot's own [TEST] prefixed messages
-      if (message.author.bot) {
-        const isSelf = message.author.id === this.client.user?.id;
-        if (!isSelf || !message.content.startsWith("[TEST]")) return;
-      }
+      // Bots never prompt the agent, including this bot itself.
+      if (message.author.bot) return;
     }
 
     // Dedup: skip if we've already processed this message
@@ -621,6 +661,16 @@ export class DiscordAdapter {
       ...(attachments.length > 0 ? { attachments } : {}),
     };
 
+    this.deliver(channel, channelMessage, () => this.inFlightMessages.delete(contentKey));
+  }
+
+  /**
+   * Dispatch one message to the agent and post its reply into `channel`:
+   * typing indicator, streamed partials, final text and files, errors.
+   * `done` runs once delivery is over, however it ended.
+   */
+  private deliver(channel: unknown, channelMessage: ChannelMessage, done: () => void = () => {}): void {
+    const { scope, userId } = channelMessage;
     const askApproval = this.createApprovalChannel(
       channel as TextBasedChannel,
       userId,
@@ -636,7 +686,7 @@ export class DiscordAdapter {
 
     const cleanup = () => {
       clearInterval(typingInterval);
-      this.inFlightMessages.delete(contentKey);
+      done();
     };
 
     // Bound every Discord REST send: a stalled send (rate-limit / network stall
@@ -686,7 +736,7 @@ export class DiscordAdapter {
         const { text, files, stopReason, silent } = response;
         const fileSummary = files?.map((f) => `${f.filename}(${f.content ? `b64:${Math.floor(f.content.length*0.75)}b` : `path:${f.path}`})`).join(", ") ?? "none";
         console.log(`[discord] response received scope=${scope.slice(0, 30)} text_len=${text?.length ?? 0} files=[${fileSummary}]`);
-        const attachments = files?.map(toAttachment) ?? [];
+        const attachments = toAttachments(files);
         const hasText = !!text?.trim();
         if (!hasText) {
           // Files arrive only with the terminal result; if the text was streamed
@@ -727,14 +777,61 @@ export class DiscordAdapter {
    * thread's first prompt, in the thread's own (fresh) session. Forum posts and
    * standalone threads open with a real message, which messageCreate handles.
    */
+  /**
+   * /sudo <task>: open a private thread under the channel, register it as a
+   * sudo scope, and send the task as its first message from the invoking user.
+   * The orchestrator runs every message in a sudo scope as the agent's sudo user.
+   */
+  private async openSudoThread(
+    interaction: ChatInputCommandInteraction,
+    serverId: string,
+    parentChannelId: string,
+  ): Promise<void> {
+    const sudo = this.opts.sudo!;
+    const userId = interaction.user.id;
+    if (!sudo.canSudo(userId)) {
+      await interaction.reply({ content: "You don't have sudo.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    const task = interaction.options.getString("task", true);
+    const parent = await this.client.channels.fetch(parentChannelId).catch(() => null) as any;
+    if (!parent?.threads?.create) {
+      await interaction.reply({ content: "Can't open a thread here.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const name = `sudo: ${task.replace(/\s+/g, " ").slice(0, 90)}`;
+    // Private if the server allows it (root output can be sensitive), else public.
+    const thread = await parent.threads.create({ name, type: ChannelType.PrivateThread, invitable: false, autoArchiveDuration: 1440 })
+      .catch(() => parent.threads.create({ name, autoArchiveDuration: 1440 }));
+    await thread.members?.add(userId).catch(() => {});
+    const scope = discordThreadScope(serverId, parentChannelId, thread.id);
+    sudo.open(scope, userId);
+    console.log(`[discord] sudo thread ${thread.id} opened by ${userId}`);
+    await thread.send(textMessage(
+      `🔐 **Sudo session** opened by <@${userId}>: Madge has root access in this thread.\n` +
+      `Only people with sudo can talk here. It stops after ${sudo.idleMinutes} minutes without messages; start another with /sudo.`,
+    ));
+    await interaction.editReply({ content: `Opened ${thread.toString()}` });
+
+    const member = interaction.member as { displayName?: string } | null;
+    const location = this.describeChannel(thread);
+    this.deliver(thread, {
+      scope,
+      content: task,
+      userId,
+      platform: "discord",
+      userName: member?.displayName ?? interaction.user.globalName ?? interaction.user.username,
+      locationLabel: location.label,
+      ...(location.parentLabel ? { parentLabel: location.parentLabel } : {}),
+    });
+  }
+
   private async handleThreadStart(thread: AnyThreadChannel): Promise<void> {
     if (!thread.parent || isForumLike(thread.parent.type)) return;
     const starter = await thread.fetchStarterMessage().catch(() => null);
     if (!starter) return; // standalone thread
-    if (starter.author.bot) {
-      const isSelfTest = starter.author.id === this.client.user?.id && starter.content.startsWith("[TEST]");
-      if (!isSelfTest) return;
-    }
+    if (starter.author.bot) return;
     const ownerId = thread.ownerId ?? starter.author.id;
     const owner = await thread.guild.members.fetch(ownerId).catch(() => null);
     console.log(`[discord] thread "${thread.name}" (${thread.id}) started from message ${starter.id} — dispatching into thread`);
@@ -877,15 +974,22 @@ export class DiscordAdapter {
             : buildApprovalEmbed(tool, input, ASK_TIMEOUT_MS, agent);
           const row = buildApprovalButtons();
 
+          const approvers = this.opts.approvers;
+          const canApprove = (id: string) => approvers ? approvers.canApprove(id) : id === senderId;
+          const ping = canApprove(senderId) ? [senderId] : approvers?.mentionIds() ?? [senderId];
           const approvalMsg = await ch.send({
-            content: `<@${senderId}>`,
+            content: ping.map((id) => `<@${id}>`).join(" "),
             embeds: [embed],
             components: [row],
           });
 
           const interaction = await approvalMsg.awaitMessageComponent({
             componentType: ComponentType.Button,
-            filter: (i: any) => i.user.id === senderId,
+            filter: (i: any) => {
+              if (canApprove(i.user.id)) return true;
+              i.reply({ content: "You can't approve this.", flags: MessageFlags.Ephemeral }).catch(() => {});
+              return false;
+            },
             time: ASK_TIMEOUT_MS,
           });
 

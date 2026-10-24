@@ -66,6 +66,24 @@ export interface AgentConfig {
    * Only applies when dispatched as a sub-agent; top-level dispatches use own workspace.
    */
   inline?: boolean;
+  /**
+   * Host mode with OS-user isolation (sandboxed: false). The worker starts each
+   * Claude session as `user` via `sudo -u`, with a clean environment. The cwd is
+   * the user's home (its CLAUDE.md, .mcp.json, .claude/settings.json); `workspace`
+   * is added with --add-dir for the agent's CLAUDE.md, skills and memory. Not the
+   * cwd, because the SDK blocks all writes to <cwd>/.claude/skills.
+   * The worker process itself never runs agent code.
+   */
+  host_user?: { user: string; workspace: string };
+  /**
+   * OS user for /sudo sessions. Same layout as host_user with the sudo user's
+   * home as cwd, so nothing the everyday user can write is auto-loaded as
+   * settings, hooks or MCP servers. The host_user workspace is still added
+   * (CLAUDE.md, skills and the shared memory folder are text, not code).
+   */
+  sudo_user?: { user: string };
+  /** SDK permission mode. Default: bypassPermissions (sandboxed/legacy behaviour). */
+  permission_mode?: "auto" | "default" | "acceptEdits" | "dontAsk" | "bypassPermissions";
 }
 
 export type { ContainerConfig, ContainersConfig };

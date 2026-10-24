@@ -15,6 +15,7 @@ import { request as httpsRequest } from "node:https";
 import { basename } from "node:path";
 import type { ConversationChannel } from "./channel.js";
 import type { WorkerSessionRequest, WorkerEvent } from "./types.js";
+import { baseEnv, runAsSpawner } from "./run-as.js";
 /**
  * HTTP request using node:http/https directly — bypasses undici/fetch and any
  * proxy configuration that may interfere with internal callback traffic.
@@ -461,22 +462,38 @@ Use start (a seq from search/list output) to read around a hit.`,
     // additionalDirectories: make the SDK load CLAUDE.md and skills from the agent workspace
     // even when resolvedCwd points elsewhere (e.g. platform root to avoid .claude/skills/ block).
     ...(request.addDir?.length ? { additionalDirectories: request.addDir } : {}),
-    // Workers run inside a security boundary — bypass is the correct mode.
-    // The PreToolUse hook below is our permission gate.
-    // allowDangerouslySkipPermissions is required for bypassPermissions to fully disable
-    // the SDK's secondary safety checks (e.g. Mjz() which blocks .claude/skills/ writes).
-    permissionMode: "bypassPermissions",
-    allowDangerouslySkipPermissions: true,
+    // Container workers run inside a security boundary: bypass, with the
+    // PreToolUse hook below as the permission gate. allowDangerouslySkipPermissions
+    // is required for bypassPermissions to fully disable the SDK's secondary
+    // safety checks. Run-as agents use the SDK's own mode (auto): the hook only
+    // denies, and canUseTool below takes the SDK's "ask" to a human.
+    permissionMode: request.permissionMode ?? "bypassPermissions",
+    ...((request.permissionMode ?? "bypassPermissions") === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
     disallowedTools: request.disallowedTools,
     settings: request.sdkSettings,
-    mcpServers: { agent: agentMcpServer, scheduler: schedulerMcpServer, host: hostMcpServer, sessions: sessionsMcpServer },
+    // mcp__host__bash runs in this worker process, i.e. as the platform user:
+    // never offered to run-as agents, which already have a shell of their own.
+    mcpServers: {
+      agent: agentMcpServer,
+      scheduler: schedulerMcpServer,
+      ...(request.runAs ? {} : { host: hostMcpServer }),
+      sessions: sessionsMcpServer,
+    },
   };
 
   if (request.tools) options.tools = request.tools;
   if (request.effort) options.effort = request.effort;
-  // Merge request.env with process.env so the SDK subprocess (cli.js) inherits
-  // HOME, PATH, and other critical vars — request.env overrides where needed.
-  if (request.env) options.env = { ...process.env, ...request.env };
+  if (process.env.CLAUDE_CODE_EXECUTABLE) options.pathToClaudeCodeExecutable = process.env.CLAUDE_CODE_EXECUTABLE;
+  if (request.runAs) {
+    // The CLI runs as another OS user with only its own base env + what the
+    // orchestrator asked for: nothing from this worker's environment.
+    options.env = { ...baseEnv(request.runAs), ...(request.env ?? {}) };
+    options.spawnClaudeCodeProcess = runAsSpawner(request.runAs);
+  } else if (request.env) {
+    // Merge request.env with process.env so the SDK subprocess (cli.js) inherits
+    // HOME, PATH, and other critical vars — request.env overrides where needed.
+    options.env = { ...process.env, ...request.env };
+  }
 
   // Capture SDK subprocess stderr for debugging auth failures
   options.stderr = (text: string) => {
@@ -527,6 +544,23 @@ Use start (a seq from search/list output) to read around a hit.`,
       }],
     }],
   };
+
+  // ── canUseTool: the SDK's permission mode wants a human (auto mode falling
+  // back to prompting, protected paths, …): ask through the orchestrator,
+  // which posts Approve/Deny buttons. Bypass mode never gets here.
+  if (options.permissionMode !== "bypassPermissions") {
+    options.canUseTool = async (toolName: string, input: Record<string, unknown>) => {
+      try {
+        const res = await httpPost(`${cbBase}/canusetool`, JSON.stringify({ tool_name: toolName, tool_input: input }), 11 * 60_000);
+        const data = JSON.parse(res.text) as { approved?: boolean; reason?: string };
+        if (res.status >= 200 && res.status < 300 && data.approved) return { behavior: "allow" as const, updatedInput: input };
+        return { behavior: "deny" as const, message: data.reason ?? "Denied: no approval" };
+      } catch (err) {
+        console.error(`[worker] canUseTool callback error: ${err instanceof Error ? err.message : String(err)}`);
+        return { behavior: "deny" as const, message: "Approval callback unreachable" };
+      }
+    };
+  }
 
   // ── Run the agent loop ──
   let sdkSessionId = "";

@@ -30,6 +30,13 @@ const memoryConfigSchema = z.object({
   autoDream: z.boolean().default(false),
 }).default({ enabled: true, autoDream: false });
 
+// Host mode with OS-user isolation: the worker starts each Claude session as
+// `user` (via `sudo -u`). See AgentConfig.host_user / sudo_user.
+const hostUserSchema = z.object({
+  user: z.string(),
+  workspace: z.string(),
+});
+
 const agentConfigSchema = z.object({
   model: z.string(),
   description: z.string().optional(),
@@ -54,6 +61,10 @@ const agentConfigSchema = z.object({
   skills: z.array(z.string()).optional(),
   inline: z.boolean().optional(),
   max_turns: z.number().optional(),
+  host_user: hostUserSchema.optional(),
+  /** OS user for /sudo sessions (needs host_user; shares its workspace and memory). */
+  sudo_user: z.object({ user: z.string() }).optional(),
+  permission_mode: z.enum(["auto", "default", "acceptEdits", "dontAsk", "bypassPermissions"]).optional(),
 });
 
 const channelBindingSchema = z.object({

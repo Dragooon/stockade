@@ -14,6 +14,7 @@ import type { AgentConfig } from "../types.js";
 import type { WorkerManager } from "./index.js";
 import { PortAllocator } from "../containers/ports.js";
 import { createWorkerLogger } from "../log.js";
+import { WORKER_AUTH_TOKEN } from "./auth.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Workspace root: packages/orchestrator/{src,dist}/workers/ → 4 levels up
@@ -22,6 +23,15 @@ const WORKSPACE_ROOT = resolve(__dirname, "../../../..");
 // Docker containers use the compiled dist; host processes use tsx directly.
 const HOST_WORKER_SCRIPT = resolve(WORKSPACE_ROOT, "packages/worker/src/index.ts");
 const HOST_PORT_RANGE: [number, number] = [4001, 4099];
+
+/** Environment a host_user agent's worker inherits from the orchestrator. */
+const ISOLATED_WORKER_ENV = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TMPDIR", "NODE_ENV", "CLAUDE_CODE_EXECUTABLE"];
+
+function pickEnv(env: NodeJS.ProcessEnv, keys: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of keys) if (env[k] !== undefined) out[k] = env[k]!;
+  return out;
+}
 
 interface WorkerProcess {
   child: ChildProcess;
@@ -89,8 +99,8 @@ export class HostWorkerManager implements WorkerManager {
     // Host workers don't persist across process restarts — nothing to clean up
   }
 
-  resolveMemoryPath(agentId: string, _agentConfig: AgentConfig): string {
-    return join(this.agentsDir, agentId, "memory");
+  resolveMemoryPath(agentId: string, agentConfig: AgentConfig): string {
+    return join(agentConfig.host_user?.workspace ?? join(this.agentsDir, agentId), "memory");
   }
 
   // ── Private ──
@@ -98,14 +108,21 @@ export class HostWorkerManager implements WorkerManager {
   private async startWorker(agentId: string, agentConfig: AgentConfig): Promise<string> {
     const port = this.portAllocator.allocate();
 
+    // Agents with a host_user only start Claude as that user (sudo -u), so the
+    // worker gets a minimal environment: none of the orchestrator's secrets
+    // (Discord token, API token, …) reach it, and it listens on loopback only.
+    const isolated = !!agentConfig.host_user;
+    const inherited = isolated ? pickEnv(process.env, ISOLATED_WORKER_ENV) : process.env;
     const env = {
-      ...process.env,
+      ...inherited,
       ...this.extraEnv,
       ...(agentConfig.host?.env ?? {}),
       PORT: String(port),
       WORKER_ID: `host-${agentId}`,
       AGENT_ID: agentId,
-      AGENT_WORKSPACE: join(this.agentsDir, agentId),
+      AGENT_WORKSPACE: agentConfig.host_user?.workspace ?? join(this.agentsDir, agentId),
+      WORKER_HOST: "127.0.0.1",
+      WORKER_AUTH_TOKEN,
     };
 
     const child = spawn("node", ["--import", "tsx", HOST_WORKER_SCRIPT], {

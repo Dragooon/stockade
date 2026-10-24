@@ -8,7 +8,9 @@ import { randomUUID } from "node:crypto";
 
 import { loadConfig } from "./config.js";
 import { resolveAgent, resolveBinding } from "./router.js";
-import { checkAccess, resolveUser } from "./rbac.js";
+import { checkAccess, hasPermission, resolveUser } from "./rbac.js";
+import { SudoRegistry } from "./sudo.js";
+import { agentTranscriptDirs } from "./run-as.js";
 import { initSessionsTable, getSessionId, setSessionId, deleteSession } from "./sessions.js";
 import {
   initSessionHistoryTable,
@@ -106,6 +108,11 @@ ensurePlatformSkillsDir(paths.data_dir);
 migrateSyncedCopies(paths.agents_dir);
 const sharedDir = resolve(paths.data_dir, "shared");
 mkdirSync(sharedDir, { recursive: true });
+
+// /sudo threads (sessions as the agent's sudo_user); idle ones stop accepting messages.
+const SUDO_IDLE_MINUTES = 60;
+const sudoRegistry = new SudoRegistry(resolve(paths.data_dir, "sudo-scopes.json"), SUDO_IDLE_MINUTES * 60_000);
+const sudoEnabled = Object.values(config.agents.agents).some((a) => a.sudo_user);
 
 console.log(`[paths] data_dir=${paths.data_dir}`);
 console.log(`[paths] agents_dir=${paths.agents_dir}`);
@@ -278,7 +285,14 @@ bridge.onFollowup((scope, response) => {
 // 3b. Session history — every session each scope has had, searchable by agents
 // through mcp__sessions__*, bounded by the asking user's own permissions.
 let discordAdapter: DiscordAdapter | null = null;
-const transcriptIndex = new TranscriptIndex(resolve(paths.data_dir, "session-index.db"), paths.agents_dir);
+const transcriptIndex = new TranscriptIndex(
+  resolve(paths.data_dir, "session-index.db"),
+  paths.agents_dir,
+  (agentId) => {
+    const cfg = config.agents.agents[agentId];
+    return cfg?.host_user ? agentTranscriptDirs(cfg) : [resolve(paths.agents_dir, agentId, ".claude", "projects")];
+  },
+);
 
 async function userCanViewScope(caller: SessionsCaller, scope: string): Promise<boolean> {
   const user = resolveUser(caller.userId, caller.userPlatform, config.platform);
@@ -338,7 +352,9 @@ const stopCallbackServer = startCallbackServer(
  * back to the channel the task was created in.
  */
 async function executeTask(task: ScheduledTask): Promise<string> {
-  const isolated = task.context_mode === "isolated";
+  // Scheduled tasks always run as the everyday user: a task created in a sudo
+  // thread fires in a fresh isolated scope, never in the sudo session.
+  const isolated = task.context_mode === "isolated" || sudoRegistry.state(task.scope) !== "none";
 
   // Isolated tasks dispatch under a unique ephemeral scope so the SDK session
   // they create can never overwrite the user's resume mapping in sessions.db
@@ -406,6 +422,23 @@ async function handleMessage(
     return { text: `Unknown agent: ${agentId}` };
   }
 
+  // /sudo threads: only sudo holders may talk, only while the thread is active,
+  // and the session runs as the agent's sudo user.
+  const sudoState = sudoRegistry.state(msg.scope);
+  if (sudoState === "expired") {
+    return { text: "This sudo session has ended. Start a new one with /sudo." };
+  }
+  const sudo = sudoState === "active";
+  if (sudo) {
+    if (!hasPermission(msg.userId, msg.platform, "sudo", config.platform)) {
+      return { text: "Only people with sudo can talk in this thread." };
+    }
+    if (enqueueScope !== msg.scope) {
+      return { text: "/agent: isn't available in a sudo thread." };
+    }
+    sudoRegistry.touch(msg.scope);
+  }
+
   // Build the AskApprovalFn from channel callbacks + gatekeeper wrapping.
   // Gatekeeper logic lives here (orchestrator layer), not in the channels.
   let askApproval: AskApprovalFn | undefined;
@@ -437,6 +470,7 @@ async function handleMessage(
   return bridge.sendAndWait(enqueueScope, `${header}[${senderTag}]\n${msg.content}`, {
     userId: msg.userId,
     userPlatform: msg.platform,
+    sudo,
     askApproval,
     attachments: msg.attachments,
     onPartial,
@@ -512,10 +546,24 @@ if (config.platform.channels.terminal?.enabled) {
 }
 
 if (config.platform.channels.discord?.enabled) {
+  const approverIds = () => Object.values(config.platform.rbac.users)
+    .filter((u) => u.identities.discord && u.roles.some((r) => config.platform.rbac.roles[r]?.permissions.includes("approve")))
+    .map((u) => u.identities.discord!);
   const adapter = new DiscordAdapter(config.platform.channels.discord, {
     onMessage: handleMessage,
     onSessionReset: (scope) => deleteSession(db, scope),
     agents: config.agents,
+    approvers: {
+      canApprove: (id) => hasPermission(id, "discord", "approve", config.platform),
+      mentionIds: approverIds,
+    },
+    ...(sudoEnabled ? {
+      sudo: {
+        canSudo: (id: string) => hasPermission(id, "discord", "sudo", config.platform),
+        open: (scope: string, id: string) => sudoRegistry.open(scope, id),
+        idleMinutes: SUDO_IDLE_MINUTES,
+      },
+    } : {}),
   });
   await adapter.start();
   discordAdapter = adapter;

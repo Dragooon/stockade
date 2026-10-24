@@ -27,6 +27,10 @@ export const WorkerSessionRequestSchema = z.object({
   sdkSettings: z.record(z.string(), z.unknown()).optional(),
   /** When true: subscribe to Redis for messages, publish events to Redis. */
   redisMode: z.boolean().optional(),
+  /** Start the Claude CLI as this OS user (sudo -u) with a clean environment. */
+  runAs: z.object({ user: z.string().regex(/^[a-z_][a-z0-9_-]*$/), home: z.string() }).optional(),
+  /** SDK permission mode. Default: bypassPermissions. */
+  permissionMode: z.enum(["auto", "default", "acceptEdits", "dontAsk", "bypassPermissions"]).optional(),
 });
 
 export interface WorkerSessionRequest {
@@ -48,6 +52,10 @@ export interface WorkerSessionRequest {
   sdkSettings?: Record<string, unknown>;
   /** When true: subscribe to Redis for messages, publish events to Redis. */
   redisMode?: boolean;
+  /** Start the Claude CLI as this OS user (sudo -u) with a clean environment. */
+  runAs?: { user: string; home: string };
+  /** SDK permission mode. Default: bypassPermissions. */
+  permissionMode?: "auto" | "default" | "acceptEdits" | "dontAsk" | "bypassPermissions";
 }
 
 export type WorkerEvent =
