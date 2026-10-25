@@ -14,6 +14,7 @@
  *
  *   POST /cb/:token/sessions/list|search|read — past-session history, bounded
  *                                               by the calling user's permissions
+ *   POST /cb/:token/peers/list|send           — session-to-session messaging (peers.ts)
  */
 
 import { randomUUID, timingSafeEqual } from "node:crypto";
@@ -36,6 +37,7 @@ import type { OrchestratorBridge } from "../bus/orchestrator-bridge.js";
 import type { TaskStore, ScheduleType, ContextMode } from "../scheduler/types.js";
 import type { ChannelFile } from "../types.js";
 import type { SessionHistoryService } from "../session-history.js";
+import { canUsePeers, type PeerService } from "../peers.js";
 
 export const CALLBACK_PORT = 7420;
 
@@ -46,6 +48,7 @@ export function startCallbackServer(
   taskStore?: TaskStore,
   sendToChannel?: (scope: string, text: string, files?: ChannelFile[]) => Promise<void>,
   sessionHistory?: SessionHistoryService,
+  peers?: PeerService,
 ): () => void {
   const app = new Hono();
 
@@ -328,6 +331,25 @@ export function startCallbackServer(
       const caller = { agentId: ctx.agentId, userId: ctx.userId, userPlatform: ctx.userPlatform, scope: ctx.scope };
       try {
         const text = await sessionHistory[op](caller, args as never);
+        return c.json({ text });
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      }
+    });
+  }
+
+  // ── Peers: list / send ──
+  // The caller is the person the session's current turn runs for, fixed at turn start.
+  for (const op of ["list", "send"] as const) {
+    app.post(`/cb/:token/peers/${op}`, async (c) => {
+      const ctx = getCallbackSession(c.req.param("token"));
+      if (!ctx) return c.json({ error: "Unknown callback token" }, 404);
+      if (!peers || !canUsePeers(ctx.scope)) return c.json({ error: "Peers aren't available in this session" }, 403);
+      const caller = { scope: ctx.scope, agentId: ctx.agentId, userId: ctx.userId, userPlatform: ctx.userPlatform, hops: ctx.hops ?? 0 };
+      const args = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      try {
+        const text = op === "list" ? await peers.listTool(caller) : await peers.sendTool(caller, args.to, args.message);
+        console.log(`[peers] ${op} from ${ctx.scope.slice(0, 40)}: ${text.split("\n")[0].slice(0, 100)}`);
         return c.json({ text });
       } catch (err) {
         return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);

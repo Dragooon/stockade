@@ -11,7 +11,9 @@ import { resolveAgent, resolveBinding } from "./router.js";
 import { checkAccess, hasPermission, resolveUser } from "./rbac.js";
 import { SudoRegistry } from "./sudo.js";
 import { agentTranscriptDirs } from "./run-as.js";
-import { initSessionsTable, getSessionId, setSessionId, deleteSession } from "./sessions.js";
+import { initSessionsTable, getSessionId, setSessionId, deleteSession, getAllSessions } from "./sessions.js";
+import { PeerService } from "./peers.js";
+import { hostname } from "node:os";
 import {
   initSessionHistoryTable,
   recordSessionHistory,
@@ -332,6 +334,68 @@ for (const id of Object.keys(config.agents.agents)) void transcriptIndex.refresh
 
 // 3c. Start orchestrator callback server (port 7420)
 // Workers call back here for permission checks and agent MCP tool invocations.
+// 3c. Peers: session-to-session messaging (mcp__peers__*), bounded by the acting person's visibility.
+function peerAgentForScope(scope: string): string | null {
+  const parts = scope.split(":");
+  const agentIdx = parts.lastIndexOf("agent");
+  if (scope.startsWith("discord:") && agentIdx >= 3 && config.agents.agents[parts[agentIdx + 1]]) return parts[agentIdx + 1];
+  if (scope.startsWith("discord:") || scope.startsWith("terminal:")) {
+    try { return resolveAgent(scope, config.platform); } catch { return null; }
+  }
+  return sessionManager.get(scope)?.agentId ?? null;
+}
+
+const peers = new PeerService({
+  knownScopes: () => [...getAllSessions(db).map((r) => r.scope), ...sessionManager.liveScopes()],
+  agentForScope: peerAgentForScope,
+  canView: (viewer, scope) => userCanViewScope({ ...viewer, scope }, scope),
+  describe: async (scope) => {
+    if (scope.startsWith("discord:") && discordAdapter) return discordAdapter.describeScope(scope);
+    if (scope.startsWith("terminal:")) return `terminal session of ${scope.split(":")[2]}`;
+    return scope;
+  },
+  status: (scope) => (bridge.isTurnRunning(scope) ? "busy" : sessionManager.get(scope) ? "idle" : "closed"),
+  lastActive: (scope, agentId) => {
+    if (sessionManager.get(scope)) return Date.now();
+    const last = sessionHistory.scopeSessions(scope, agentId)[0]?.lastTs;
+    return last ? Date.parse(last) : null;
+  },
+  inSudo: (scope) => {
+    // Same expiry handling as handleMessage: an expired scope is everyday again.
+    if (sudoRegistry.state(scope) === "expired") {
+      sudoRegistry.clear(scope);
+      sudoNotes.set(scope, SUDO_TIMEOUT_NOTE);
+    }
+    return sudoRegistry.state(scope) === "active" || !!sessionManager.get(scope)?.sudo;
+  },
+  personName: (userId, userPlatform) => resolveUser(userId, userPlatform, config.platform)?.username ?? null,
+  deliveryState: (scope, meta) => bridge.deliveryState(scope, { userId: meta.userId, userPlatform: meta.userPlatform }),
+  deliver: async (scope, text, meta) => {
+    // Approvals go to the target's own channel and its usual approvers, never to the sender.
+    const person = resolveUser(meta.userId, meta.userPlatform, config.platform);
+    const discordId = meta.userPlatform === "discord"
+      ? meta.userId
+      : person ? config.platform.rbac.users[person.username]?.identities.discord : undefined;
+    const approvalChannel = scope.startsWith("discord:") && discordAdapter
+      ? await discordAdapter.approvalChannelForScope(scope, discordId, meta.agentId)
+      : undefined;
+    const sudoNote = sudoNotes.get(scope);
+    sudoNotes.delete(scope);
+    return bridge.sendAndWait(scope, `${sudoNote ? `${sudoNote}\n` : ""}${text}`, {
+      agentId: meta.agentId,
+      userId: meta.userId,
+      userPlatform: meta.userPlatform,
+      hops: meta.hops,
+      sudo: false,
+      askApproval: approvalChannel ? askApprovalFor(approvalChannel, meta.agentId) : undefined,
+      askQuestions: approvalChannel?.askQuestions,
+    });
+  },
+  post: (scope, text) => (scope.startsWith("discord:") || scope.startsWith("terminal:") ? sendToChannel(scope, text) : Promise.resolve()),
+  hostName: hostname().charAt(0).toUpperCase() + hostname().slice(1),
+  now: () => Date.now(),
+});
+
 const stopCallbackServer = startCallbackServer(
   workerManager,
   bridge,
@@ -354,6 +418,7 @@ const stopCallbackServer = startCallbackServer(
   taskStore,
   sendToChannel,
   sessionHistory,
+  peers,
 );
 
 /**
@@ -404,6 +469,19 @@ async function executeTask(task: ScheduledTask): Promise<string> {
   }
 
   return response.text;
+}
+
+/**
+ * The AskApprovalFn for a channel: its callbacks plus gatekeeper wrapping.
+ * Gatekeeper logic lives here (orchestrator layer), not in the channels.
+ */
+function askApprovalFor(approvalChannel: ApprovalChannel, agentId: string): AskApprovalFn {
+  const gk = config.platform.gatekeeper;
+  if (gk?.enabled && gatekeeperAgentConfig) {
+    return buildGatedAskApproval(approvalChannel, gk, gatekeeperAgentConfig, agentId);
+  }
+  // No gatekeeper — channel's askUser is the AskApprovalFn directly
+  return (tool, input) => approvalChannel.askUser(tool, input, undefined, agentId);
 }
 
 // 4. Define handleMessage callback — routes through the Redis event bus
@@ -457,18 +535,7 @@ async function handleMessage(
   const sudoNote = sudoNotes.get(msg.scope);
   sudoNotes.delete(msg.scope);
 
-  // Build the AskApprovalFn from channel callbacks + gatekeeper wrapping.
-  // Gatekeeper logic lives here (orchestrator layer), not in the channels.
-  let askApproval: AskApprovalFn | undefined;
-  if (approvalChannel) {
-    const gk = config.platform.gatekeeper;
-    if (gk?.enabled && gatekeeperAgentConfig) {
-      askApproval = buildGatedAskApproval(approvalChannel, gk, gatekeeperAgentConfig, agentId);
-    } else {
-      // No gatekeeper — channel's askUser is the AskApprovalFn directly
-      askApproval = (tool, input) => approvalChannel.askUser(tool, input, undefined, agentId);
-    }
-  }
+  const askApproval = approvalChannel ? askApprovalFor(approvalChannel, agentId) : undefined;
 
   // Tag every message with its sender. Channels are shared by several people
   // and sessions are per-channel, so without this the agent has to guess who

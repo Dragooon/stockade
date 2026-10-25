@@ -112,6 +112,25 @@ describe("OrchestratorBridge: identity is fixed for a whole turn", () => {
     expect(ensureCalls).toEqual([{ userId: "alice", turnRunning: false }]);
   });
 
+  it("coalesces onto the peer message when the turn's result lands on its correlation id", async () => {
+    // A Discord message starts the turn; a peer message for the same person joins it. The
+    // worker answers the most recent message, so the result carries the peer's correlation id:
+    // the Discord pending resolves empty (its adapter posts nothing) and the peer path gets
+    // the text (peers.ts posts it to the channel).
+    const { bridge, published, settle, finishTurn } = await startBridge();
+    const discordTurn = bridge.sendAndWait(SCOPE, "from discord", fromPerson("alice"));
+    await settle();
+    const peerMessage = bridge.sendAndWait(SCOPE, "[peer: from #general …]", { ...fromPerson("alice"), hops: 1 });
+    await settle();
+    expect(bridge.deliveryState(SCOPE, fromPerson("alice"))).toBe("delivered");
+    expect(bridge.deliveryState(SCOPE, fromPerson("bob"))).toBe("queued");
+
+    finishTurn(published[1].correlationId, "one reply for both");
+    expect((await discordTurn).text).toBe("");
+    expect((await peerMessage).text).toBe("one reply for both");
+    expect(bridge.isTurnRunning(SCOPE)).toBe(false);
+  });
+
   it("resolves held messages on shutdown", async () => {
     const { bridge, settle } = await startBridge();
     void bridge.sendAndWait(SCOPE, "alice", fromPerson("alice"));

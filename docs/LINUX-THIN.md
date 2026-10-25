@@ -35,8 +35,43 @@ sudoers: `/etc/sudoers.d/50-stockade` (`stockade ALL=(madge,madge-sudo) NOPASSWD
    `canUseTool`, the orchestrator asks in the chat channel (Discord: buttons, a menu for multi-select, "Other…"
    for typed answers; the asker or an approver answers) and returns the answers as the tool input. Runs without
    a channel (scheduler, API) get a refusal telling the agent to decide itself.
-8. MCP tools that run inside the worker (`agent`, `scheduler`, `sessions`) are the platform's; `send_file`
+8. MCP tools that run inside the worker (`agent`, `scheduler`, `sessions`, `peers`) are the platform's; `send_file`
    reads files as the run-as user; the Discord adapter never reads paths.
+9. Claude Code's own cross-session tools (`SendMessage`, `ListAgents`, `FetchInboxMessage`, `TeamCreate`,
+   `TeamDelete`) are disallowed in every session, and the inline settings pin `crossSessionInbound: "refuse"`,
+   `remoteControlAtStartup: false` and `isolatePeerMachines: true` over any agent `sdk_settings`: natively,
+   a session would reach every local Claude session of its OS user, whoever it belongs to.
+10. A turn runs as one person from start to end. Identity and the approval/question callbacks are applied
+    when a message starts a turn; the same person's next messages join the running turn, anyone else's wait
+    and start their own turn when it ends.
+
+## Peers (session-to-session messaging)
+
+Spec: `specs/SPEC-PEERS.md`. Code: `packages/orchestrator/src/peers.ts`, tools in the worker.
+
+- `mcp__peers__list` lists the conversations (Discord channels and threads, terminal sessions) that the
+  person the current turn runs for can see, minus the caller's own: `label [ref] · agent · busy|idle|closed ·
+  last active (· sudo)`, newest first, at most 50, closed ones only if active in the last 14 days. `ref` is the
+  first 6 hex characters of sha256(scope). `api:*` and `#sched:*` scopes are never listed.
+- `mcp__peers__send {to, message}` resolves `to` (ref, unique label or `label [ref]`), rechecks visibility,
+  and delivers without waiting for a reply. The target sees an orchestrator-stamped header and wrapper:
+  ```
+  [peer: from <label> [<ref>] · agent <agentId> · on behalf of <person> · host <host>]
+  <cross-session-message from="<label> [<ref>]">
+  …
+  </cross-session-message>
+  ```
+  `[peer:`, `[sender:`, `[platform:` and the wrapper tags in the text are escaped. The receiver replies with
+  its own send to the `from` value; nothing is posted to the sender's channel by the platform.
+- The turn a peer message starts runs as the **acting person** (the sender turn's person) for RBAC, carries
+  a hop count (limit 6), and raises approvals in the target's own channel with its usual approvers. Its reply
+  is posted to the target's channel under `*Message from <label> on behalf of <person>:* <first 300 chars>`
+  unless the receiver stays silent (`mcp__agent__no_reply`).
+- Guards: no sending into a sudo-mode scope ("target is in sudo mode"), 20 sends per sender scope per
+  10 minutes, 8,000 characters per message, peer text is never parsed as a command. An `api:` scope can be
+  messaged only as a reply, by a session it messaged in the last 24 hours; a scheduled sender's header says
+  "no reply possible". Offered to conversations, named `api:` conversations and scheduled runs; not to
+  `api:<agent>:<uuid>` runs or sub-agents.
 
 ## /sudo (sudo mode)
 

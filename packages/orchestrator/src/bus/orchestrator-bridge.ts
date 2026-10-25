@@ -136,6 +136,16 @@ export class OrchestratorBridge {
     }
   }
 
+  /** Is a turn running in this scope (any dispatch in flight)? */
+  isTurnRunning(scope: string): boolean {
+    return (this.inFlight.get(scope) ?? 0) > 0;
+  }
+
+  /** Would a message for this person go to the worker now ("delivered") or wait for the running turn ("queued")? */
+  deliveryState(scope: string, meta: Record<string, unknown>): "delivered" | "queued" {
+    return this.isTurnRunning(scope) && this.turnIdentity.get(scope) !== identityOf(meta) ? "queued" : "delivered";
+  }
+
   /** One dispatch's slot in its scope's turn is done; the last one out releases held messages. */
   private releaseTurnSlot(scope: string): void {
     const remaining = (this.inFlight.get(scope) ?? 1) - 1;
@@ -178,6 +188,7 @@ export class OrchestratorBridge {
       parentAgentId: meta["parentAgentId"] as string | undefined,
       forceParentCwd: meta["forceParentCwd"] as boolean | undefined,
       sudo: (meta["sudo"] as boolean | undefined) ?? false,
+      hops: (meta["hops"] as number | undefined) ?? 0,
     };
 
     const attachments = meta["attachments"] as ChannelAttachment[] | undefined;
@@ -380,6 +391,7 @@ export class OrchestratorBridge {
       parentAgentId: p.meta.parentAgentId,
       forceParentCwd: p.meta.forceParentCwd,
       sudo: p.meta.sudo,
+      hops: p.meta.hops,
       noSession: true,            // don't try to resume the (dead/stale) SDK session
       ephemeral: !persistRecovery, // but DO persist the recovery when asked (stale path)
       onPartial: p.onPartial,

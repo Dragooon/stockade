@@ -911,6 +911,19 @@ export class DiscordAdapter {
     return ok;
   }
 
+  /**
+   * Approval and question callbacks for a scope's own channel, for a turn that no Discord
+   * message started (a peer message). Approvers are the usual ones; `senderId` is the acting
+   * person's Discord id if they have one (they're pinged when they can approve).
+   */
+  async approvalChannelForScope(scope: string, senderId: string | undefined, agentId?: string): Promise<ApprovalChannel | undefined> {
+    const parts = scope.split("#")[0].split(":");
+    if (parts[0] !== "discord" || parts.length < 3) return undefined;
+    const channel = await this.scopeChannel(parts);
+    if (!channel || !channel.isTextBased()) return undefined;
+    return this.createApprovalChannel(channel as TextBasedChannel, senderId ?? "", agentId);
+  }
+
   /** Human-readable location for a scope, e.g. `thread "X" in #general`. */
   async describeScope(scope: string): Promise<string> {
     const parts = scope.split("#")[0].split(":");

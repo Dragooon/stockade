@@ -32,6 +32,8 @@ export interface CallbackSession {
   workerSessionId?: string;
   /** Worker base URL for this session */
   workerUrl?: string;
+  /** Peer hops behind the current turn: 0 when a person started it (see peers.ts). */
+  hops?: number;
 }
 
 const registry = new Map<string, CallbackSession>();
@@ -50,13 +52,15 @@ export function deleteCallbackSession(token: string): void {
 
 export function updateCallbackSession(
   token: string,
-  fields: Partial<Pick<CallbackSession, "userId" | "userPlatform" | "askApproval" | "askQuestions" | "workerSessionId" | "workerUrl">>,
+  fields: Partial<Pick<CallbackSession, "userId" | "userPlatform" | "askApproval" | "askQuestions" | "workerSessionId" | "workerUrl" | "hops">>,
 ): void {
   const session = registry.get(token);
   if (!session) return;
   if (fields.userId !== undefined) session.userId = fields.userId;
   if (fields.userPlatform !== undefined) session.userPlatform = fields.userPlatform;
   if (fields.askApproval !== undefined) session.askApproval = fields.askApproval;
+  if (fields.askQuestions !== undefined) session.askQuestions = fields.askQuestions;
+  if (fields.hops !== undefined) session.hops = fields.hops;
   if (fields.workerSessionId !== undefined) session.workerSessionId = fields.workerSessionId;
   if (fields.workerUrl !== undefined) session.workerUrl = fields.workerUrl;
 }

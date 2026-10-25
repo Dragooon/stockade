@@ -38,6 +38,7 @@ import {
 import type { EventBus } from "./event-bus.js";
 import type { ConcurrencyGate } from "./concurrency-gate.js";
 import { appendLog } from "../log.js";
+import { canUsePeers } from "../peers.js";
 import { resolveRunAs, syncTranscript } from "../run-as.js";
 import { workerHeaders } from "../workers/auth.js";
 
@@ -95,6 +96,8 @@ export interface SessionMeta {
   /** /sudo session: Claude runs as the agent's sudo_user. Set only by the
    * orchestrator for registered sudo scopes, never by agents or the scheduler. */
   sudo?: boolean;
+  /** Peer hops behind this message (0 or absent when a person sent it). Set only by the orchestrator. */
+  hops?: number;
 }
 
 export interface ManagedSession {
@@ -160,6 +163,7 @@ export class SessionManager {
           userPlatform: meta.userPlatform,
           askApproval: meta.askApproval,
           askQuestions: meta.askQuestions,
+          hops: meta.hops ?? 0,
         });
       }
 
@@ -263,6 +267,11 @@ export class SessionManager {
   }
 
   /** Return all active scopes for a given agentId. Used for worker-restart recovery. */
+  /** Every scope with a live session. */
+  liveScopes(): string[] {
+    return [...this.sessions.keys()];
+  }
+
   getScopesByAgentId(agentId: string): Set<string> {
     const scopes = new Set<string>();
     for (const [scope, session] of this.sessions) {
@@ -362,6 +371,7 @@ export class SessionManager {
         platformRoot: deps.platformRoot,
         askApproval: meta.askApproval,
         askQuestions: meta.askQuestions,
+        hops: meta.hops ?? 0,
         platformConfig: deps.platform,
         allAgents: deps.allAgents,
         agentsDir: deps.agentsDir,
@@ -528,6 +538,7 @@ export class SessionManager {
             orchestratorUrl,
             callbackToken,
             sdkSettings,
+            peers: canUsePeers(scope),
             redisMode: true,
             ...(runAs ? { runAs: { user: runAs.user, home: runAs.home, ...(runAs.uid !== undefined ? { uid: runAs.uid } : {}) } } : {}),
             ...(agentConfig.permission_mode ? { permissionMode: agentConfig.permission_mode } : {}),

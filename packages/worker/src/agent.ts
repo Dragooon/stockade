@@ -452,6 +452,46 @@ Use start (a seq from search/list output) to read around a hit.`,
     tools: [sessionsListTool, sessionsSearchTool, sessionsReadTool],
   });
 
+  // ── Peers MCP server: message the person's other sessions ──
+  // The orchestrator resolves visibility, stamps the sender header and delivers.
+  const peersCall = async (op: string, args: Record<string, unknown>) => {
+    try {
+      const res = await httpCallback("POST", `${cbBase}/peers/${op}`, JSON.stringify(args), 60_000);
+      const data = JSON.parse(res.text) as { text?: string; error?: string };
+      const text = res.status >= 200 && res.status < 300 ? data.text ?? "" : `Error: ${data.error ?? res.text}`;
+      return { content: [{ type: "text" as const, text }] };
+    } catch (err) {
+      return { content: [{ type: "text" as const, text: `Peers ${op} failed: ${err instanceof Error ? err.message : String(err)}` }] };
+    }
+  };
+
+  const peersListTool = tool(
+    "list",
+    `List the other sessions you can message: conversations the person you're working for can see, newest first.
+Each line: label [ref] · agent · busy|idle|closed · last active (· sudo when it's in sudo mode, which can't receive messages).`,
+    {},
+    () => peersCall("list", {}),
+  );
+
+  const peersSendTool = tool(
+    "send",
+    `Send a plain-text message to another session. It's delivered as a message from you, on behalf of the person
+you're working for, and you don't wait for an answer: the receiver replies with a send of its own if it wants to.
+\`to\` is a ref, a unique label, or the full "label [ref]" form from mcp__peers__list (or the from="..." value of a
+<cross-session-message> you received, to reply).`,
+    {
+      to: z.string().describe("Target session: ref, unique label, or \"label [ref]\""),
+      message: z.string().describe("The message (at most 8000 characters)"),
+    },
+    (args) => peersCall("send", args),
+  );
+
+  const peersMcpServer = createSdkMcpServer({
+    name: "peers",
+    version: "1.0.0",
+    tools: [peersListTool, peersSendTool],
+  });
+
   // ── Build query options ──
   const resolvedCwd = request.cwd ?? process.env.AGENT_WORKSPACE ?? process.cwd();
   const options: Record<string, unknown> = {
@@ -478,6 +518,7 @@ Use start (a seq from search/list output) to read around a hit.`,
       scheduler: schedulerMcpServer,
       ...(request.runAs ? {} : { host: hostMcpServer }),
       sessions: sessionsMcpServer,
+      ...(request.peers ? { peers: peersMcpServer } : {}),
     },
   };
 
