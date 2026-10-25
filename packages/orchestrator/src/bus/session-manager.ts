@@ -70,6 +70,8 @@ export interface SessionManagerDeps {
   deleteSessionId: (scope: string) => void;
   /** Agent of an app:/peer: scope from scope_bindings (D3b §6), null if unbound. */
   boundAgent?: (scope: string) => string | null;
+  /** A session opened or closed (controller status events). */
+  onSessionChange?: (scope: string) => void;
 }
 
 export interface SessionMeta {
@@ -188,6 +190,7 @@ export class SessionManager {
 
     clearTimeout(session.idleTimer);
     this.sessions.delete(scope);
+    this.deps.onSessionChange?.(scope);
 
     await Promise.allSettled([
       this.deps.bus.unsubscribeEvents(scope),
@@ -585,6 +588,7 @@ export class SessionManager {
       };
 
       this.sessions.set(scope, session);
+      deps.onSessionChange?.(scope);
 
       // Persist to Redis (best-effort, for crash recovery)
       deps.bus.createSession(scope, {

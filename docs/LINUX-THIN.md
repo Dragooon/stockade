@@ -91,6 +91,27 @@ owners via sudo), so there is only ever one copy; a failed hand-over errors out 
 copy. Trade-off accepted by the owner (25 Oct 2026): context flows both ways (root output stays in the
 conversation; earlier everyday context reaches the root session).
 
+## Controller API (the cc-controller app, D3b)
+
+Loopback routes under `/controller/` on the callback server (127.0.0.1:7420), for the cc-controller daemon
+that serves the iPhone app. Each token is bound to one person (config `controller.tokens`: `person` plus
+`token_file`, read once at startup; the file holds one random string of 32+ characters, owner `stockade`,
+group `shitiz`, mode 0640). Not the `/dispatch` token. No tokens configured = every route 404.
+
+- `GET /controller/info`: `{controller: {id, name, kind: "stockade", capabilities}, person}`. Capabilities
+  grow as units land (`list` now; `transcript`/`send`, `decide`, `new_session`, `questions`, `sudo` later).
+- `GET /controller/sessions` (and `/sessions/:id`): the person's sessions, latest first. A Discord or
+  terminal scope they've written in that they can still view; `app:`/`peer:` scopes bound to them; with
+  `controller.peer_sessions` (default true) also scopes a peer message or a /dispatch acted for them
+  (`api:kepler`, `peer:` scopes Kepler or an agent started). Never `#sched:` or `api:<agent>:<uuid>`. Each has
+  `id` (12 hex of sha256(scope)), `ref`, `label`, `agentId`, `status`, `lastActive`, `sudo`,
+  `claudeSessionId`, `origin`, `startedBy`, `participants`, `writable` (only `app:`/`peer:`) and
+  `readOnlyReason` (`discord`, `terminal`, `agent`).
+- `GET /controller/agents`: `[{id, name}]` the person may use (`name` = the agent's config `name`, else its id).
+- `GET /controller/events`: SSE. `session` events (the full session) when a listed session's turn starts or
+  ends, or its session opens or closes; a `: ping` comment every 20 s.
+- Anything else under `/controller/` answers 404 `{"error":"unsupported"}`.
+
 ## Files and units
 
 - Code: `/var/lib/stockade/repo` (branch `master`, owner `stockade`, read-only for madge).

@@ -1,7 +1,7 @@
 import { config as loadEnv } from "dotenv";
 import Database from "better-sqlite3";
 import { resolve } from "node:path";
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -13,8 +13,13 @@ import { SudoRegistry } from "./sudo.js";
 import { agentTranscriptDirs } from "./run-as.js";
 import { initSessionsTable, getSessionId, setSessionId, deleteSession, getAllSessions } from "./sessions.js";
 import { PeerService, escapePeerText } from "./peers.js";
-import { initParticipantsTable, recordParticipant, backfillParticipants, hasParticipantBackfill } from "./participants.js";
-import { initScopeBindingsTable, getScopeBinding, isBoundScope } from "./scope-bindings.js";
+import {
+  initParticipantsTable, recordParticipant, backfillParticipants, hasParticipantBackfill,
+  personParticipation, scopeParticipants,
+} from "./participants.js";
+import { initScopeBindingsTable, getScopeBinding, isBoundScope, scopesBoundTo } from "./scope-bindings.js";
+import { ControllerService } from "./controller.js";
+import { mountControllerRoutes } from "./api/controller-routes.js";
 import { hostname } from "node:os";
 import {
   initSessionHistoryTable,
@@ -126,6 +131,13 @@ const SUDO_OFF_NOTE = "[platform: sudo mode OFF. You're the everyday agent again
 const SUDO_TIMEOUT_NOTE = `[platform: sudo mode timed out after ${SUDO_IDLE_MINUTES} idle minutes. You're the everyday agent again (no sudo).]`;
 const sudoRegistry = new SudoRegistry(resolve(paths.data_dir, "sudo-scopes.json"), SUDO_IDLE_MINUTES * 60_000);
 const sudoEnabled = Object.values(config.agents.agents).some((a) => a.sudo_user);
+/** Controller API (D3b): token → that person's view. Filled once the services it needs exist. */
+const controllerServices = new Map<string, ControllerService>();
+function notifyControllers(scope: string): void {
+  for (const service of controllerServices.values()) {
+    service.notify(scope).catch((err) => console.error(`[controller] notify failed for ${scope.slice(0, 60)}:`, err));
+  }
+}
 
 console.log(`[paths] data_dir=${paths.data_dir}`);
 console.log(`[paths] agents_dir=${paths.agents_dir}`);
@@ -273,9 +285,11 @@ const sessionManager = new SessionManager({
   },
   deleteSessionId: (scope) => deleteSession(db, scope),
   boundAgent: (scope) => getScopeBinding(db, scope)?.agentId ?? null,
+  onSessionChange: notifyControllers,
 });
 
 const bridge = new OrchestratorBridge(bus, sessionManager);
+bridge.onTurnChange = notifyControllers;
 await bridge.start();
 console.log(`[bus] Redis event bus started (url=${redisConfig.url})`);
 
@@ -430,6 +444,50 @@ const peers = new PeerService({
   now: () => Date.now(),
 });
 
+// Controller API (D3b): one service per configured token, each bound to one person.
+for (const entry of config.platform.controller?.tokens ?? []) {
+  const user = config.platform.rbac.users[entry.person];
+  const identity = user && Object.entries(user.identities)[0];
+  if (!identity) {
+    console.error(`[controller] token for "${entry.person}" skipped: no such user with an identity in rbac.users`);
+    continue;
+  }
+  let token: string;
+  try {
+    token = readFileSync(entry.token_file, "utf-8").trim();
+    if (statSync(entry.token_file).mode & 0o004) {
+      console.warn(`[controller] ${entry.token_file} is world-readable; make it 0640`);
+    }
+  } catch (err) {
+    console.error(`[controller] token for "${entry.person}" skipped: can't read ${entry.token_file}:`, err instanceof Error ? err.message : err);
+    continue;
+  }
+  if (token.length < 32) {
+    console.error(`[controller] token for "${entry.person}" skipped: ${entry.token_file} holds fewer than 32 characters`);
+    continue;
+  }
+  const [userPlatform, userId] = identity;
+  controllerServices.set(token, new ControllerService({
+    person: entry.person,
+    peerSessions: config.platform.controller?.peer_sessions ?? true,
+    participation: (person) => personParticipation(db, person),
+    participants: (scope) => scopeParticipants(db, scope),
+    boundScopes: (person) => scopesBoundTo(db, person),
+    binding: (scope) => getScopeBinding(db, scope),
+    canView: (scope, agentId) => userCanViewScope({ agentId, userId, userPlatform, scope }, scope),
+    agentForScope: peerAgentForScope,
+    describe: describeScope,
+    status: (scope) => (bridge.isTurnRunning(scope) ? "busy" : sessionManager.get(scope) ? "idle" : "closed"),
+    inSudo: (scope) => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)),
+    claudeSessionId: (scope) => getSessionId(db, scope),
+    agents: () => Object.entries(config.agents.agents)
+      .filter(([agentId]) => checkAccess(userId, userPlatform, agentId, config.platform))
+      .map(([agentId, agent]) => ({ id: agentId, name: agent.name ?? agentId })),
+    now: () => Date.now(),
+  }));
+  console.log(`[controller] token for "${entry.person}" loaded`);
+}
+
 const stopCallbackServer = startCallbackServer(
   workerManager,
   bridge,
@@ -457,6 +515,10 @@ const stopCallbackServer = startCallbackServer(
     const person = resolveUser(userId, userPlatform, config.platform);
     if (person) noteParticipant(scope, person.username, "api");
   },
+  (app) => mountControllerRoutes(app, {
+    services: controllerServices,
+    controller: { id: hostname().toLowerCase(), name: hostname().charAt(0).toUpperCase() + hostname().slice(1) },
+  }),
 );
 
 /**
@@ -526,6 +588,7 @@ function askApprovalFor(approvalChannel: ApprovalChannel, agentId: string): AskA
 function noteParticipant(scope: string, person: string, platform: string): void {
   try {
     recordParticipant(db, scope, person, platform);
+    notifyControllers(scope);
   } catch (err) {
     console.error(`[participants] record failed for ${scope.slice(0, 60)}:`, err);
   }

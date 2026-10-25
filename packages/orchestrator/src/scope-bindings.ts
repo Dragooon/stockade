@@ -66,10 +66,19 @@ interface ScopeBindingRow {
   created_ts: string;
 }
 
+function toBinding(row: ScopeBindingRow): ScopeBinding {
+  return { scope: row.scope, agentId: row.agent_id, person: row.person, origin: row.origin, createdTs: row.created_ts };
+}
+
 export function getScopeBinding(db: Database.Database, scope: string): ScopeBinding | null {
   const row = db.prepare("SELECT * FROM scope_bindings WHERE scope = ?").get(scope) as ScopeBindingRow | undefined;
-  if (!row) return null;
-  return { scope: row.scope, agentId: row.agent_id, person: row.person, origin: row.origin, createdTs: row.created_ts };
+  return row ? toBinding(row) : null;
+}
+
+/** Every scope bound to a person, newest first. */
+export function scopesBoundTo(db: Database.Database, person: string): ScopeBinding[] {
+  const rows = db.prepare("SELECT * FROM scope_bindings WHERE person = ? ORDER BY created_ts DESC").all(person) as ScopeBindingRow[];
+  return rows.map(toBinding);
 }
 
 /**

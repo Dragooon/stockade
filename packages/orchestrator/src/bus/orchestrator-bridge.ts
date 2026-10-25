@@ -79,6 +79,8 @@ export class OrchestratorBridge {
   private readonly turnIdentity = new Map<string, string>();
   /** scope → messages from someone other than the running turn's person, in arrival order. */
   private readonly held = new Map<string, HeldMessage[]>();
+  /** A scope's turn started or ended (controller status events). */
+  onTurnChange?: (scope: string) => void;
   /** Posts a follow-up (a result nobody is waiting on) to the scope's channel. */
   private followupHandler?: (scope: string, response: ChannelResponse) => void;
 
@@ -127,7 +129,10 @@ export class OrchestratorBridge {
       });
     }
     this.inFlight.set(scope, (this.inFlight.get(scope) ?? 0) + 1);
-    if (!turnRunning) this.turnIdentity.set(scope, identity);
+    if (!turnRunning) {
+      this.turnIdentity.set(scope, identity);
+      this.onTurnChange?.(scope);
+    }
     try {
       const result = await this.dispatch(scope, text, meta, turnRunning);
       return result;
@@ -155,6 +160,7 @@ export class OrchestratorBridge {
     }
     this.inFlight.delete(scope);
     this.turnIdentity.delete(scope);
+    this.onTurnChange?.(scope);
     // A held message can carry a beforeRun check from its sender (peer delivery re-checks the
     // target's sudo mode): it ran when the message was queued, and things may have changed
     // since. A message whose check now fails is dropped instead of starting a turn.

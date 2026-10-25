@@ -15,6 +15,8 @@
  *   POST /cb/:token/sessions/list|search|read — past-session history, bounded
  *                                               by the calling user's permissions
  *   POST /cb/:token/peers/list|send           — session-to-session messaging (peers.ts)
+ *
+ *   /controller/*                              — controller API for the app (api/controller-routes.ts)
  */
 
 import { randomUUID, timingSafeEqual } from "node:crypto";
@@ -51,6 +53,8 @@ export function startCallbackServer(
   peers?: PeerService,
   /** A dispatch into a named scope: record its acting person as a participant (platform "api"). */
   noteDispatch?: (scope: string, userId: string, userPlatform: string) => void,
+  /** Extra routes on the same server (the controller API). */
+  mountRoutes?: (app: Hono) => void,
 ): () => void {
   const app = new Hono();
 
@@ -413,6 +417,8 @@ export function startCallbackServer(
 
     return c.json({ result, scope, delivered });
   });
+
+  mountRoutes?.(app);
 
   // Loopback only. Containers still reach it via host.docker.internal, which
   // Docker Desktop forwards to the host's loopback.

@@ -38,8 +38,20 @@ const hostUserSchema = z.object({
   shared_dir: z.string().optional(),
 });
 
+/** Controller API (D3b): one token per paired person, read from a file at startup. */
+const controllerConfigSchema = z.object({
+  /** List cross-agent sessions acting for the person (peer inserts, peer:/Kepler scopes, api:kepler). */
+  peer_sessions: z.boolean().default(true),
+  tokens: z.array(z.object({
+    person: z.string(),
+    token_file: z.string(),
+  })).default([]),
+});
+
 const agentConfigSchema = z.object({
   model: z.string(),
+  /** Display name, e.g. in the controller app (default: the agent id). */
+  name: z.string().optional(),
   description: z.string().optional(),
   system: z.string().optional(),
   system_mode: z.enum(["append", "replace"]).default("replace"),
@@ -128,6 +140,7 @@ const unifiedConfigSchema = z.object({
     url: z.string(),
     session_idle_timeout_sec: z.number().int().positive().optional(),
   }).optional(),
+  controller: controllerConfigSchema.optional(),
 });
 
 // --- Environment variable substitution ---
@@ -231,6 +244,7 @@ export function loadConfig(configDir: string, projectRoot?: string): {
     scheduler: parsed.scheduler,
     gatekeeper: parsed.gatekeeper,
     redis: parsed.redis,
+    controller: parsed.controller,
   };
 
   // Resolve paths with smart defaults

@@ -487,6 +487,27 @@ rbac:
     });
   });
 
+  it("parses the controller section and agent names, with defaults", () => {
+    writeYaml(tmpDir, "config.yaml", VALID_CONFIG.replace("    model: claude-sonnet-4-20250514\n", "    model: claude-sonnet-4-20250514\n    name: Madge\n") + `
+controller:
+  tokens:
+    - person: alice
+      token_file: /tmp/alice.token
+`);
+    const config = loadConfig(tmpDir);
+    expect(config.agents.agents.main.name).toBe("Madge");
+    expect(config.agents.agents.researcher.name).toBeUndefined();
+    expect(config.platform.controller).toEqual({
+      peer_sessions: true,
+      tokens: [{ person: "alice", token_file: "/tmp/alice.token" }],
+    });
+  });
+
+  it("leaves the controller unset when config has none", () => {
+    writeYaml(tmpDir, "config.yaml", VALID_CONFIG);
+    expect(loadConfig(tmpDir).platform.controller).toBeUndefined();
+  });
+
   it("throws when config.yaml is missing", () => {
     // tmpDir exists but contains no config.yaml
     expect(() => loadConfig(tmpDir)).toThrow();

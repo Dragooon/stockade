@@ -13,6 +13,8 @@ export interface MemoryConfig {
 /** Agent configuration from agents.yaml */
 export interface AgentConfig {
   model: string;
+  /** Display name, e.g. in the controller app (default: the agent id). */
+  name?: string;
   /** Short description of this agent's role. Platform-injected into parent agent's system prompt. */
   description?: string;
   system?: string;
@@ -164,6 +166,13 @@ export interface PlatformConfig {
   paths?: PathsConfig;
   gatekeeper?: GatekeeperConfig;
   redis?: { url: string; session_idle_timeout_sec?: number };
+  controller?: ControllerConfig;
+}
+
+/** Controller API (D3b): one token per paired person; the token lives in token_file. */
+export interface ControllerConfig {
+  peer_sessions: boolean;
+  tokens: Array<{ person: string; token_file: string }>;
 }
 
 /** An attachment from a channel message (e.g., Discord file upload). */
