@@ -44,8 +44,8 @@ sudoers: `/etc/sudoers.d/50-stockade` (`stockade ALL=(madge,madge-sudo) NOPASSWD
 **current conversation** (any channel or thread) into sudo mode: the scope is registered in
 `~/.stockade/sudo-scopes.json`, its everyday session is closed, and the next message continues the *same*
 conversation as `sudo_user`. `/sudo` again (or 60 min without a message) switches it back. A one-off
-`[platform: sudo mode ON/OFF/timed out]` line tells the agent. While it's on, only `sudo` holders' messages
-reach the session; scheduled tasks never run in it (they fire in an isolated everyday scope).
+`[platform: sudo mode ON/OFF/timed out]` line tells the agent. While it's on, everyone with access to the
+conversation can still talk to it (only toggling needs `sudo`; approvals stay owner-only); scheduled tasks never run in it (they fire in an isolated everyday scope).
 
 The conversation's transcript is **moved** between the two users' `~/.claude/projects` on each switch
 (`syncTranscript` in `run-as.ts`: the orchestrator reads with `CAP_DAC_READ_SEARCH`, writes/deletes as the

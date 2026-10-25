@@ -431,8 +431,9 @@ async function handleMessage(
     return { text: `Unknown agent: ${agentId}` };
   }
 
-  // Sudo mode (/sudo): only sudo holders may talk while it's on, and the session runs as the
-  // agent's sudo user, continuing the same conversation. Idle too long = back to everyday.
+  // Sudo mode (/sudo): only sudo holders may switch it on or off, but everyone with access
+  // can keep talking while it's on. The session runs as the agent's sudo user, continuing the
+  // same conversation. Idle too long (no message from anyone) = back to everyday.
   let sudoState = sudoRegistry.state(msg.scope);
   if (sudoState === "expired") {
     sudoRegistry.clear(msg.scope);
@@ -441,9 +442,6 @@ async function handleMessage(
   }
   const sudo = sudoState === "active";
   if (sudo) {
-    if (!hasPermission(msg.userId, msg.platform, "sudo", config.platform)) {
-      return { text: "Sudo mode is on in this conversation, so only people with sudo can talk to me here right now." };
-    }
     if (enqueueScope !== msg.scope) {
       return { text: "/agent: isn't available while sudo mode is on." };
     }
