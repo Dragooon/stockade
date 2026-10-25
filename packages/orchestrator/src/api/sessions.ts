@@ -9,7 +9,7 @@
  * dispatch completes (result, error, or stale_session).
  */
 
-import type { AgentConfig, AgentsConfig, AskApprovalFn, PlatformConfig } from "../types.js";
+import type { AgentConfig, AgentsConfig, AskApprovalFn, PlatformConfig, AskQuestionsFn } from "../types.js";
 
 export interface CallbackSession {
   callbackToken: string;
@@ -23,6 +23,8 @@ export interface CallbackSession {
   agentCwd: string;
   platformRoot: string;
   askApproval?: AskApprovalFn;
+  /** AskUserQuestion in the channel this session talks to (absent for scheduler/API runs). */
+  askQuestions?: AskQuestionsFn;
   platformConfig: PlatformConfig;
   allAgents: AgentsConfig;
   agentsDir: string;
@@ -48,7 +50,7 @@ export function deleteCallbackSession(token: string): void {
 
 export function updateCallbackSession(
   token: string,
-  fields: Partial<Pick<CallbackSession, "userId" | "userPlatform" | "askApproval" | "workerSessionId" | "workerUrl">>,
+  fields: Partial<Pick<CallbackSession, "userId" | "userPlatform" | "askApproval" | "askQuestions" | "workerSessionId" | "workerUrl">>,
 ): void {
   const session = registry.get(token);
   if (!session) return;

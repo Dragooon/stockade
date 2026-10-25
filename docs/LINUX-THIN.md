@@ -31,7 +31,11 @@ sudoers: `/etc/sudoers.d/50-stockade` (`stockade ALL=(madge,madge-sudo) NOPASSWD
    → Discord Approve/Deny buttons, pressable only by users with the `approve` permission.
 6. `autoMode` config comes inline from `agents.<id>.sdk_settings` (the SDK never reads it from project
    settings); sudo sessions get an extra environment line saying they have root.
-7. MCP tools that run inside the worker (`agent`, `scheduler`, `sessions`) are the platform's; `send_file`
+7. AskUserQuestion is offered to agents in an SDK permission mode (not bypass): the SDK sends it to
+   `canUseTool`, the orchestrator asks in the chat channel (Discord: buttons, a menu for multi-select, "Other…"
+   for typed answers; the asker or an approver answers) and returns the answers as the tool input. Runs without
+   a channel (scheduler, API) get a refusal telling the agent to decide itself.
+8. MCP tools that run inside the worker (`agent`, `scheduler`, `sessions`) are the platform's; `send_file`
    reads files as the run-as user; the Discord adapter never reads paths.
 
 ## /sudo (sudo mode)
@@ -83,7 +87,8 @@ sudo -u stockade bash -c 'curl -s -X POST http://127.0.0.1:7420/dispatch \
   -H "Authorization: Bearer $(cat /var/lib/stockade/.stockade/api-token)" -H "Content-Type: application/json" \
   -d "{\"agentId\":\"main\",\"userId\":\"<discord id>\",\"userPlatform\":\"discord\",\"prompt\":\"…\"}"'
 ```
-Add `"scope": "discord:…"` to resume that channel's session (it then contains the test turn).
+Add `"scope": "discord:…"` to resume that channel's session (it then contains the test turn), and
+`"sudo": true` to run as the sudo user.
 
 ## Known baseline
 

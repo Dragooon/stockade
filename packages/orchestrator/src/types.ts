@@ -229,6 +229,21 @@ export type AskApprovalFn = (
  * The orchestrator wraps these callbacks with gatekeeper logic (when enabled)
  * to produce a single `AskApprovalFn` consumed by the RBAC layer.
  */
+/** One question from the agent's AskUserQuestion tool. */
+export interface AskQuestion {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description?: string }>;
+  multiSelect: boolean;
+}
+
+/**
+ * Ask the user the agent's questions (AskUserQuestion) in the channel. Resolves to
+ * { [question text]: answer } (multi-select answers comma-separated), or null when
+ * nobody answered in time.
+ */
+export type AskQuestionsFn = (questions: AskQuestion[], agentId?: string) => Promise<Record<string, string> | null>;
+
 export interface ApprovalChannel {
   /**
    * Present a tool invocation for user approval.
@@ -256,6 +271,9 @@ export interface ApprovalChannel {
     review: GatekeeperReview,
     agentId?: string,
   ) => Promise<void>;
+
+  /** Ask the agent's AskUserQuestion questions with buttons/menus (channels that can). */
+  askQuestions?: AskQuestionsFn;
 }
 
 /** A file attachment to be delivered through a channel response. */

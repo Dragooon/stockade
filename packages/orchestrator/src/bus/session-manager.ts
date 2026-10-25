@@ -19,6 +19,7 @@ import type {
   AgentConfig,
   AgentsConfig,
   AskApprovalFn,
+  AskQuestionsFn,
   PlatformConfig,
 } from "../types.js";
 import type { WorkerManager } from "../workers/index.js";
@@ -32,7 +33,7 @@ import { onHost } from "../host-url.js";
 import {
   buildSystemPrompt,
   buildSdkSettings,
-  PLATFORM_DISALLOWED_TOOLS,
+  platformDisallowedTools,
 } from "../dispatcher.js";
 import type { EventBus } from "./event-bus.js";
 import type { ConcurrencyGate } from "./concurrency-gate.js";
@@ -72,6 +73,8 @@ export interface SessionMeta {
   userId: string;
   userPlatform: string;
   askApproval?: AskApprovalFn;
+  /** AskUserQuestion in the originating channel (refreshed on every message). */
+  askQuestions?: AskQuestionsFn;
   /** When true: don't RESUME an existing SDK session (start fresh). Used by both
    * scheduler isolated tasks AND stale-session retries. Does NOT by itself prevent
    * persisting the freshly-created session id — see `ephemeral` for that. */
@@ -149,6 +152,7 @@ export class SessionManager {
         userId: meta.userId,
         userPlatform: meta.userPlatform,
         askApproval: meta.askApproval,
+        askQuestions: meta.askQuestions,
       });
 
       return existing;
@@ -349,6 +353,7 @@ export class SessionManager {
         agentCwd: workerAgentCwd,
         platformRoot: deps.platformRoot,
         askApproval: meta.askApproval,
+        askQuestions: meta.askQuestions,
         platformConfig: deps.platform,
         allAgents: deps.allAgents,
         agentsDir: deps.agentsDir,
@@ -510,7 +515,7 @@ export class SessionManager {
             systemPrompt,
             tools: agentConfig.tools?.filter((t) => t !== "Agent"),
             disallowedTools: [
-              ...PLATFORM_DISALLOWED_TOOLS,
+              ...platformDisallowedTools(agentConfig),
               ...(agentConfig.disallowed_tools ?? []),
             ],
             model: agentConfig.model,

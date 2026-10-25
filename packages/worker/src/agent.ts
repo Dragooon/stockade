@@ -552,8 +552,9 @@ Use start (a seq from search/list output) to read around a hit.`,
     options.canUseTool = async (toolName: string, input: Record<string, unknown>) => {
       try {
         const res = await httpPost(`${cbBase}/canusetool`, JSON.stringify({ tool_name: toolName, tool_input: input }), 11 * 60_000);
-        const data = JSON.parse(res.text) as { approved?: boolean; reason?: string };
-        if (res.status >= 200 && res.status < 300 && data.approved) return { behavior: "allow" as const, updatedInput: input };
+        const data = JSON.parse(res.text) as { approved?: boolean; reason?: string; updatedInput?: Record<string, unknown> };
+        // updatedInput carries AskUserQuestion's answers from the chat channel.
+        if (res.status >= 200 && res.status < 300 && data.approved) return { behavior: "allow" as const, updatedInput: data.updatedInput ?? input };
         return { behavior: "deny" as const, message: data.reason ?? "Denied: no approval" };
       } catch (err) {
         console.error(`[worker] canUseTool callback error: ${err instanceof Error ? err.message : String(err)}`);

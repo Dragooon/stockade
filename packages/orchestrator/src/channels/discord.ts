@@ -11,6 +11,10 @@ import {
   GatewayIntentBits,
   MessageFlags,
   MessageType,
+  ModalBuilder,
+  StringSelectMenuBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   PermissionFlagsBits,
   REST,
   Routes,
@@ -23,7 +27,7 @@ import {
   type ChatInputCommandInteraction,
 } from "discord.js";
 import { discordScope, discordThreadScope } from "./scope.js";
-import type { ChannelMessage, ChannelAttachment, ChannelFile, ChannelResponse, PlatformConfig, AgentsConfig, ApprovalChannel } from "../types.js";
+import type { ChannelMessage, ChannelAttachment, ChannelFile, ChannelResponse, PlatformConfig, AgentsConfig, ApprovalChannel, AskQuestion } from "../types.js";
 import type { GatekeeperReview, RiskLevel } from "../gatekeeper.js";
 
 type DiscordConfig = NonNullable<PlatformConfig["channels"]["discord"]>;
@@ -1027,6 +1031,83 @@ export class DiscordAdapter {
           }
           return false;
         }
+      },
+
+      // AskUserQuestion: one message per question, buttons (single choice) or a menu
+      // (multi-select), plus "Other…" for a typed answer. The asker or an approver answers.
+      askQuestions: async (questions: AskQuestion[]) => {
+        const ch = channel as any;
+        const canAnswer = (id: string) => id === senderId || (this.opts.approvers?.canApprove(id) ?? false);
+        const answers: Record<string, string> = {};
+        for (const [qi, q] of questions.entries()) {
+          const nonce = `${Date.now().toString(36)}${qi}`;
+          const embed = new EmbedBuilder()
+            .setColor(0x5865f2)
+            .setTitle(`❓ ${q.header || "Question"}`.slice(0, 256))
+            .setDescription(`${q.question}\n\n${q.options.map((o) => `**${o.label}**${o.description ? ` — ${o.description}` : ""}`).join("\n")}`.slice(0, 4000))
+            .setFooter({ text: q.multiSelect ? "Pick one or more, or Other… to type an answer" : "Pick one, or Other… to type an answer" });
+          const other = new ButtonBuilder().setCustomId(`q:${nonce}:other`).setLabel("Other…").setStyle(ButtonStyle.Secondary);
+          const rows: ActionRowBuilder<any>[] = q.multiSelect
+            ? [
+                new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                  new StringSelectMenuBuilder()
+                    .setCustomId(`q:${nonce}:select`)
+                    .setPlaceholder("Choose…")
+                    .setMinValues(1)
+                    .setMaxValues(q.options.length)
+                    .addOptions(q.options.map((o, i) => ({
+                      label: o.label.slice(0, 100),
+                      value: String(i),
+                      ...(o.description ? { description: o.description.slice(0, 100) } : {}),
+                    }))),
+                ),
+                new ActionRowBuilder<ButtonBuilder>().addComponents(other),
+              ]
+            : [new ActionRowBuilder<ButtonBuilder>().addComponents(
+                ...q.options.slice(0, 4).map((o, i) =>
+                  new ButtonBuilder().setCustomId(`q:${nonce}:opt:${i}`).setLabel(o.label.slice(0, 80)).setStyle(ButtonStyle.Primary)),
+                other,
+              )];
+          const msg = await ch.send({ content: `<@${senderId}>`, embeds: [embed], components: rows });
+          let answer: string | null = null;
+          try {
+            const i = await msg.awaitMessageComponent({
+              filter: (x: any) => {
+                if (canAnswer(x.user.id)) return true;
+                x.reply({ content: "This question isn't for you.", flags: MessageFlags.Ephemeral }).catch(() => {});
+                return false;
+              },
+              time: ASK_TIMEOUT_MS,
+            });
+            if (i.customId.endsWith(":other")) {
+              await i.showModal(new ModalBuilder()
+                .setCustomId(`q:${nonce}:modal`)
+                .setTitle((q.header || "Your answer").slice(0, 45))
+                .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(
+                  new TextInputBuilder().setCustomId("answer").setLabel(q.question.slice(0, 45))
+                    .setStyle(TextInputStyle.Paragraph).setRequired(true))));
+              const sub = await i.awaitModalSubmit({
+                time: ASK_TIMEOUT_MS,
+                filter: (m: any) => m.customId === `q:${nonce}:modal` && m.user.id === i.user.id,
+              });
+              answer = sub.fields.getTextInputValue("answer");
+              await sub.deferUpdate().catch(() => {});
+            } else if (i.isStringSelectMenu()) {
+              answer = i.values.map((v: string) => q.options[Number(v)].label).join(", ");
+              await i.deferUpdate();
+            } else {
+              answer = q.options[Number(i.customId.split(":").pop())].label;
+              await i.deferUpdate();
+            }
+          } catch {
+            answer = null; // timed out
+          }
+          embed.setFooter({ text: (answer ? `Answered: ${answer}` : "No answer (timed out)").slice(0, 2048) });
+          await msg.edit({ content: null, embeds: [embed], components: [] }).catch(() => {});
+          if (answer === null) return null;
+          answers[q.question] = answer;
+        }
+        return answers;
       },
 
       notifyAutoApproved: async (tool, input, review, aid?) => {

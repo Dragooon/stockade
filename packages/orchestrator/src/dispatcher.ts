@@ -310,6 +310,16 @@ export const PLATFORM_DISALLOWED_TOOLS = [
 ];
 
 /**
+ * Disallowed tools for an agent. AskUserQuestion is only offered when the agent runs in an SDK
+ * permission mode that asks the host (canUseTool), which answers it in the chat channel; in
+ * bypass mode it would return without answers.
+ */
+export function platformDisallowedTools(agentConfig: AgentConfig): string[] {
+  const asksHost = !!agentConfig.permission_mode && agentConfig.permission_mode !== "bypassPermissions";
+  return asksHost ? PLATFORM_DISALLOWED_TOOLS.filter((t) => t !== "AskUserQuestion") : PLATFORM_DISALLOWED_TOOLS;
+}
+
+/**
  * Deny rules that prevent agents from modifying their own configuration.
  */
 export const SELF_MODIFICATION_DENY_RULES = [
@@ -692,7 +702,7 @@ export async function dispatchToWorker(
     systemPrompt,
     tools: agentConfig.tools?.filter((t) => t !== "Agent"),
     disallowedTools: [
-      ...PLATFORM_DISALLOWED_TOOLS,
+      ...platformDisallowedTools(agentConfig),
       ...(agentConfig.disallowed_tools ?? []),
     ],
     model: agentConfig.model,

@@ -490,6 +490,7 @@ async function handleMessage(
   return bridge.sendAndWait(enqueueScope, `${header}${sudoNote ? `${sudoNote}\n` : ""}[${senderTag}]\n${msg.content}`, {
     userId: msg.userId,
     userPlatform: msg.platform,
+    askQuestions: approvalChannel?.askQuestions,
     sudo,
     askApproval,
     attachments: msg.attachments,

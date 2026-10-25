@@ -21,6 +21,7 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { CronExpressionParser } from "cron-parser";
 import { getCallbackSession } from "./sessions.js";
+import type { AskQuestion } from "../types.js";
 import { buildPreToolUseHook } from "../rbac.js";
 import { resolveEffectivePermissions } from "../gatekeeper.js";
 import { runHostCommand } from "../host-bash.js";
@@ -102,6 +103,17 @@ export function startCallbackServer(
       tool_name: string;
       tool_input: Record<string, unknown>;
     };
+    // AskUserQuestion: ask in the channel and hand the answers back as the tool's input.
+    if (tool_name === "AskUserQuestion") {
+      const questions = (tool_input?.questions ?? []) as AskQuestion[];
+      if (!ctx.askQuestions || !Array.isArray(questions) || questions.length === 0) {
+        return c.json({ approved: false, reason: "Can't ask questions here (no chat channel for this run). Decide yourself or say what you need in your reply." });
+      }
+      const answers = await ctx.askQuestions(questions, ctx.agentId);
+      console.log(`[canusetool] AskUserQuestion (${ctx.agentId}): ${answers ? "answered" : "no answer"}`);
+      if (!answers) return c.json({ approved: false, reason: "Nobody answered in time." });
+      return c.json({ approved: true, updatedInput: { ...tool_input, answers } });
+    }
     if (!ctx.askApproval) {
       console.log(`[canusetool] deny "${tool_name}" (${ctx.agentId}): nobody to ask`);
       return c.json({ approved: false, reason: "Needs human approval, but nobody can be asked here (scheduled or API run)" });
@@ -334,13 +346,15 @@ export function startCallbackServer(
       return c.json({ error: "unauthorized" }, 401);
     }
 
-    const { agentId, prompt, scope: reqScope, userId, userPlatform, deliver } = await c.req.json() as {
+    const { agentId, prompt, scope: reqScope, userId, userPlatform, deliver, sudo } = await c.req.json() as {
       agentId: string;
       prompt: string;
       scope?: string;
       userId?: string;
       userPlatform?: string;
       deliver?: boolean;
+      /** Run as the agent's sudo user (the API token is root-equivalent anyway). */
+      sudo?: boolean;
     };
 
     if (!agentId || !prompt || !userId) {
@@ -353,6 +367,7 @@ export function startCallbackServer(
       agentId,
       userId,
       userPlatform: userPlatform ?? "terminal",
+      sudo: !!sudo,
       noSession: !reqScope, // fresh session unless caller provides a scope to reuse
       ephemeral: !reqScope, // and don't persist throwaway no-scope api:<uuid> sessions
     });
