@@ -13,6 +13,7 @@ import { SudoRegistry } from "./sudo.js";
 import { agentTranscriptDirs } from "./run-as.js";
 import { initSessionsTable, getSessionId, setSessionId, deleteSession, getAllSessions } from "./sessions.js";
 import { PeerService, escapePeerText } from "./peers.js";
+import { initParticipantsTable, recordParticipant, backfillParticipants, hasParticipantBackfill } from "./participants.js";
 import { hostname } from "node:os";
 import {
   initSessionHistoryTable,
@@ -132,6 +133,7 @@ console.log(`[paths] agents_dir=${paths.agents_dir}`);
 const db = new Database(paths.sessions_db);
 initSessionsTable(db);
 initSessionHistoryTable(db);
+initParticipantsTable(db);
 initSchedulerTables(db);
 const taskStore = new SQLiteTaskStore(db);
 
@@ -329,8 +331,18 @@ const sessionHistory = new SessionHistoryService({
     return scope;
   },
 });
-// Build/catch up the transcript index in the background (yields between chunks).
-for (const id of Object.keys(config.agents.agents)) void transcriptIndex.refresh(id);
+// Build/catch up the transcript index in the background (yields between chunks), then
+// fill the participation record from it, once (D3b: lines before 6cdbb8d are good, not proof).
+void Promise.all(Object.keys(config.agents.agents).map((id) => transcriptIndex.refresh(id))).then(() => {
+  if (hasParticipantBackfill(db)) return;
+  const indexDb = new Database(resolve(paths.data_dir, "session-index.db"), { readonly: true });
+  try {
+    const result = backfillParticipants(db, indexDb);
+    console.log(`[participants] backfill: ${result.rows} rows from ${result.matched} of ${result.messages} user messages`);
+  } finally {
+    indexDb.close();
+  }
+}).catch((err) => console.error("[participants] backfill failed:", err));
 
 // 3c. Start orchestrator callback server (port 7420)
 // Workers call back here for permission checks and agent MCP tool invocations.
@@ -373,6 +385,8 @@ const peers = new PeerService({
   deliver: async (scope, text, meta) => {
     // Approvals go to the target's own channel and its usual approvers, never to the sender.
     const person = resolveUser(meta.userId, meta.userPlatform, config.platform);
+    // A peer insert acts for the person but isn't them writing here: platform "peer".
+    if (person) noteParticipant(scope, person.username, "peer");
     const discordId = meta.userPlatform === "discord"
       ? meta.userId
       : person ? config.platform.rbac.users[person.username]?.identities.discord : undefined;
@@ -496,6 +510,15 @@ function askApprovalFor(approvalChannel: ApprovalChannel, agentId: string): AskA
   return (tool, input) => approvalChannel.askUser(tool, input, undefined, agentId);
 }
 
+/** Record who took part in a scope; a database error never stops the message. */
+function noteParticipant(scope: string, person: string, platform: string): void {
+  try {
+    recordParticipant(db, scope, person, platform);
+  } catch (err) {
+    console.error(`[participants] record failed for ${scope.slice(0, 60)}:`, err);
+  }
+}
+
 // 4. Define handleMessage callback — routes through the Redis event bus
 async function handleMessage(
   msg: ChannelMessage,
@@ -558,6 +581,7 @@ async function handleMessage(
     ...(msg.userName ? [`${msg.platform} name: ${msg.userName}`] : []),
     `${msg.platform} id: ${msg.userId}`,
   ].join(" | ");
+  if (sender) noteParticipant(enqueueScope, sender.username, msg.platform);
 
   // A brand-new Discord session (new thread, first message after /new, …) has
   // no memory: tell the agent where it is and which earlier sessions exist.
