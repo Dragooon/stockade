@@ -133,7 +133,11 @@ export class SessionManager {
    * Idempotent — if the session already exists, touches the idle timer and
    * updates the askApproval callback on the callback session.
    */
-  async ensureSession(scope: string, meta: SessionMeta): Promise<ManagedSession> {
+  async ensureSession(
+    scope: string,
+    meta: SessionMeta,
+    opts?: { turnRunning?: boolean },
+  ): Promise<ManagedSession> {
     const existing = this.sessions.get(scope);
     if (existing) {
       // A scope is either a sudo scope or not, for its whole life. Never let a
@@ -147,13 +151,17 @@ export class SessionManager {
       clearTimeout(existing.idleTimer);
       existing.idleTimer = this.startIdleTimer(scope);
 
-      // Update identity and HITL callback on the long-lived callback session
-      updateCallbackSession(existing.callbackToken, {
-        userId: meta.userId,
-        userPlatform: meta.userPlatform,
-        askApproval: meta.askApproval,
-        askQuestions: meta.askQuestions,
-      });
+      // Identity and the HITL callbacks are fixed for a whole turn: a message that joins a
+      // running turn never changes whose permissions its tool calls are checked against.
+      // They're applied here only when this message starts a turn.
+      if (!opts?.turnRunning) {
+        updateCallbackSession(existing.callbackToken, {
+          userId: meta.userId,
+          userPlatform: meta.userPlatform,
+          askApproval: meta.askApproval,
+          askQuestions: meta.askQuestions,
+        });
+      }
 
       return existing;
     }

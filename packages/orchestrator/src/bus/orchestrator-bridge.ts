@@ -56,9 +56,29 @@ interface Pending {
   autoContinueRetries: number;
 }
 
+/** A message held back until its scope's running turn ends (it's from someone else). */
+interface HeldMessage {
+  text: string;
+  meta: Record<string, unknown>;
+  resolve: (result: ChannelResponse) => void;
+}
+
+/** Whose turn a message starts or joins: the person it's sent for. */
+function identityOf(meta: Record<string, unknown>): string {
+  return `${(meta["userPlatform"] as string) ?? "internal"}:${(meta["userId"] as string) ?? "system"}`;
+}
+
 export class OrchestratorBridge {
   /** correlationId → pending promise */
   private readonly pending = new Map<string, Pending>();
+  /** scope → dispatches in flight (a turn runs while this is above zero). Counted
+   * synchronously at the start of sendAndWait, so two near-simultaneous messages
+   * can't both think they start the turn. */
+  private readonly inFlight = new Map<string, number>();
+  /** scope → identity of the running turn. */
+  private readonly turnIdentity = new Map<string, string>();
+  /** scope → messages from someone other than the running turn's person, in arrival order. */
+  private readonly held = new Map<string, HeldMessage[]>();
   /** Posts a follow-up (a result nobody is waiting on) to the scope's channel. */
   private followupHandler?: (scope: string, response: ChannelResponse) => void;
 
@@ -93,6 +113,59 @@ export class OrchestratorBridge {
     text: string,
     meta: Record<string, unknown>,
   ): Promise<ChannelResponse> {
+    // A turn runs as one person from start to end. A message from that person joins the
+    // running turn (injected mid-turn, as before); a message from anyone else waits and
+    // starts its own turn once this one ends, so it never runs on another's permissions.
+    const identity = identityOf(meta);
+    const turnRunning = (this.inFlight.get(scope) ?? 0) > 0;
+    if (turnRunning && this.turnIdentity.get(scope) !== identity) {
+      log(`[bus] holding a message for ${scope.slice(0, 40)} until the running turn ends (different sender)`);
+      return new Promise<ChannelResponse>((resolve) => {
+        const queue = this.held.get(scope) ?? [];
+        queue.push({ text, meta, resolve });
+        this.held.set(scope, queue);
+      });
+    }
+    this.inFlight.set(scope, (this.inFlight.get(scope) ?? 0) + 1);
+    if (!turnRunning) this.turnIdentity.set(scope, identity);
+    try {
+      const result = await this.dispatch(scope, text, meta, turnRunning);
+      return result;
+    } finally {
+      this.releaseTurnSlot(scope);
+    }
+  }
+
+  /** One dispatch's slot in its scope's turn is done; the last one out releases held messages. */
+  private releaseTurnSlot(scope: string): void {
+    const remaining = (this.inFlight.get(scope) ?? 1) - 1;
+    if (remaining > 0) {
+      this.inFlight.set(scope, remaining);
+      return;
+    }
+    this.inFlight.delete(scope);
+    this.turnIdentity.delete(scope);
+    const queue = this.held.get(scope);
+    if (!queue?.length) return;
+    // The oldest held message starts the next turn; later ones from the same person join it.
+    const nextIdentity = identityOf(queue[0].meta);
+    const release = queue.filter((h) => identityOf(h.meta) === nextIdentity);
+    const rest = queue.filter((h) => identityOf(h.meta) !== nextIdentity);
+    if (rest.length) this.held.set(scope, rest);
+    else this.held.delete(scope);
+    for (const h of release) {
+      this.sendAndWait(scope, h.text, h.meta).then(h.resolve).catch((err) =>
+        h.resolve({ text: `Error: ${err instanceof Error ? err.message : String(err)}` })
+      );
+    }
+  }
+
+  private async dispatch(
+    scope: string,
+    text: string,
+    meta: Record<string, unknown>,
+    turnRunning: boolean,
+  ): Promise<ChannelResponse> {
     const sessionMeta: SessionMeta = {
       userId: (meta["userId"] as string) ?? "system",
       userPlatform: (meta["userPlatform"] as string) ?? "internal",
@@ -112,7 +185,7 @@ export class OrchestratorBridge {
     const autoContinueRetries = (meta["_autoContinueRetries"] as number | undefined) ?? 0;
 
     // Ensure session exists (idempotent)
-    const session = await this.sessionManager.ensureSession(scope, sessionMeta);
+    const session = await this.sessionManager.ensureSession(scope, sessionMeta, { turnRunning });
 
     // Save attachments and rewrite message text if needed.
     // Sandboxed agents see their workspace at /workspace (Docker mount), so
@@ -185,6 +258,10 @@ export class OrchestratorBridge {
       p.resolve({ text: "Queue is shutting down." });
     }
     this.pending.clear();
+    for (const queue of this.held.values()) {
+      for (const h of queue) h.resolve({ text: "Queue is shutting down." });
+    }
+    this.held.clear();
     await this.bus.shutdown();
   }
 
