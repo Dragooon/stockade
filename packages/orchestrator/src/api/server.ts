@@ -49,6 +49,8 @@ export function startCallbackServer(
   sendToChannel?: (scope: string, text: string, files?: ChannelFile[]) => Promise<void>,
   sessionHistory?: SessionHistoryService,
   peers?: PeerService,
+  /** A dispatch into a named scope: record its acting person as a participant (platform "api"). */
+  noteDispatch?: (scope: string, userId: string, userPlatform: string) => void,
 ): () => void {
   const app = new Hono();
 
@@ -384,6 +386,8 @@ export function startCallbackServer(
     }
 
     const scope = reqScope ?? `api:${agentId}:${randomUUID()}`;
+    // Throwaway api:<agent>:<uuid> runs aren't conversations: only named scopes are recorded.
+    if (reqScope) noteDispatch?.(scope, userId, userPlatform ?? "terminal");
 
     const result = await bridge.sendAndWait(scope, prompt, {
       agentId,

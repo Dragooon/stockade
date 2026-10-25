@@ -445,6 +445,10 @@ const stopCallbackServer = startCallbackServer(
   sendToChannel,
   sessionHistory,
   peers,
+  (scope, userId, userPlatform) => {
+    const person = resolveUser(userId, userPlatform, config.platform);
+    if (person) noteParticipant(scope, person.username, "api");
+  },
 );
 
 /**

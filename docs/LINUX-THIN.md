@@ -94,6 +94,10 @@ conversation; earlier everyday context reaches the root session).
 - Code: `/var/lib/stockade/repo` (branch `master`, owner `stockade`, read-only for madge).
 - Live config: `/var/lib/stockade/.stockade/config.yaml` (no secrets). Data: `sessions.db`,
   `session-index.db`, `sudo-scopes.json`, `logs/`, `api-token` (0600).
+- `sessions.db` table `scope_participants(scope, person, platform, source, first_ts, last_ts)`: who took
+  part in each scope (platform = discord/terminal for people's messages, `peer` for a peer message acting
+  for them, `api` for /dispatch into a named scope). Filled once from `session-index.db` at the first start
+  after it was added (`source = 'backfill'`, journal line `[participants] backfill: …`).
 - `stockade.service`: `User=stockade`, `LoadCredentialEncrypted=discord-token`
   (`/etc/credstore.encrypted/discord-token`), `AmbientCapabilities=CAP_DAC_READ_SEARCH`,
   `RestartForceExitStatus=75` (restart signal). Deliberately no systemd sandboxing (sessions are children

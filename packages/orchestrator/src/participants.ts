@@ -1,7 +1,8 @@
 /**
  * Who has taken part in each scope (D3b §2). Written wherever Stockade knows the
  * authenticated person: a person's message (handleMessage), a peer message acting for a
- * person (platform "peer"), and later the controller routes (platform "app").
+ * person (platform "peer"), a /dispatch into a named scope (platform "api"), and later
+ * the controller routes (platform "app").
  *
  * Rows from the one-off backfill (`source = 'backfill'`) are parsed from the `[sender:`
  * lines in indexed transcripts. Lines from before 6cdbb8d weren't escaped, so they're
