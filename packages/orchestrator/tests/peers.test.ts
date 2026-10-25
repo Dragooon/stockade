@@ -101,6 +101,14 @@ describe("scope predicates", () => {
     expect(isConversationScope("discord:g:100#sched:t1")).toBe(false);
   });
 
+  it("app: and peer: scopes are conversations too (D3b)", () => {
+    expect(isConversationScope("app:shitiz:abc")).toBe(true);
+    expect(isConversationScope("peer:abc")).toBe(true);
+    expect(isConversationScope("api:kepler:x")).toBe(false);
+    expect(isConversationScope("subagent:main:x")).toBe(false);
+    expect(isConversationScope("discord:g")).toBe(false);
+  });
+
   it("peers are offered to conversations, named API conversations and scheduled runs only", () => {
     expect(canUsePeers(GENERAL)).toBe(true);
     expect(canUsePeers("api:kepler")).toBe(true);

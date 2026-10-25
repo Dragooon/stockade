@@ -811,7 +811,7 @@ export class DiscordAdapter {
     await interaction.editReply({
       content: `🔐 Sudo on (<@${userId}>): Madge has root in this conversation now. ` +
         `It turns off after ${sudo.idleMinutes} minutes without messages, or with /sudo again. ` +
-        `Meanwhile only people with sudo can talk to her here.`,
+        `Everyone here can keep talking to her meanwhile; only people with sudo can turn it off early.`,
     });
 
     const task = interaction.options.getString("task");

@@ -98,6 +98,10 @@ conversation; earlier everyday context reaches the root session).
   part in each scope (platform = discord/terminal for people's messages, `peer` for a peer message acting
   for them, `api` for /dispatch into a named scope). Filled once from `session-index.db` at the first start
   after it was added (`source = 'backfill'`, journal line `[participants] backfill: …`).
+- `sessions.db` table `scope_bindings(scope, agent_id, person, origin, created_ts)`: the agent and owner of
+  `app:` (started from the controller app) and `peer:` (started by an agent) scopes, which config bindings
+  don't cover. Written once when the scope is created and never changed; survives /new. Only the bound person
+  sees such a scope (peers list, session history) and they count as conversations like Discord and terminal.
 - `stockade.service`: `User=stockade`, `LoadCredentialEncrypted=discord-token`
   (`/etc/credstore.encrypted/discord-token`), `AmbientCapabilities=CAP_DAC_READ_SEARCH`,
   `RestartForceExitStatus=75` (restart signal). Deliberately no systemd sandboxing (sessions are children

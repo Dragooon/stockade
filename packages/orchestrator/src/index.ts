@@ -14,6 +14,7 @@ import { agentTranscriptDirs } from "./run-as.js";
 import { initSessionsTable, getSessionId, setSessionId, deleteSession, getAllSessions } from "./sessions.js";
 import { PeerService, escapePeerText } from "./peers.js";
 import { initParticipantsTable, recordParticipant, backfillParticipants, hasParticipantBackfill } from "./participants.js";
+import { initScopeBindingsTable, getScopeBinding, isBoundScope } from "./scope-bindings.js";
 import { hostname } from "node:os";
 import {
   initSessionHistoryTable,
@@ -134,6 +135,7 @@ const db = new Database(paths.sessions_db);
 initSessionsTable(db);
 initSessionHistoryTable(db);
 initParticipantsTable(db);
+initScopeBindingsTable(db);
 initSchedulerTables(db);
 const taskStore = new SQLiteTaskStore(db);
 
@@ -270,6 +272,7 @@ const sessionManager = new SessionManager({
     recordSessionHistory(db, scope, id, sessionManager.get(scope)?.agentId ?? null);
   },
   deleteSessionId: (scope) => deleteSession(db, scope),
+  boundAgent: (scope) => getScopeBinding(db, scope)?.agentId ?? null,
 });
 
 const bridge = new OrchestratorBridge(bus, sessionManager);
@@ -307,10 +310,24 @@ const transcriptIndex = new TranscriptIndex(
   },
 );
 
+/** Human-readable location for a scope, e.g. `thread 'X' in #general`. */
+async function describeScope(scope: string): Promise<string> {
+  if (scope.startsWith("discord:") && discordAdapter) return discordAdapter.describeScope(scope);
+  if (scope.startsWith("terminal:")) return `terminal session of ${scope.split(":")[2]}`;
+  if (isBoundScope(scope)) {
+    const binding = getScopeBinding(db, scope);
+    const kind = scope.startsWith("app:") ? "app session" : "peer session";
+    return binding ? `${kind} ${scope.split(":").at(-1)} of ${binding.person}` : scope;
+  }
+  return scope;
+}
+
 async function userCanViewScope(caller: SessionsCaller, scope: string): Promise<boolean> {
   const user = resolveUser(caller.userId, caller.userPlatform, config.platform);
   if (!user || !checkAccess(caller.userId, caller.userPlatform, caller.agentId, config.platform)) return false;
   if (scope.startsWith("terminal:")) return scope.split(":")[2] === user.username;
+  // app: and peer: scopes belong to one person (D3b §3.2).
+  if (isBoundScope(scope)) return getScopeBinding(db, scope)?.person === user.username;
   if (scope.startsWith("discord:")) {
     const discordId = caller.userPlatform === "discord"
       ? caller.userId
@@ -325,11 +342,7 @@ const sessionHistory = new SessionHistoryService({
   index: transcriptIndex,
   getCurrentSessionId: (scope) => getSessionId(db, scope),
   canView: userCanViewScope,
-  describe: async (scope) => {
-    if (scope.startsWith("discord:") && discordAdapter) return discordAdapter.describeScope(scope);
-    if (scope.startsWith("terminal:")) return `terminal session of ${scope.split(":")[2]}`;
-    return scope;
-  },
+  describe: describeScope,
 });
 // Build/catch up the transcript index in the background (yields between chunks), then
 // fill the participation record from it, once (D3b: lines before 6cdbb8d are good, not proof).
@@ -348,6 +361,7 @@ void Promise.all(Object.keys(config.agents.agents).map((id) => transcriptIndex.r
 // Workers call back here for permission checks and agent MCP tool invocations.
 // 3c. Peers: session-to-session messaging (mcp__peers__*), bounded by the acting person's visibility.
 function peerAgentForScope(scope: string): string | null {
+  if (isBoundScope(scope)) return getScopeBinding(db, scope)?.agentId ?? null;
   const parts = scope.split(":");
   const agentIdx = parts.lastIndexOf("agent");
   if (scope.startsWith("discord:") && agentIdx >= 3 && config.agents.agents[parts[agentIdx + 1]]) return parts[agentIdx + 1];
@@ -361,11 +375,7 @@ const peers = new PeerService({
   knownScopes: () => [...getAllSessions(db).map((r) => r.scope), ...sessionManager.liveScopes()],
   agentForScope: peerAgentForScope,
   canView: (viewer, scope) => userCanViewScope({ ...viewer, scope }, scope),
-  describe: async (scope) => {
-    if (scope.startsWith("discord:") && discordAdapter) return discordAdapter.describeScope(scope);
-    if (scope.startsWith("terminal:")) return `terminal session of ${scope.split(":")[2]}`;
-    return scope;
-  },
+  describe: describeScope,
   status: (scope) => (bridge.isTurnRunning(scope) ? "busy" : sessionManager.get(scope) ? "idle" : "closed"),
   lastActive: (scope, agentId) => {
     if (sessionManager.get(scope)) return Date.now();
@@ -604,8 +614,15 @@ async function handleMessage(
   });
 }
 
-/** Header for the first message of a fresh session — where it is, settings, earlier sessions. */
-function buildSessionStartHeader(msg: ChannelMessage, scope: string, agentId: string): string {
+/**
+ * Header for the first message of a fresh session — where it is, settings, earlier sessions.
+ * `msg` is the channel message, or for app:/peer: scopes just the location label.
+ */
+function buildSessionStartHeader(
+  msg: Pick<ChannelMessage, "locationLabel" | "parentLabel" | "threadOrigin">,
+  scope: string,
+  agentId: string,
+): string {
   const parts = scope.split(":");
   const isThread = parts.length >= 4 && /^\d+$/.test(parts[3]);
   const where = msg.locationLabel ?? scope;
