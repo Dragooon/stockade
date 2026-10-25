@@ -562,6 +562,13 @@ if (config.platform.channels.discord?.enabled) {
         canSudo: (id: string) => hasPermission(id, "discord", "sudo", config.platform),
         open: (scope: string, id: string) => sudoRegistry.open(scope, id),
         idleMinutes: SUDO_IDLE_MINUTES,
+        end: async (scope: string, id: string) => {
+          if (!sudoRegistry.end(scope, id)) return false;
+          await bridge.closeSession(scope, "sudo_ended").catch((err) =>
+            console.error(`[sudo] closeSession failed for ${scope.slice(0, 60)}:`, err));
+          console.log(`[sudo] ${scope} ended by ${id}`);
+          return true;
+        },
       },
     } : {}),
   });

@@ -13,6 +13,8 @@ export interface SudoScope {
   openedBy: string;
   openedAt: number;
   lastActivity: number;
+  /** Ended early with /unsudo (by this user). */
+  endedBy?: string;
 }
 
 export type SudoState = "active" | "expired" | "none";
@@ -36,7 +38,16 @@ export class SudoRegistry {
   state(scope: string): SudoState {
     const s = this.scopes[scope];
     if (!s) return "none";
+    if (s.endedBy) return "expired";
     return this.now() - s.lastActivity > this.idleMs ? "expired" : "active";
+  }
+
+  /** End an active sudo scope now (/unsudo). Returns false if it wasn't active. */
+  end(scope: string, endedBy: string): boolean {
+    if (this.state(scope) !== "active") return false;
+    this.scopes[scope].endedBy = endedBy;
+    this.save();
+    return true;
   }
 
   /** Record activity on an active sudo scope (extends its idle window). */

@@ -39,7 +39,7 @@ sudoers: `/etc/sudoers.d/50-stockade` (`stockade ALL=(madge,madge-sudo) NOPASSWD
 `/sudo <task>` (users with the `sudo` permission) opens a private thread, registers it in
 `~/.stockade/sudo-scopes.json`, and sends the task as the first message. Every message in that thread runs as
 `sudo_user`; only `sudo` holders may talk there; it stops accepting messages after 60 min idle; scheduled
-tasks never run in it (they fire in an isolated everyday scope).
+tasks never run in it (they fire in an isolated everyday scope). `/unsudo` (sudo holders) ends it immediately and closes its session.
 
 ## Files and units
 

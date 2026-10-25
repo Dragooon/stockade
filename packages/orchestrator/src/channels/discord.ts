@@ -162,6 +162,8 @@ export interface DiscordAdapterOptions {
     open: (scope: string, discordUserId: string) => void;
     /** Idle minutes after which a sudo thread stops accepting messages. */
     idleMinutes: number;
+    /** End this sudo scope now and close its session; false if it wasn't an active sudo scope. */
+    end: (scope: string, discordUserId: string) => Promise<boolean>;
   };
 }
 
@@ -378,6 +380,11 @@ export class DiscordAdapter {
               .setRequired(true)
           ) as SlashCommandBuilder
       );
+      commands.push(
+        new SlashCommandBuilder()
+          .setName("unsudo")
+          .setDescription("End the sudo session in this thread now (Madge loses root here)") as SlashCommandBuilder
+      );
     }
 
     // /status — show current session info
@@ -481,6 +488,19 @@ export class DiscordAdapter {
     // ── /sudo <task> ──
     if (commandName === "sudo" && this.opts.sudo) {
       await this.openSudoThread(interaction, serverId, isThread ? parentChannelId : channelId);
+      return;
+    }
+
+    // ── /unsudo ──
+    if (commandName === "unsudo" && this.opts.sudo) {
+      if (!this.opts.sudo.canSudo(userId)) {
+        await interaction.reply({ content: "You don't have sudo.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const ended = await this.opts.sudo.end(scope, userId);
+      await interaction.reply(ended
+        ? { content: `🔒 Sudo session ended by <@${userId}>. Madge no longer has root here; start another with /sudo.` }
+        : { content: "This isn't an active sudo thread.", flags: MessageFlags.Ephemeral });
       return;
     }
 
