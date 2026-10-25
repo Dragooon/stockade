@@ -266,12 +266,12 @@ export class SessionManager {
     session.idleTimer = this.startIdleTimer(scope);
   }
 
-  /** Return all active scopes for a given agentId. Used for worker-restart recovery. */
   /** Every scope with a live session. */
   liveScopes(): string[] {
     return [...this.sessions.keys()];
   }
 
+  /** Return all active scopes for a given agentId. Used for worker-restart recovery. */
   getScopesByAgentId(agentId: string): Set<string> {
     const scopes = new Set<string>();
     for (const [scope, session] of this.sessions) {

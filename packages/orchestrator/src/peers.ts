@@ -70,6 +70,30 @@ export function escapePeerText(text: string): string {
     .replace(/<(\/?)cross-session-message/gi, (_m, slash: string) => `<​${slash}cross-session-message`);
 }
 
+/**
+ * A session label as it may appear in stamped text. Labels come from channel and thread
+ * names, which any Discord member can set, so they lose everything that could close the
+ * header, open a fake one, start a new line or add a field: brackets and angle brackets
+ * become look-alikes, line breaks and invisible characters go, middle dots (the header's
+ * field separator) become hyphens, and double quotes become single ones, so the label
+ * in `from="…"` is the same label `mcp__peers__send` resolves. `@everyone`/`@here` get a
+ * full-width at sign so a post can't ping. Idempotent.
+ */
+export function sanitizePeerLabel(label: string): string {
+  const clean = label
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, " ")
+    .replace(/[\[［⟦〚]/g, "(")
+    .replace(/[\]］⟧〛]/g, ")")
+    .replace(/[<＜〈⟨]/g, "‹")
+    .replace(/[>＞〉⟩]/g, "›")
+    .replace(/[·•∙⋅・･]/g, "-")
+    .replace(/["“”＂]/g, "'")
+    .replace(/@(everyone|here)/gi, "＠$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clean || "unnamed session";
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 /** The session calling a peers tool, and the person its current turn runs for. */
@@ -176,7 +200,7 @@ export class PeerService implements PeerProvider {
       entries.push({
         scope,
         ref: peerRef(scope),
-        label: await this.deps.describe(scope),
+        label: await this.labelFor(scope),
         agentId,
         status,
         lastActive,
@@ -211,7 +235,9 @@ export class PeerService implements PeerProvider {
   /** All providers' entries for the caller, newest first, capped. */
   async visible(caller: PeerCaller): Promise<PeerEntry[]> {
     const all = (await Promise.all(this.providers.map((p) => p.list(caller)))).flat();
+    // Other hosts' labels are as untrusted as Discord's.
     return all
+      .map((e) => ({ ...e, label: sanitizePeerLabel(e.label), ...(e.host !== undefined && { host: sanitizePeerLabel(e.host) }) }))
       .sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0))
       .slice(0, PEER_LIST_CAP);
   }
@@ -285,8 +311,8 @@ export class PeerService implements PeerProvider {
   }
 
   private async labelFor(scope: string): Promise<string> {
-    if (scope.startsWith("#sched:")) return `scheduled task ${scope.split(":")[1] ?? ""}`.trim();
-    return this.deps.describe(scope);
+    if (scope.startsWith("#sched:")) return sanitizePeerLabel(`scheduled task ${scope.split(":")[1] ?? ""}`);
+    return sanitizePeerLabel(await this.deps.describe(scope));
   }
 
   /** `to` may be a ref, a unique label, or the full `label [ref]` form. */
