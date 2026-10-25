@@ -32,7 +32,7 @@ import { resolveAgent, resolveBinding } from "../router.js";
 import { onHost } from "../host-url.js";
 import {
   buildSystemPrompt,
-  buildSdkSettings,
+  buildSessionSdkSettings,
   platformDisallowedTools,
 } from "../dispatcher.js";
 import type { EventBus } from "./event-bus.js";
@@ -459,23 +459,14 @@ export class SessionManager {
         deps.schedulerEnabled,
       );
       const memoryDir = deps.workerManager.resolveMemoryPath(agentId, agentConfig);
-      const sdkSettings = buildSdkSettings(
+      // Sudo sessions also tell the auto-mode classifier this session has root.
+      const sdkSettings = buildSessionSdkSettings(
         agentConfig,
         agentId,
         memoryDir,
-        agentConfig.inline && !!isInline,
+        !!agentConfig.inline && !!isInline,
+        runAs?.sudo ? runAs.user : undefined,
       );
-      if (runAs?.sudo) {
-        // Tell the auto-mode classifier this session has root.
-        const am = (sdkSettings.autoMode ?? {}) as { environment?: string[] };
-        sdkSettings.autoMode = {
-          ...am,
-          environment: [
-            ...(am.environment ?? ["$defaults"]),
-            `Sudo mode: this conversation runs as OS user ${runAs.user} with passwordless sudo (root on this machine), switched on by the owner with /sudo. Root actions that serve what he asks in this conversation are expected; anything else needs his explicit say-so.`,
-          ],
-        };
-      }
 
       // ── Resume: look up existing SDK session ID ──
       const sdkSessionId = meta.noSession ? null : deps.getSessionId(scope);

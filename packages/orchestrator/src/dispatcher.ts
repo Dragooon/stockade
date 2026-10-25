@@ -305,9 +305,25 @@ export const PLATFORM_DISALLOWED_TOOLS = [
   "CronList",
   "NotebookEdit",
   "SendMessage",
+  // Native cross-session tools: they reach every local Claude session of the OS user,
+  // whoever it belongs to. Stockade routes between sessions itself (mcp__peers__*).
+  "ListAgents",
+  "FetchInboxMessage",
+  "TeamCreate",
   "TeamDelete",
   "AskUserQuestion",
 ];
+
+/**
+ * SDK settings every Stockade session gets, over anything an agent's sdk_settings says.
+ * No native cross-session inbound (local processes can't inject over the inbox socket),
+ * no Remote Control bridge, and no reaching peer sessions on other machines.
+ */
+export const PLATFORM_PINNED_SDK_SETTINGS: Record<string, unknown> = {
+  crossSessionInbound: "refuse",
+  remoteControlAtStartup: false,
+  isolatePeerMachines: true,
+};
 
 /**
  * Disallowed tools for an agent. AskUserQuestion is only offered when the agent runs in an SDK
@@ -399,7 +415,32 @@ export function buildSdkSettings(
       ],
     },
   };
-  return mergeSdkSettings(base, agentConfig.sdk_settings);
+  return { ...mergeSdkSettings(base, agentConfig.sdk_settings), ...PLATFORM_PINNED_SDK_SETTINGS };
+}
+
+/**
+ * SDK settings for a persistent session: the platform settings, plus a note for the
+ * auto-mode classifier when the session runs as the agent's sudo user (root).
+ */
+export function buildSessionSdkSettings(
+  agentConfig: AgentConfig,
+  agentId: string,
+  memoryDir: string | undefined,
+  inline: boolean,
+  sudoUser?: string,
+): Record<string, unknown> {
+  const sdkSettings = buildSdkSettings(agentConfig, agentId, memoryDir, inline);
+  if (sudoUser) {
+    const am = (sdkSettings.autoMode ?? {}) as { environment?: string[] };
+    sdkSettings.autoMode = {
+      ...am,
+      environment: [
+        ...(am.environment ?? ["$defaults"]),
+        `Sudo mode: this conversation runs as OS user ${sudoUser} with passwordless sudo (root on this machine), switched on by the owner with /sudo. Root actions that serve what he asks in this conversation are expected; anything else needs his explicit say-so.`,
+      ],
+    };
+  }
+  return sdkSettings;
 }
 
 /** Merge an agent's sdk_settings over the platform's: permission lists concatenate, the rest overrides. */

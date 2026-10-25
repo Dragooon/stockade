@@ -31,7 +31,10 @@ const {
   dispatch,
   buildSystemPrompt,
   buildSdkSettings,
+  buildSessionSdkSettings,
+  platformDisallowedTools,
   PLATFORM_DISALLOWED_TOOLS,
+  PLATFORM_PINNED_SDK_SETTINGS,
   SELF_MODIFICATION_DENY_RULES,
 } = await import("../src/dispatcher.js");
 
@@ -474,5 +477,54 @@ describe("PLATFORM_DISALLOWED_TOOLS", () => {
 
   it("includes AskUserQuestion", () => {
     expect(PLATFORM_DISALLOWED_TOOLS).toContain("AskUserQuestion");
+  });
+});
+
+// ── Native cross-session tools and settings (peers step 0) ──────────────────
+
+describe("native cross-session leak is closed", () => {
+  const NATIVE_CROSS_SESSION_TOOLS = ["SendMessage", "ListAgents", "FetchInboxMessage", "TeamCreate", "TeamDelete"];
+  const agentConfigs: Array<[string, AgentConfig]> = [
+    ["bypass mode", { model: "sonnet", system: "x" } as AgentConfig],
+    ["auto mode", { model: "sonnet", system: "x", permission_mode: "auto" } as AgentConfig],
+    ["inline child", { model: "sonnet", system: "x", inline: true } as AgentConfig],
+    [
+      "agent sdk_settings trying to turn it back on",
+      {
+        model: "sonnet",
+        system: "x",
+        sdk_settings: { crossSessionInbound: "accept", remoteControlAtStartup: true, isolatePeerMachines: false },
+      } as unknown as AgentConfig,
+    ],
+  ];
+
+  for (const [label, agentConfig] of agentConfigs) {
+    it(`disallows the native tools (${label})`, () => {
+      const disallowed = platformDisallowedTools(agentConfig);
+      for (const tool of NATIVE_CROSS_SESSION_TOOLS) expect(disallowed).toContain(tool);
+    });
+
+    it(`pins the cross-session settings (${label})`, () => {
+      const everyday = buildSessionSdkSettings(agentConfig, "main", "/mem", !!agentConfig.inline);
+      const sudo = buildSessionSdkSettings(agentConfig, "main", "/mem", !!agentConfig.inline, "madge-sudo");
+      for (const settings of [everyday, sudo, buildSdkSettings(agentConfig, "main", "/mem")]) {
+        expect(settings).toMatchObject(PLATFORM_PINNED_SDK_SETTINGS);
+      }
+    });
+  }
+
+  it("pins exactly: inbound refused, no Remote Control, peer machines isolated", () => {
+    expect(PLATFORM_PINNED_SDK_SETTINGS).toEqual({
+      crossSessionInbound: "refuse",
+      remoteControlAtStartup: false,
+      isolatePeerMachines: true,
+    });
+  });
+
+  it("sudo runs keep the classifier note alongside the pinned settings", () => {
+    const sudo = buildSessionSdkSettings({ model: "sonnet", system: "x" } as AgentConfig, "main", "/mem", false, "madge-sudo");
+    const environment = (sudo.autoMode as { environment: string[] }).environment;
+    expect(environment[0]).toBe("$defaults");
+    expect(environment[1]).toContain("OS user madge-sudo");
   });
 });
