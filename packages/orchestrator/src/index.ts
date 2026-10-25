@@ -12,7 +12,7 @@ import { checkAccess, hasPermission, resolveUser } from "./rbac.js";
 import { SudoRegistry } from "./sudo.js";
 import { agentTranscriptDirs } from "./run-as.js";
 import { initSessionsTable, getSessionId, setSessionId, deleteSession, getAllSessions } from "./sessions.js";
-import { PeerService } from "./peers.js";
+import { PeerService, escapePeerText } from "./peers.js";
 import { hostname } from "node:os";
 import {
   initSessionHistoryTable,
@@ -552,7 +552,8 @@ async function handleMessage(
   const isFresh = msg.platform === "discord" && !sessionManager.get(enqueueScope) && !getSessionId(db, enqueueScope);
   const header = isFresh ? `${buildSessionStartHeader(msg, enqueueScope, agentId)}\n` : "";
 
-  return bridge.sendAndWait(enqueueScope, `${header}${sudoNote ? `${sudoNote}\n` : ""}[${senderTag}]\n${msg.content}`, {
+  // Only the platform writes [sender:/[platform:/[peer: lines: neutralise look-alikes in what people type.
+  return bridge.sendAndWait(enqueueScope, `${header}${sudoNote ? `${sudoNote}\n` : ""}[${senderTag}]\n${escapePeerText(msg.content)}`, {
     userId: msg.userId,
     userPlatform: msg.platform,
     askQuestions: approvalChannel?.askQuestions,

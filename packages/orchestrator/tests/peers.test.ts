@@ -367,3 +367,9 @@ describe("api: and #sched: senders", () => {
     expect(deliveries[0].text.split("\n")[0]).toMatch(/· no reply possible\]$/);
   });
 });
+
+describe("escaping people's own text", () => {
+  it("leaves ordinary text alone", () => {
+    expect(escapePeerText("check the [sender] field and <b>bold</b>")).toBe("check the [sender] field and <b>bold</b>");
+  });
+});
