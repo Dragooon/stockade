@@ -131,6 +131,47 @@ describe("OrchestratorBridge: identity is fixed for a whole turn", () => {
     expect(bridge.isTurnRunning(SCOPE)).toBe(false);
   });
 
+  it("drops a held message whose beforeRun check fails at release, and runs the rest", async () => {
+    const { bridge, published, ensureCalls, settle, finishTurn } = await startBridge();
+    let sudoChanged = false;
+    const aliceTurn = bridge.sendAndWait(SCOPE, "alice asks", fromPerson("alice"));
+    await settle();
+    // Bob's peer message passed its checks when queued; /sudo flips before it's released.
+    const bobMessage = bridge.sendAndWait(SCOPE, "bob's peer message", {
+      ...fromPerson("bob"),
+      beforeRun: () => (sudoChanged ? "target's sudo mode changed while the message waited" : null),
+    });
+    const carolMessage = bridge.sendAndWait(SCOPE, "carol asks", fromPerson("carol"));
+    await settle();
+    sudoChanged = true;
+
+    finishTurn(published[0].correlationId, "for alice");
+    expect((await aliceTurn).text).toBe("for alice");
+    expect(await bobMessage).toEqual({ text: "", silent: true });
+    await settle();
+
+    // Bob's text never reaches the worker; Carol's turn starts as her.
+    expect(published.map((m) => m.text)).toEqual(["alice asks", "carol asks"]);
+    expect(ensureCalls.map((c) => c.userId)).toEqual(["alice", "carol"]);
+    finishTurn(published[1].correlationId, "for carol");
+    expect((await carolMessage).text).toBe("for carol");
+  });
+
+  it("releases nothing when every held message fails its check", async () => {
+    const { bridge, published, settle, finishTurn } = await startBridge();
+    void bridge.sendAndWait(SCOPE, "alice asks", fromPerson("alice"));
+    await settle();
+    const bobMessage = bridge.sendAndWait(SCOPE, "bob's peer message", {
+      ...fromPerson("bob"), beforeRun: () => "changed",
+    });
+    await settle();
+    finishTurn(published[0].correlationId, "for alice");
+    expect((await bobMessage).silent).toBe(true);
+    await settle();
+    expect(published).toHaveLength(1);
+    expect(bridge.isTurnRunning(SCOPE)).toBe(false);
+  });
+
   it("resolves held messages on shutdown", async () => {
     const { bridge, settle } = await startBridge();
     void bridge.sendAndWait(SCOPE, "alice", fromPerson("alice"));

@@ -408,6 +408,11 @@ const peers = new PeerService({
       sudo,
       askApproval: approvalChannel ? askApprovalFor(approvalChannel, meta.agentId) : undefined,
       askQuestions: approvalChannel?.askQuestions,
+      // A message held behind a busy turn is checked again when it's released: if /sudo was
+      // turned on or off meanwhile, it would run in the wrong mode, so the bridge drops it.
+      beforeRun: () => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)) !== sudo
+        ? "target's sudo mode changed while the message waited"
+        : null,
     });
   },
   post: (scope, text) => (scope.startsWith("discord:") || scope.startsWith("terminal:") ? sendToChannel(scope, text) : Promise.resolve()),

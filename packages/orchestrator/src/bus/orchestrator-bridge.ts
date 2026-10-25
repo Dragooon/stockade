@@ -155,8 +155,21 @@ export class OrchestratorBridge {
     }
     this.inFlight.delete(scope);
     this.turnIdentity.delete(scope);
-    const queue = this.held.get(scope);
-    if (!queue?.length) return;
+    // A held message can carry a beforeRun check from its sender (peer delivery re-checks the
+    // target's sudo mode): it ran when the message was queued, and things may have changed
+    // since. A message whose check now fails is dropped instead of starting a turn.
+    const queue = this.held.get(scope)?.filter((h) => {
+      const beforeRun = h.meta["beforeRun"];
+      const reason = typeof beforeRun === "function" ? (beforeRun as () => string | null)() : null;
+      if (!reason) return true;
+      log(`[bus] dropped a held message for ${scope.slice(0, 40)}: ${reason}`);
+      h.resolve({ text: "", silent: true });
+      return false;
+    });
+    if (!queue?.length) {
+      this.held.delete(scope);
+      return;
+    }
     // The oldest held message starts the next turn; later ones from the same person join it.
     const nextIdentity = identityOf(queue[0].meta);
     const release = queue.filter((h) => identityOf(h.meta) === nextIdentity);
