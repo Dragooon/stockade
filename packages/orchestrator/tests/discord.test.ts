@@ -462,6 +462,45 @@ describe("Discord slash commands", () => {
     );
   });
 
+  it("/status shows whether sudo mode is on for the conversation", async () => {
+    const activeScopes = new Set<string>();
+    const sudo = {
+      canSudo: () => true,
+      isActive: (scope: string) => activeScopes.has(scope),
+      start: vi.fn(async () => {}),
+      end: vi.fn(async () => true),
+      idleMinutes: 60,
+    };
+    const adapter = new DiscordAdapter(discordConfig, { onMessage, onSessionReset, sudo });
+    await adapter.start();
+    const handler = getInteractionHandler()!;
+
+    const offInteraction = mockInteraction({ commandName: "status" });
+    await handler(offInteraction);
+    expect(offInteraction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("**Sudo:** off") })
+    );
+
+    activeScopes.add("discord:server-1:any-channel");
+    const onInteraction = mockInteraction({ commandName: "status" });
+    await handler(onInteraction);
+    expect(onInteraction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("**Sudo:** on") })
+    );
+  });
+
+  it("/status shows sudo off when sudo mode isn't configured", async () => {
+    const adapter = new DiscordAdapter(discordConfig, { onMessage, onSessionReset });
+    await adapter.start();
+    const handler = getInteractionHandler()!;
+
+    const interaction = mockInteraction({ commandName: "status" });
+    await handler(interaction);
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("**Sudo:** off") })
+    );
+  });
+
   it("slash commands in threads use thread scope", async () => {
     onMessage.mockResolvedValue("Thread slash response");
     const adapter = new DiscordAdapter(discordConfig, { onMessage, onSessionReset });

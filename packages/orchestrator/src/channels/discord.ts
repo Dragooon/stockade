@@ -395,7 +395,7 @@ export class DiscordAdapter {
       new SlashCommandBuilder()
         .setName("status")
         .setDescription(
-          "Show which agent and session is active in this channel"
+          "Show which agent and session is active in this channel, and whether sudo mode is on"
         ) as SlashCommandBuilder
     );
 
@@ -482,6 +482,7 @@ export class DiscordAdapter {
           `**Agent:** \`${agentId}\``,
           `**Scope:** \`${scope}\``,
           `**Channel:** ${isThread ? "thread" : "channel"} \`${channelId}\``,
+          `**Sudo:** ${this.opts.sudo?.isActive(scope) ? "on" : "off"}`,
         ].join("\n"),
         flags: MessageFlags.Ephemeral,
       });
