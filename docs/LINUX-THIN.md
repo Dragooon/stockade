@@ -43,7 +43,7 @@ tasks never run in it (they fire in an isolated everyday scope).
 
 ## Files and units
 
-- Code: `/var/lib/stockade/repo` (branch `linux-thin`, owner `stockade`, read-only for madge).
+- Code: `/var/lib/stockade/repo` (branch `master`, owner `stockade`, read-only for madge).
 - Live config: `/var/lib/stockade/.stockade/config.yaml` (no secrets). Data: `sessions.db`,
   `session-index.db`, `sudo-scopes.json`, `logs/`, `api-token` (0600).
 - `stockade.service`: `User=stockade`, `LoadCredentialEncrypted=discord-token`
