@@ -30,6 +30,7 @@ export const PEER_API_REPLY_WINDOW_MS = 24 * 3_600_000;
 export const PEER_PREVIEW_CHARS = 300;
 
 export const NOT_FOUND = "no visible session matches";
+export const SUDO_TARGET = "target is in sudo mode; only sudo sessions can message it";
 
 // ── Scope predicates ─────────────────────────────────────────────────────────
 
@@ -126,6 +127,8 @@ export interface PeerDeliveryMeta {
   userId: string;
   userPlatform: string;
   hops: number;
+  /** The sender's session runs as root. Only then may the message land in a sudo-mode scope. */
+  fromSudo: boolean;
 }
 
 /** Everything peers needs from the orchestrator. */
@@ -139,8 +142,10 @@ export interface PeerDeps {
   describe(scope: string): Promise<string>;
   status(scope: string): PeerStatus;
   lastActive(scope: string, agentId: string): number | null;
-  /** Is the scope in sudo mode (or holding an open sudo session)? For the list's `sudo` tag. Clears expired sudo state. */
+  /** Is the scope in sudo mode? An expired one isn't (its state is cleared). The list's `sudo` tag and the send guard. */
   inSudo(scope: string): boolean;
+  /** Does the scope's open session run as root (a sudo session)? The sender side of the sudo guard. */
+  runsAsRoot(scope: string): boolean;
   /** Display name for the person (RBAC username), or null for nobody. */
   personName(userId: string, userPlatform: string): string | null;
   /** Would a message for this person join or start a turn now ("delivered"), or wait ("queued")? */
@@ -216,6 +221,7 @@ export class PeerService implements PeerProvider {
       userId: from.userId,
       userPlatform: from.userPlatform,
       hops: from.hops + 1,
+      fromSudo: this.deps.runsAsRoot(from.scope),
     };
     const state = this.deps.deliveryState(entry.scope, meta);
     const person = this.deps.personName(from.userId, from.userPlatform) ?? from.userId;
@@ -274,6 +280,11 @@ export class PeerService implements PeerProvider {
       if (!agentId || !(await this.deps.canView({ agentId, userId: caller.userId, userPlatform: caller.userPlatform }, target.scope))) {
         return `Error: ${NOT_FOUND}`;
       }
+    }
+    // Sudo sessions can message anywhere their person can see; only sudo sessions can message a
+    // scope in sudo mode, since the message would run there as root (Shitiz, 2026-10-26).
+    if (!target.host && this.deps.inSudo(target.scope) && !this.deps.runsAsRoot(caller.scope)) {
+      return `Error: ${SUDO_TARGET}`;
     }
     if (!this.takeRateSlot(caller.scope)) return `Error: rate limit (${PEER_RATE_LIMIT} sends per ${PEER_RATE_WINDOW_MS / 60_000} minutes)`;
 

@@ -47,6 +47,18 @@ export class SudoRegistry {
     return this.now() - s.lastActivity > this.idleMs ? "expired" : "active";
   }
 
+  /**
+   * Is the scope in sudo mode right now? An expired scope is cleared first (`onExpired` runs,
+   * e.g. to leave a timeout note) and counts as everyday, the same as handleMessage treats it.
+   */
+  isActive(scope: string, onExpired?: () => void): boolean {
+    if (this.state(scope) === "expired") {
+      this.clear(scope);
+      onExpired?.();
+    }
+    return this.state(scope) === "active";
+  }
+
   /** Forget a scope: it's an everyday scope again. */
   clear(scope: string): void {
     if (!(scope in this.scopes)) return;

@@ -372,17 +372,17 @@ const peers = new PeerService({
     const last = sessionHistory.scopeSessions(scope, agentId)[0]?.lastTs;
     return last ? Date.parse(last) : null;
   },
-  inSudo: (scope) => {
-    // Same expiry handling as handleMessage: an expired scope is everyday again.
-    if (sudoRegistry.state(scope) === "expired") {
-      sudoRegistry.clear(scope);
-      sudoNotes.set(scope, SUDO_TIMEOUT_NOTE);
-    }
-    return sudoRegistry.state(scope) === "active" || !!sessionManager.get(scope)?.sudo;
-  },
+  // Same expiry handling as handleMessage: an expired scope is everyday again.
+  inSudo: (scope) => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)),
+  runsAsRoot: (scope) => !!sessionManager.get(scope)?.sudo,
   personName: (userId, userPlatform) => resolveUser(userId, userPlatform, config.platform)?.username ?? null,
   deliveryState: (scope, meta) => bridge.deliveryState(scope, { userId: meta.userId, userPlatform: meta.userPlatform }),
   deliver: async (scope, text, meta) => {
+    // A scope in sudo mode takes the message in its sudo session, like a person's message there
+    // (expired = everyday again), but only from a sudo session: sendTool checks first, and this
+    // catches a /sudo that landed since. Peer messages don't keep sudo mode alive: only people do.
+    const sudo = sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE));
+    if (sudo && !meta.fromSudo) throw new Error("target is in sudo mode");
     // Approvals go to the target's own channel and its usual approvers, never to the sender.
     const person = resolveUser(meta.userId, meta.userPlatform, config.platform);
     // A peer insert acts for the person but isn't them writing here: platform "peer".
@@ -393,13 +393,6 @@ const peers = new PeerService({
     const approvalChannel = scope.startsWith("discord:") && discordAdapter
       ? await discordAdapter.approvalChannelForScope(scope, discordId, meta.agentId)
       : undefined;
-    // A scope in sudo mode takes the message in its sudo session, like a person's message there
-    // (expired = everyday again). Peer messages don't keep sudo mode alive: only people do.
-    if (sudoRegistry.state(scope) === "expired") {
-      sudoRegistry.clear(scope);
-      sudoNotes.set(scope, SUDO_TIMEOUT_NOTE);
-    }
-    const sudo = sudoRegistry.state(scope) === "active";
     const open = sessionManager.get(scope);
     if (open && open.sudo !== sudo) {
       await bridge.closeSession(scope, sudo ? "sudo_on" : "sudo_off").catch((err) =>

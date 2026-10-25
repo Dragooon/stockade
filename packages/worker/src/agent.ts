@@ -468,7 +468,7 @@ Use start (a seq from search/list output) to read around a hit.`,
   const peersListTool = tool(
     "list",
     `List the other sessions you can message: conversations the person you're working for can see, newest first.
-Each line: label [ref] · agent · busy|idle|closed · last active (· sudo when it's in sudo mode: it runs as root).`,
+Each line: label [ref] · agent · busy|idle|closed · last active (· sudo when it's in sudo mode; only sudo sessions can message it).`,
     {},
     () => peersCall("list", {}),
   );

@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   PeerService,
   peerRef,
@@ -7,12 +10,14 @@ import {
   isConversationScope,
   canUsePeers,
   NOT_FOUND,
+  SUDO_TARGET,
   PEER_HOP_LIMIT,
   PEER_RATE_LIMIT,
   type PeerCaller,
   type PeerDeps,
   type PeerDeliveryMeta,
 } from "../src/peers.js";
+import { SudoRegistry } from "../src/sudo.js";
 import type { ChannelResponse } from "../src/types.js";
 
 // ── A small world: two people, their channels, one shared channel, one private thread ──
@@ -54,8 +59,10 @@ function world(overrides: Partial<PeerDeps> = {}) {
     [SAME_NAME_A]: "idle", [SAME_NAME_B]: "idle", [OLD_ROOM]: "closed",
   };
   const runningPerson: Record<string, string> = { [ALICE_ROOM]: "alice" };
-  const sudoScopes = new Set<string>();
   let now = NOW;
+  // Scopes in sudo mode (the real registry, on the world's clock) and scopes whose open session runs as root.
+  const sudo = new SudoRegistry(join(mkdtempSync(join(tmpdir(), "peers-sudo-")), "sudo-scopes.json"), 60 * 60_000, () => now);
+  const rootScopes = new Set<string>();
   const deps: PeerDeps = {
     knownScopes: () => [...Object.keys(LABELS), "api:kepler", "#sched:t1:x", "subagent:abc"],
     agentForScope: (scope) => (scope.startsWith("subagent:") ? null : "main"),
@@ -63,7 +70,8 @@ function world(overrides: Partial<PeerDeps> = {}) {
     describe: async (scope) => LABELS[scope] ?? scope,
     status: (scope) => status[scope] ?? "closed",
     lastActive: (scope) => (scope === OLD_ROOM ? NOW - 30 * DAY : scope === ALICE_THREAD ? NOW - 2 * DAY : NOW - 60_000),
-    inSudo: (scope) => sudoScopes.has(scope),
+    inSudo: (scope) => sudo.isActive(scope),
+    runsAsRoot: (scope) => rootScopes.has(scope),
     personName: (userId) => (userId === "system" ? null : userId),
     deliveryState: (scope, meta) =>
       status[scope] === "busy" && runningPerson[scope] !== meta.userId ? "queued" : "delivered",
@@ -78,7 +86,7 @@ function world(overrides: Partial<PeerDeps> = {}) {
   };
   const service = new PeerService(deps);
   return {
-    service, deliveries, posts, replies, status, runningPerson, sudoScopes,
+    service, deliveries, posts, replies, status, runningPerson, sudo, rootScopes,
     advance: (ms: number) => { now += ms; },
   };
 }
@@ -146,8 +154,8 @@ describe("mcp__peers__list visibility", () => {
   });
 
   it("prints the caller, then label [ref] · agent · status · last active · sudo", async () => {
-    const { service, sudoScopes } = world();
-    sudoScopes.add(GENERAL);
+    const { service, sudo } = world();
+    sudo.open(GENERAL, "shitiz");
     const text = await service.listTool(caller("bob", BOB_ROOM));
     expect(text).toContain(`This session is #bob [${peerRef(BOB_ROOM)}].`);
     expect(text).toContain("Peer sessions (1):");
@@ -285,8 +293,8 @@ describe("acting person", () => {
     // The turn that hop 1 started runs as alice with hops 1 (fixed at turn start).
     await service.sendTool(caller(deliveries[0].meta.userId, SAME_NAME_A, deliveries[0].meta.hops), peerRef(ALICE_THREAD), "hop 2");
     expect(deliveries.map((d) => d.meta)).toEqual([
-      { agentId: "main", userId: "alice", userPlatform: "discord", hops: 1 },
-      { agentId: "main", userId: "alice", userPlatform: "discord", hops: 2 },
+      { agentId: "main", userId: "alice", userPlatform: "discord", hops: 1, fromSudo: false },
+      { agentId: "main", userId: "alice", userPlatform: "discord", hops: 2, fromSudo: false },
     ]);
   });
 
@@ -305,11 +313,42 @@ describe("acting person", () => {
 // ── Guards ──
 
 describe("guards", () => {
-  it("delivers to a target in sudo mode", async () => {
-    const { service, sudoScopes, deliveries } = world();
-    sudoScopes.add(SAME_NAME_A);
+  it("refuses an everyday sender into a target in sudo mode", async () => {
+    const { service, sudo, deliveries } = world();
+    sudo.open(SAME_NAME_A, "shitiz");
+    expect(await service.sendTool(caller("alice", GENERAL), peerRef(SAME_NAME_A), "hi")).toBe(`Error: ${SUDO_TARGET}`);
+    expect(deliveries).toEqual([]);
+  });
+
+  it("delivers from a sudo session into a target in sudo mode, marked as from sudo", async () => {
+    const { service, sudo, rootScopes, deliveries } = world();
+    sudo.open(SAME_NAME_A, "shitiz");
+    rootScopes.add(GENERAL);
     expect(await service.sendTool(caller("alice", GENERAL), peerRef(SAME_NAME_A), "hi")).toMatch(/^delivered/);
     expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].meta.fromSudo).toBe(true);
+  });
+
+  it("delivers from a sudo session into an everyday target", async () => {
+    const { service, rootScopes, deliveries } = world();
+    rootScopes.add(GENERAL);
+    expect(await service.sendTool(caller("alice", GENERAL), peerRef(SAME_NAME_A), "hi")).toMatch(/^delivered/);
+    expect(deliveries[0].meta.fromSudo).toBe(true);
+  });
+
+  it("delivers between everyday sessions, marked as not from sudo", async () => {
+    const { service, deliveries } = world();
+    expect(await service.sendTool(caller("alice", GENERAL), peerRef(SAME_NAME_A), "hi")).toMatch(/^delivered/);
+    expect(deliveries[0].meta.fromSudo).toBe(false);
+  });
+
+  it("treats an expired sudo target as everyday, and clears it", async () => {
+    const { service, sudo, deliveries, advance } = world();
+    sudo.open(SAME_NAME_A, "shitiz");
+    advance(60 * 60_000 + 1);
+    expect(await service.sendTool(caller("alice", GENERAL), peerRef(SAME_NAME_A), "hi")).toMatch(/^delivered/);
+    expect(deliveries).toHaveLength(1);
+    expect(sudo.state(SAME_NAME_A)).toBe("none");
   });
 
   it("enforces the hop limit", async () => {
