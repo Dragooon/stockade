@@ -305,6 +305,8 @@ export interface ChannelResponse {
   stopReason?: string;
   /** Agent chose not to reply (mcp__agent__no_reply): post nothing, not even a warning. */
   silent?: boolean;
+  /** The message waited and was dropped before its turn ran; why, for the sender (no turn ran). */
+  dropped?: string;
 }
 
 /** Resolved user info from RBAC */

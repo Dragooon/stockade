@@ -290,6 +290,16 @@ describe("delivery", () => {
     await settle();
     expect(posts).toEqual([]);
   });
+
+  it("tells the sender's conversation when a waiting message is dropped before it runs", async () => {
+    const { service, posts, replies } = world();
+    await service.sendTool(caller("bob", GENERAL), peerRef(BOB_ROOM), "hello");
+    replies.get(BOB_ROOM)!({ text: "", silent: true, dropped: "its sudo mode changed while it waited" });
+    await settle();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].scope).toBe(GENERAL);
+    expect(posts[0].text).toMatch(/^Your message to .+ wasn't delivered: its sudo mode changed while it waited\.$/);
+  });
 });
 
 // ── Identity ──

@@ -139,7 +139,7 @@ describe("OrchestratorBridge: identity is fixed for a whole turn", () => {
     // Bob's peer message passed its checks when queued; /sudo flips before it's released.
     const bobMessage = bridge.sendAndWait(SCOPE, "bob's peer message", {
       ...fromPerson("bob"),
-      beforeRun: () => (sudoChanged ? "target's sudo mode changed while the message waited" : null),
+      beforeRun: () => (sudoChanged ? "its sudo mode changed while it waited" : null),
     });
     const carolMessage = bridge.sendAndWait(SCOPE, "carol asks", fromPerson("carol"));
     await settle();
@@ -147,7 +147,7 @@ describe("OrchestratorBridge: identity is fixed for a whole turn", () => {
 
     finishTurn(published[0].correlationId, "for alice");
     expect((await aliceTurn).text).toBe("for alice");
-    expect(await bobMessage).toEqual({ text: "", silent: true });
+    expect(await bobMessage).toEqual({ text: "", silent: true, dropped: "its sudo mode changed while it waited" });
     await settle();
 
     // Bob's text never reaches the worker; Carol's turn starts as her.

@@ -62,7 +62,9 @@ Spec: `specs/SPEC-PEERS.md`. Code: `packages/orchestrator/src/peers.ts`, tools i
   </cross-session-message>
   ```
   `[peer:`, `[sender:`, `[platform:` and the wrapper tags in the text are escaped. The receiver replies with
-  its own send to the `from` value; nothing is posted to the sender's channel by the platform.
+  its own send to the `from` value; nothing is posted to the sender's channel by the platform, except when a
+  message that waited behind another turn is dropped before it runs (the target's sudo mode changed meanwhile):
+  then the sender's channel gets "Your message to <label> wasn't delivered: its sudo mode changed while it waited."
 - The turn a peer message starts runs as the **acting person** (the sender turn's person) for RBAC, carries
   a hop count (limit 6), and raises approvals in the target's own channel with its usual approvers. Its reply
   is posted to the target's channel under `*Message from <label> on behalf of <person>:* <first 300 chars>`
@@ -150,9 +152,11 @@ Commit and push every change (`origin` = github.com/Dragooon/stockade).
 ## Testing without Discord
 
 ```bash
-sudo -u stockade bash -c 'curl -s -X POST http://127.0.0.1:7420/dispatch \
-  -H "Authorization: Bearer $(cat /var/lib/stockade/.stockade/api-token)" -H "Content-Type: application/json" \
-  -d "{\"agentId\":\"main\",\"userId\":\"<discord id>\",\"userPlatform\":\"discord\",\"prompt\":\"…\"}"'
+# The token is root-equivalent: keep it out of argv (visible in /proc to every user) and out of
+# world-readable files. curl reads the header from a 0600 file; node fetch works too.
+sudo -u stockade bash -c 'umask 077; h=$(mktemp); printf "Authorization: Bearer %s\n" "$(cat /var/lib/stockade/.stockade/api-token)" > "$h"
+  curl -s -X POST http://127.0.0.1:7420/dispatch -H @"$h" -H "Content-Type: application/json" \
+    -d "{\"agentId\":\"main\",\"userId\":\"<discord id>\",\"userPlatform\":\"discord\",\"prompt\":\"…\"}"; rm -f "$h"'
 ```
 Add `"scope": "discord:…"` to resume that channel's session (it then contains the test turn), and
 `"sudo": true` to run as the sudo user.

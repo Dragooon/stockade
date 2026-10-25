@@ -169,7 +169,7 @@ export class OrchestratorBridge {
       const reason = typeof beforeRun === "function" ? (beforeRun as () => string | null)() : null;
       if (!reason) return true;
       log(`[bus] dropped a held message for ${scope.slice(0, 40)}: ${reason}`);
-      h.resolve({ text: "", silent: true });
+      h.resolve({ text: "", silent: true, dropped: reason });
       return false;
     });
     if (!queue?.length) {

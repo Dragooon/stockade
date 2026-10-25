@@ -222,6 +222,11 @@ export class PeerService implements PeerProvider {
     const person = this.deps.personName(from.userId, from.userPlatform) ?? from.userId;
     const fromLabel = await this.labelFor(from.scope);
     this.deps.deliver(entry.scope, wrapped, meta).then(async (result) => {
+      if (result.dropped) {
+        // It waited behind another turn and never ran: tell the sender's conversation.
+        await this.deps.post(from.scope, `Your message to ${entryName(entry)} wasn't delivered: ${result.dropped}.`);
+        return;
+      }
       // The receiver's reply belongs to its own conversation. Empty means it was coalesced
       // into a reply some other message is posting; silent means mcp__agent__no_reply.
       if (result.silent || !result.text.trim()) return;
