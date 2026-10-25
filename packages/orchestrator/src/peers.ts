@@ -14,6 +14,7 @@
 
 import { createHash } from "node:crypto";
 import type { ChannelResponse } from "./types.js";
+import { isConversationScope } from "./scope-bindings.js";
 
 // ── Limits ───────────────────────────────────────────────────────────────────
 
@@ -34,14 +35,8 @@ export const SUDO_TARGET = "target is in sudo mode; only sudo sessions can messa
 
 // ── Scope predicates ─────────────────────────────────────────────────────────
 
-/**
- * A conversation people talk in: a Discord channel or thread (including its
- * `:agent:<id>` sub-scopes) or a terminal session. The only scopes peers lists.
- */
-export function isConversationScope(scope: string): boolean {
-  if (scope.includes("#")) return false;
-  return (scope.startsWith("discord:") && scope.split(":").length >= 3) || scope.startsWith("terminal:");
-}
+// The only scopes peers lists (shared with session history).
+export { isConversationScope };
 
 const API_UUID_SCOPE = /^api:[^:]+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

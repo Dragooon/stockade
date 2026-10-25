@@ -68,6 +68,8 @@ export interface SessionManagerDeps {
   getSessionId: (scope: string) => string | null;
   setSessionId: (scope: string, sdkSessionId: string) => void;
   deleteSessionId: (scope: string) => void;
+  /** Agent of an app:/peer: scope from scope_bindings (D3b §6), null if unbound. */
+  boundAgent?: (scope: string) => string | null;
 }
 
 export interface SessionMeta {
@@ -291,8 +293,11 @@ export class SessionManager {
     // Only sourced from binding resolution — an explicit meta.agentId (/agent: prefix,
     // subagent, self-spawn) keeps that agent's own defaults.
     let bindingOverride: { model?: string; effort?: AgentConfig["effort"] } = {};
+    const boundAgentId = meta.agentId ? null : deps.boundAgent?.(scope) ?? null;
     if (meta.agentId) {
       agentId = meta.agentId;
+    } else if (boundAgentId) {
+      agentId = boundAgentId;
     } else {
       try {
         const binding = resolveBinding(scope, deps.platform);

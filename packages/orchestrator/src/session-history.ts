@@ -13,6 +13,7 @@
 import { existsSync, readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { isConversationScope } from "./scope-bindings.js";
 
 // ── session_history table (lives in sessions.db) ──
 
@@ -334,11 +335,6 @@ interface VisibleSession {
   row: HistoryRow;
   meta: TranscriptMeta;
   label: string;
-}
-
-/** Scopes that hold user conversations (not sub-agent / api / probe runs). */
-function isConversationScope(scope: string): boolean {
-  return (scope.startsWith("discord:") || scope.startsWith("terminal:")) && !scope.includes("#sched:");
 }
 
 function fmtTs(ts: string | null): string {
