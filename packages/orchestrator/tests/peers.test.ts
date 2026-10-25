@@ -305,11 +305,11 @@ describe("acting person", () => {
 // ── Guards ──
 
 describe("guards", () => {
-  it("refuses a target in sudo mode", async () => {
+  it("delivers to a target in sudo mode", async () => {
     const { service, sudoScopes, deliveries } = world();
     sudoScopes.add(SAME_NAME_A);
-    expect(await service.sendTool(caller("alice", GENERAL), peerRef(SAME_NAME_A), "hi")).toBe("Error: target is in sudo mode");
-    expect(deliveries).toEqual([]);
+    expect(await service.sendTool(caller("alice", GENERAL), peerRef(SAME_NAME_A), "hi")).toMatch(/^delivered/);
+    expect(deliveries).toHaveLength(1);
   });
 
   it("enforces the hop limit", async () => {

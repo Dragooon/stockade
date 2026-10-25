@@ -379,6 +379,18 @@ const peers = new PeerService({
     const approvalChannel = scope.startsWith("discord:") && discordAdapter
       ? await discordAdapter.approvalChannelForScope(scope, discordId, meta.agentId)
       : undefined;
+    // A scope in sudo mode takes the message in its sudo session, like a person's message there
+    // (expired = everyday again). Peer messages don't keep sudo mode alive: only people do.
+    if (sudoRegistry.state(scope) === "expired") {
+      sudoRegistry.clear(scope);
+      sudoNotes.set(scope, SUDO_TIMEOUT_NOTE);
+    }
+    const sudo = sudoRegistry.state(scope) === "active";
+    const open = sessionManager.get(scope);
+    if (open && open.sudo !== sudo) {
+      await bridge.closeSession(scope, sudo ? "sudo_on" : "sudo_off").catch((err) =>
+        console.error(`[sudo] closeSession failed for ${scope.slice(0, 60)}:`, err));
+    }
     const sudoNote = sudoNotes.get(scope);
     sudoNotes.delete(scope);
     return bridge.sendAndWait(scope, `${sudoNote ? `${sudoNote}\n` : ""}${text}`, {
@@ -386,7 +398,7 @@ const peers = new PeerService({
       userId: meta.userId,
       userPlatform: meta.userPlatform,
       hops: meta.hops,
-      sudo: false,
+      sudo,
       askApproval: approvalChannel ? askApprovalFor(approvalChannel, meta.agentId) : undefined,
       askQuestions: approvalChannel?.askQuestions,
     });

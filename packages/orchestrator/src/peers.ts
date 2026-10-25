@@ -139,7 +139,7 @@ export interface PeerDeps {
   describe(scope: string): Promise<string>;
   status(scope: string): PeerStatus;
   lastActive(scope: string, agentId: string): number | null;
-  /** Is the target in sudo mode (or holding an open sudo session)? Clears expired sudo state. */
+  /** Is the scope in sudo mode (or holding an open sudo session)? For the list's `sudo` tag. Clears expired sudo state. */
   inSudo(scope: string): boolean;
   /** Display name for the person (RBAC username), or null for nobody. */
   personName(userId: string, userPlatform: string): string | null;
@@ -275,7 +275,6 @@ export class PeerService implements PeerProvider {
         return `Error: ${NOT_FOUND}`;
       }
     }
-    if (!target.host && this.deps.inSudo(target.scope)) return "Error: target is in sudo mode";
     if (!this.takeRateSlot(caller.scope)) return `Error: rate limit (${PEER_RATE_LIMIT} sends per ${PEER_RATE_WINDOW_MS / 60_000} minutes)`;
 
     const wrapped = await this.wrap(caller, message);

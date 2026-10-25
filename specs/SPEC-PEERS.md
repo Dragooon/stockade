@@ -59,7 +59,7 @@ Arguments: `to` (string), `message` (string, at most 8,000 characters), and `not
 ## Identity and permissions
 
 - **Acting person.** A turn started by a peer message runs as the acting person, which is the sender turn's person (`onBehalfOf`), carried through any chain. The RBAC decision for every tool call in that turn uses that person's permissions. An agent can therefore never do more in a target session than that person could by typing there.
-- **Sudo scopes.** v1 blocks sending into a scope in sudo mode, with the error "target is in sudo mode", because a peer message there would run as root. List entries still show the `sudo` tag. A peer message never toggles `/sudo`, `/new` or any other command; its text is never parsed as a command.
+- **Sudo scopes.** A scope in sudo mode takes peer messages like any other (changed 2026-10-26 at Shitiz's call: a sudo session is just another agent that may be needed). The message runs in its sudo session, as root, the same as a person's message there; peer messages don't keep sudo mode alive. List entries show the `sudo` tag. A peer message never toggles `/sudo`, `/new` or any other command; its text is never parsed as a command.
 - **Approvals.** Tool approvals raised in a peer-started turn go to the target scope's own channel, with the usual approvers, so `approve` stays owner-only. A target with no channel denies, as it does today for API and scheduler runs. Add an adapter method so the Discord adapter can build an `ApprovalChannel` for a scope it didn't just receive a message from.
 - **Where the reply goes.** This follows Claude Code: the receiver's turn output belongs to the receiver's own conversation, and the sender gets only what the receiver explicitly sends back with `mcp__peers__send`.
   - In Stockade, a peer-started turn posts to the target's channel as normal, preceded by one line: `Message from <sender label> on behalf of <person>:` and the first 300 characters of the message.
@@ -88,7 +88,7 @@ Unit (vitest):
 - **Delivery.** To an idle live session, it starts a turn. To a busy session, it injects. To a closed session, it resumes by scope.
 - **Wrapping and replies.** The wrapper is exact, and a reply to `from` routes back to the sender scope.
 - **Identity.** The acting person propagates through two hops. RBAC in a peer-started turn uses the acting person, with a deny visible for a person without the tool.
-- **Guards.** The sudo-scope guard, the hop limit, the rate limit, and command text not being parsed.
+- **Guards.** Delivery into a sudo-mode scope, the hop limit, the rate limit, and command text not being parsed.
 
 End-to-end on Mustafar after deploy, with no Discord posts: dispatch into two test scopes as Shitiz, have session A list and send to B, B replies, and confirm both transcripts. Then confirm a scope Shitiz can't see is absent from A's list.
 
@@ -113,7 +113,7 @@ The tests pass, Kepler has reviewed the full diff, the deploy follows the runboo
    - A `#sched:` sender's header says "no reply possible".
 3. **Visible set.** Build it from the sessions table, `sessionManager` for live state, and the bridge's pending map for busy state. Filter with `userCanViewScope` checked against the target scope's agent (`resolveAgent(scope)`), and label with `describe`. Don't use `SessionHistoryService.visibleSessions()`. Use one shared conversation-scope predicate. `discord:…:agent:<id>` scopes are included and labelled with their agent.
 4. **Never through `handleMessage`.** The peer path calls `bridge.sendAndWait` directly, with its own header. The escape list adds `[platform:`. Escaping `[sender:` in Discord users' own text is a separate small follow-up commit.
-5. **Sudo guard.** Check `sudoRegistry.state()`, clear expired entries the same way `handleMessage` does, and send as everyday. Catch `ensureSession`'s sudo-mismatch throw and return "target is in sudo mode".
+5. **Sudo scopes.** Check `sudoRegistry.state()`, clear expired entries the same way `handleMessage` does, send with `sudo` matching the scope's mode, and close an open session of the other mode first (as `handleMessage` does).
 6. **Output.** A peer-started turn posts its final text through `sendToChannel`; no streaming in v1. Tests cover `evt:result` coalescing when the result lands on the peer's correlation id.
 7. **Step 0** also pins `remoteControlAtStartup: false` and `isolatePeerMachines: true` in the inline settings. The platform instructions name the `[peer:]` header, so agents don't take peer text for platform text.
 8. **Delivery.** Three pull requests, in order: step 0, the identity fix, then peers v1. The v1.1 idle notice comes later.
