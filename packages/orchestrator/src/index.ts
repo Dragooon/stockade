@@ -109,8 +109,17 @@ migrateSyncedCopies(paths.agents_dir);
 const sharedDir = resolve(paths.data_dir, "shared");
 mkdirSync(sharedDir, { recursive: true });
 
-// /sudo threads (sessions as the agent's sudo_user); idle ones stop accepting messages.
+// /sudo toggles a conversation into sudo mode (sessions as the agent's sudo_user, same
+// conversation); it turns off with /sudo again or after SUDO_IDLE_MINUTES without a message.
 const SUDO_IDLE_MINUTES = 60;
+// One-off notes prepended to a scope's next message when its mode changed, so the agent knows.
+const sudoNotes = new Map<string, string>();
+const SUDO_ON_NOTE = (who: string) =>
+  `[platform: sudo mode ON, switched on by ${who}. From this message on you run as the agent's sudo user ` +
+  `(passwordless sudo, i.e. root) in this same conversation. It turns off with /sudo again or after ` +
+  `${SUDO_IDLE_MINUTES} minutes without a message.]`;
+const SUDO_OFF_NOTE = "[platform: sudo mode OFF. You're the everyday agent again (no sudo) in this conversation.]";
+const SUDO_TIMEOUT_NOTE = `[platform: sudo mode timed out after ${SUDO_IDLE_MINUTES} idle minutes. You're the everyday agent again (no sudo).]`;
 const sudoRegistry = new SudoRegistry(resolve(paths.data_dir, "sudo-scopes.json"), SUDO_IDLE_MINUTES * 60_000);
 const sudoEnabled = Object.values(config.agents.agents).some((a) => a.sudo_user);
 
@@ -422,22 +431,33 @@ async function handleMessage(
     return { text: `Unknown agent: ${agentId}` };
   }
 
-  // /sudo threads: only sudo holders may talk, only while the thread is active,
-  // and the session runs as the agent's sudo user.
-  const sudoState = sudoRegistry.state(msg.scope);
+  // Sudo mode (/sudo): only sudo holders may talk while it's on, and the session runs as the
+  // agent's sudo user, continuing the same conversation. Idle too long = back to everyday.
+  let sudoState = sudoRegistry.state(msg.scope);
   if (sudoState === "expired") {
-    return { text: "This sudo session has ended. Start a new one with /sudo." };
+    sudoRegistry.clear(msg.scope);
+    sudoNotes.set(msg.scope, SUDO_TIMEOUT_NOTE);
+    sudoState = "none";
   }
   const sudo = sudoState === "active";
   if (sudo) {
     if (!hasPermission(msg.userId, msg.platform, "sudo", config.platform)) {
-      return { text: "Only people with sudo can talk in this thread." };
+      return { text: "Sudo mode is on in this conversation, so only people with sudo can talk to me here right now." };
     }
     if (enqueueScope !== msg.scope) {
-      return { text: "/agent: isn't available in a sudo thread." };
+      return { text: "/agent: isn't available while sudo mode is on." };
     }
     sudoRegistry.touch(msg.scope);
   }
+  // The scope's open session must match its mode (it switched since): close it, and the
+  // next session resumes the same conversation as the right OS user.
+  const open = sessionManager.get(enqueueScope);
+  if (open && open.sudo !== sudo) {
+    await bridge.closeSession(enqueueScope, sudo ? "sudo_on" : "sudo_off").catch((err) =>
+      console.error(`[sudo] closeSession failed for ${enqueueScope.slice(0, 60)}:`, err));
+  }
+  const sudoNote = sudoNotes.get(msg.scope);
+  sudoNotes.delete(msg.scope);
 
   // Build the AskApprovalFn from channel callbacks + gatekeeper wrapping.
   // Gatekeeper logic lives here (orchestrator layer), not in the channels.
@@ -467,7 +487,7 @@ async function handleMessage(
   const isFresh = msg.platform === "discord" && !sessionManager.get(enqueueScope) && !getSessionId(db, enqueueScope);
   const header = isFresh ? `${buildSessionStartHeader(msg, enqueueScope, agentId)}\n` : "";
 
-  return bridge.sendAndWait(enqueueScope, `${header}[${senderTag}]\n${msg.content}`, {
+  return bridge.sendAndWait(enqueueScope, `${header}${sudoNote ? `${sudoNote}\n` : ""}[${senderTag}]\n${msg.content}`, {
     userId: msg.userId,
     userPlatform: msg.platform,
     sudo,
@@ -560,15 +580,24 @@ if (config.platform.channels.discord?.enabled) {
     ...(sudoEnabled ? {
       sudo: {
         canSudo: (id: string) => hasPermission(id, "discord", "sudo", config.platform),
-        open: (scope: string, id: string) => sudoRegistry.open(scope, id),
-        idleMinutes: SUDO_IDLE_MINUTES,
-        end: async (scope: string, id: string) => {
-          if (!sudoRegistry.end(scope, id)) return false;
-          await bridge.closeSession(scope, "sudo_ended").catch((err) =>
+        isActive: (scope: string) => sudoRegistry.state(scope) === "active",
+        start: async (scope: string, id: string) => {
+          sudoRegistry.open(scope, id);
+          const who = resolveUser(id, "discord", config.platform)?.username ?? id;
+          sudoNotes.set(scope, SUDO_ON_NOTE(who));
+          await bridge.closeSession(scope, "sudo_on").catch((err) =>
             console.error(`[sudo] closeSession failed for ${scope.slice(0, 60)}:`, err));
-          console.log(`[sudo] ${scope} ended by ${id}`);
+          console.log(`[sudo] on ${scope} by ${who}`);
+        },
+        end: async (scope: string, id: string) => {
+          if (!sudoRegistry.end(scope)) return false;
+          sudoNotes.set(scope, SUDO_OFF_NOTE);
+          await bridge.closeSession(scope, "sudo_off").catch((err) =>
+            console.error(`[sudo] closeSession failed for ${scope.slice(0, 60)}:`, err));
+          console.log(`[sudo] off ${scope} by ${id}`);
           return true;
         },
+        idleMinutes: SUDO_IDLE_MINUTES,
       },
     } : {}),
   });

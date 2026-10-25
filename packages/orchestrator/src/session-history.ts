@@ -173,34 +173,38 @@ export class TranscriptIndex {
   }
 
   private async refreshAgent(agentId: string): Promise<void> {
-    for (const dir of this.projectsDirsFor(agentId)) {
-      if (existsSync(dir)) await this.refreshDir(agentId, dir);
-    }
-  }
-
-  private async refreshDir(agentId: string, projectsDir: string): Promise<void> {
-    const getRow = this.db.prepare("SELECT * FROM transcript_files WHERE session_id = ?");
-    let projects: string[];
-    try { projects = readdirSync(projectsDir); } catch { return; }
-    for (const project of projects) {
-      let names: string[];
-      try { names = readdirSync(join(projectsDir, project)); } catch { continue; }
-      for (const name of names) {
-        if (!name.endsWith(".jsonl")) continue;
-        const path = join(projectsDir, project, name);
-        let size: number;
-        try { size = statSync(path).size; } catch { continue; }
-        const sessionId = name.slice(0, -".jsonl".length);
-        let row = getRow.get(sessionId) as TranscriptMeta | undefined;
-        if (row && row.indexed_bytes === size) continue;
-        if (row && size < row.indexed_bytes) {
-          // Rewritten/truncated — rebuild this session from scratch.
-          this.db.prepare("DELETE FROM transcript_msgs WHERE session_id = ?").run(sessionId);
-          this.db.prepare("DELETE FROM transcript_files WHERE session_id = ?").run(sessionId);
-          row = undefined;
+    // A conversation switched with /sudo has a copy in each run-as user's folder: index only
+    // the newest copy of each session, or the two would keep triggering a rebuild.
+    const newest = new Map<string, { path: string; size: number; mtime: number }>();
+    for (const projectsDir of this.projectsDirsFor(agentId)) {
+      if (!existsSync(projectsDir)) continue;
+      let projects: string[];
+      try { projects = readdirSync(projectsDir); } catch { continue; }
+      for (const project of projects) {
+        let names: string[];
+        try { names = readdirSync(join(projectsDir, project)); } catch { continue; }
+        for (const name of names) {
+          if (!name.endsWith(".jsonl")) continue;
+          const path = join(projectsDir, project, name);
+          let st: { size: number; mtimeMs: number };
+          try { st = statSync(path); } catch { continue; }
+          const sessionId = name.slice(0, -".jsonl".length);
+          const cur = newest.get(sessionId);
+          if (!cur || st.mtimeMs > cur.mtime) newest.set(sessionId, { path, size: st.size, mtime: st.mtimeMs });
         }
-        await this.indexFile(agentId, sessionId, path, size, row);
       }
+    }
+    const getRow = this.db.prepare("SELECT * FROM transcript_files WHERE session_id = ?");
+    for (const [sessionId, { path, size }] of newest) {
+      let row = getRow.get(sessionId) as TranscriptMeta | undefined;
+      if (row && row.indexed_bytes === size) continue;
+      if (row && size < row.indexed_bytes) {
+        // Rewritten/truncated — rebuild this session from scratch.
+        this.db.prepare("DELETE FROM transcript_msgs WHERE session_id = ?").run(sessionId);
+        this.db.prepare("DELETE FROM transcript_files WHERE session_id = ?").run(sessionId);
+        row = undefined;
+      }
+      await this.indexFile(agentId, sessionId, path, size, row);
     }
   }
 

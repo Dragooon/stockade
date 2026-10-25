@@ -155,15 +155,19 @@ export interface DiscordAdapterOptions {
     canApprove: (discordUserId: string) => boolean;
     mentionIds: () => string[];
   };
-  /** /sudo: open a session that runs as the agent's sudo user, in its own thread. */
+  /**
+   * /sudo: toggle the current conversation (channel or thread) into or out of sudo mode,
+   * where the agent runs as its sudo user in the same conversation.
+   */
   sudo?: {
     canSudo: (discordUserId: string) => boolean;
-    /** Register a new sudo scope (a thread) opened by this user. */
-    open: (scope: string, discordUserId: string) => void;
-    /** Idle minutes after which a sudo thread stops accepting messages. */
-    idleMinutes: number;
-    /** End this sudo scope now and close its session; false if it wasn't an active sudo scope. */
+    isActive: (scope: string) => boolean;
+    /** Switch the scope into sudo mode (closes its everyday session; the next message resumes as sudo). */
+    start: (scope: string, discordUserId: string) => Promise<void>;
+    /** Switch the scope back to everyday mode; false if it wasn't in sudo mode. */
     end: (scope: string, discordUserId: string) => Promise<boolean>;
+    /** Idle minutes after which sudo mode turns itself off. */
+    idleMinutes: number;
   };
 }
 
@@ -367,23 +371,18 @@ export class DiscordAdapter {
       ) as SlashCommandBuilder;
     commands.push(agentCmd);
 
-    // /sudo <task> — a session with root access, in its own thread
+    // /sudo [task] — toggle sudo mode for this conversation
     if (this.opts.sudo) {
       commands.push(
         new SlashCommandBuilder()
           .setName("sudo")
-          .setDescription("Open a sudo session (Madge with root access) in a new private thread")
+          .setDescription("Toggle sudo mode for this conversation (Madge with root access); run again to turn it off")
           .addStringOption((opt) =>
             opt
               .setName("task")
-              .setDescription("What Madge should do with root access")
-              .setRequired(true)
+              .setDescription("Optional: what Madge should do once sudo is on")
+              .setRequired(false)
           ) as SlashCommandBuilder
-      );
-      commands.push(
-        new SlashCommandBuilder()
-          .setName("unsudo")
-          .setDescription("End the sudo session in this thread now (Madge loses root here)") as SlashCommandBuilder
       );
     }
 
@@ -485,22 +484,9 @@ export class DiscordAdapter {
       return;
     }
 
-    // ── /sudo <task> ──
+    // ── /sudo [task]: toggle sudo mode for this conversation ──
     if (commandName === "sudo" && this.opts.sudo) {
-      await this.openSudoThread(interaction, serverId, isThread ? parentChannelId : channelId);
-      return;
-    }
-
-    // ── /unsudo ──
-    if (commandName === "unsudo" && this.opts.sudo) {
-      if (!this.opts.sudo.canSudo(userId)) {
-        await interaction.reply({ content: "You don't have sudo.", flags: MessageFlags.Ephemeral });
-        return;
-      }
-      const ended = await this.opts.sudo.end(scope, userId);
-      await interaction.reply(ended
-        ? { content: `🔒 Sudo session ended by <@${userId}>. Madge no longer has root here; start another with /sudo.` }
-        : { content: "This isn't an active sudo thread.", flags: MessageFlags.Ephemeral });
+      await this.toggleSudo(interaction, scope);
       return;
     }
 
@@ -798,53 +784,45 @@ export class DiscordAdapter {
    * standalone threads open with a real message, which messageCreate handles.
    */
   /**
-   * /sudo <task>: open a private thread under the channel, register it as a
-   * sudo scope, and send the task as its first message from the invoking user.
-   * The orchestrator runs every message in a sudo scope as the agent's sudo user.
+   * /sudo [task]: switch this conversation into sudo mode (the agent continues it as its sudo
+   * user), or back out if it's already on. With a task, send it as the first sudo message.
    */
-  private async openSudoThread(
-    interaction: ChatInputCommandInteraction,
-    serverId: string,
-    parentChannelId: string,
-  ): Promise<void> {
+  private async toggleSudo(interaction: ChatInputCommandInteraction, scope: string): Promise<void> {
     const sudo = this.opts.sudo!;
     const userId = interaction.user.id;
     if (!sudo.canSudo(userId)) {
       await interaction.reply({ content: "You don't have sudo.", flags: MessageFlags.Ephemeral });
       return;
     }
-    const task = interaction.options.getString("task", true);
-    const parent = await this.client.channels.fetch(parentChannelId).catch(() => null) as any;
-    if (!parent?.threads?.create) {
-      await interaction.reply({ content: "Can't open a thread here.", flags: MessageFlags.Ephemeral });
+    await interaction.deferReply();
+    if (sudo.isActive(scope)) {
+      await sudo.end(scope, userId);
+      console.log(`[discord] sudo off ${scope} by ${userId}`);
+      await interaction.editReply({ content: `🔒 Sudo off (<@${userId}>): Madge is back to everyday mode in this conversation.` });
       return;
     }
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const name = `sudo: ${task.replace(/\s+/g, " ").slice(0, 90)}`;
-    // Private if the server allows it (root output can be sensitive), else public.
-    const thread = await parent.threads.create({ name, type: ChannelType.PrivateThread, invitable: false, autoArchiveDuration: 1440 })
-      .catch(() => parent.threads.create({ name, autoArchiveDuration: 1440 }));
-    await thread.members?.add(userId).catch(() => {});
-    const scope = discordThreadScope(serverId, parentChannelId, thread.id);
-    sudo.open(scope, userId);
-    console.log(`[discord] sudo thread ${thread.id} opened by ${userId}`);
-    await thread.send(textMessage(
-      `🔐 **Sudo session** opened by <@${userId}>: Madge has root access in this thread.\n` +
-      `Only people with sudo can talk here. It stops after ${sudo.idleMinutes} minutes without messages; start another with /sudo.`,
-    ));
-    await interaction.editReply({ content: `Opened ${thread.toString()}` });
-
-    const member = interaction.member as { displayName?: string } | null;
-    const location = this.describeChannel(thread);
-    this.deliver(thread, {
-      scope,
-      content: task,
-      userId,
-      platform: "discord",
-      userName: member?.displayName ?? interaction.user.globalName ?? interaction.user.username,
-      locationLabel: location.label,
-      ...(location.parentLabel ? { parentLabel: location.parentLabel } : {}),
+    await sudo.start(scope, userId);
+    console.log(`[discord] sudo on ${scope} by ${userId}`);
+    await interaction.editReply({
+      content: `🔐 Sudo on (<@${userId}>): Madge has root in this conversation now. ` +
+        `It turns off after ${sudo.idleMinutes} minutes without messages, or with /sudo again. ` +
+        `Meanwhile only people with sudo can talk to her here.`,
     });
+
+    const task = interaction.options.getString("task");
+    if (task?.trim()) {
+      const member = interaction.member as { displayName?: string } | null;
+      const location = this.describeChannel(interaction.channel);
+      this.deliver(interaction.channel, {
+        scope,
+        content: task,
+        userId,
+        platform: "discord",
+        userName: member?.displayName ?? interaction.user.globalName ?? interaction.user.username,
+        locationLabel: location.label,
+        ...(location.parentLabel ? { parentLabel: location.parentLabel } : {}),
+      });
+    }
   }
 
   private async handleThreadStart(thread: AnyThreadChannel): Promise<void> {

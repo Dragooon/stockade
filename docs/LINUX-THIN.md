@@ -34,12 +34,20 @@ sudoers: `/etc/sudoers.d/50-stockade` (`stockade ALL=(madge,madge-sudo) NOPASSWD
 7. MCP tools that run inside the worker (`agent`, `scheduler`, `sessions`) are the platform's; `send_file`
    reads files as the run-as user; the Discord adapter never reads paths.
 
-## /sudo
+## /sudo (sudo mode)
 
-`/sudo <task>` (users with the `sudo` permission) opens a private thread, registers it in
-`~/.stockade/sudo-scopes.json`, and sends the task as the first message. Every message in that thread runs as
-`sudo_user`; only `sudo` holders may talk there; it stops accepting messages after 60 min idle; scheduled
-tasks never run in it (they fire in an isolated everyday scope). `/unsudo` (sudo holders) ends it immediately and closes its session.
+`/sudo [task]` (users with the `sudo` permission: a `sudoer` role held only by the owner) toggles the
+**current conversation** (any channel or thread) into sudo mode: the scope is registered in
+`~/.stockade/sudo-scopes.json`, its everyday session is closed, and the next message continues the *same*
+conversation as `sudo_user`. `/sudo` again (or 60 min without a message) switches it back. A one-off
+`[platform: sudo mode ON/OFF/timed out]` line tells the agent. While it's on, only `sudo` holders' messages
+reach the session; scheduled tasks never run in it (they fire in an isolated everyday scope).
+
+The conversation's transcript is **moved** between the two users' `~/.claude/projects` on each switch
+(`syncTranscript` in `run-as.ts`: the orchestrator reads with `CAP_DAC_READ_SEARCH`, writes/deletes as the
+owners via sudo), so there is only ever one copy; a failed hand-over errors out instead of resuming a stale
+copy. Trade-off accepted by the owner (25 Oct 2026): context flows both ways (root output stays in the
+conversation; earlier everyday context reaches the root session).
 
 ## Files and units
 

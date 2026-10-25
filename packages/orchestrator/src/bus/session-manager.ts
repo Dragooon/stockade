@@ -37,7 +37,7 @@ import {
 import type { EventBus } from "./event-bus.js";
 import type { ConcurrencyGate } from "./concurrency-gate.js";
 import { appendLog } from "../log.js";
-import { resolveRunAs } from "../run-as.js";
+import { resolveRunAs, syncTranscript } from "../run-as.js";
 import { workerHeaders } from "../workers/auth.js";
 
 const LOG_DIR = join(homedir(), ".stockade", "logs");
@@ -474,6 +474,21 @@ export class SessionManager {
 
       // ── Resume: look up existing SDK session ID ──
       const sdkSessionId = meta.noSession ? null : deps.getSessionId(scope);
+
+      // A conversation switched with /sudo moves between OS users: move its transcript to the
+      // user this session runs as (one transcript per conversation, never two drifting copies).
+      if (runAs && sdkSessionId) {
+        let other: ReturnType<typeof resolveRunAs> | undefined;
+        try { other = resolveRunAs(agentConfig, !runAs.sudo); } catch { /* no sudo user */ }
+        if (other) {
+          // A failed hand-over must not silently resume an older copy (state drift): fail loudly.
+          const r = await syncTranscript(sdkSessionId, runAs, [other]).catch((err) => {
+            deleteCallbackSession(callbackToken);
+            throw new Error(`Couldn't hand this conversation over to ${runAs.user} (${err instanceof Error ? err.message : String(err)}). Try again, or /new to start fresh.`);
+          });
+          if (r === "moved") sessionLog(`[session] transcript ${sdkSessionId.slice(0, 8)} moved to ${runAs.user}`);
+        }
+      }
 
       // ── POST /sessions to worker ──
       // In Redis mode the worker subscribes to stockade:msg:{scope} for messages
