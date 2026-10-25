@@ -472,7 +472,7 @@ export class SessionManager {
           ...am,
           environment: [
             ...(am.environment ?? ["$defaults"]),
-            `Sudo session: runs as OS user ${runAs.user} with passwordless sudo (root on this machine), opened by a human with sudo permission for the task they described. Root actions that serve that task are expected; anything else needs their explicit say-so.`,
+            `Sudo mode: this conversation runs as OS user ${runAs.user} with passwordless sudo (root on this machine), switched on by the owner with /sudo. Root actions that serve what he asks in this conversation are expected; anything else needs his explicit say-so.`,
           ],
         };
       }
