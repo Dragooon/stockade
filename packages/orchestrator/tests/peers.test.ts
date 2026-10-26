@@ -21,6 +21,9 @@ import {
   type PeerDeliveryMeta,
 } from "../src/peers.js";
 import { SudoRegistry } from "../src/sudo.js";
+import { PeerPairings, PAIRING_DENY_MS } from "../src/peer-pairings.js";
+import Database from "better-sqlite3";
+import type { PeerEntry, PeerPrincipal } from "../src/peers.js";
 import type { ChannelResponse } from "../src/types.js";
 
 // ── A small world: two people, their channels, one shared channel, one private thread ──
@@ -593,5 +596,166 @@ describe("mcp__peers__start", () => {
   it("a send to a scope nobody started still finds nothing", async () => {
     const { service } = startWorld();
     expect(await service.sendTool(caller("alice", GENERAL), "peer:ffffffffffff", "hi")).toBe(`Error: ${NOT_FOUND}`);
+  });
+});
+
+// ── Principals (D3b §10): Kepler with its own identity, working for alice here ──
+
+describe("principals", () => {
+  const KEPLER: PeerPrincipal = {
+    name: "kepler", label: "Kepler", host: "MacBook", forPerson: "alice",
+    viewer: { userId: "alice", userPlatform: "discord" },
+  };
+  const kepler = (principal: PeerPrincipal = KEPLER): PeerCaller =>
+    ({ scope: "principal:kepler", agentId: "kepler", userId: "kepler", userPlatform: "api", hops: 0, principal });
+  const KREF = peerRef("principal:kepler");
+
+  /** Kepler may run main only; asks are answered by `answer` (default: allow). */
+  function principalWorld(overrides: Partial<PeerDeps> = {}, preApproved: string[] = []) {
+    let answer: (allowed: boolean | null) => void = () => {};
+    const asks: Array<{ target: PeerEntry; preview: string }> = [];
+    const bound = new Map<string, { agentId: string; person: string; origin: string }>();
+    let clock = NOW;
+    const pairings = new PeerPairings(new Database(":memory:"), { kepler: preApproved }, () => clock);
+    const w = world({
+      canUseAgent: (userId, _platform, agentId) => agentId === "main" && ["alice", "kepler"].includes(userId),
+      createPeerScope: (agentId, person, origin) => {
+        const scope = `peer:${bound.size.toString(16).padStart(12, "0")}`;
+        bound.set(scope, { agentId, person, origin });
+        return scope;
+      },
+      describe: async (scope) => (bound.has(scope) ? `peer session ${scope.split(":")[1]} of ${bound.get(scope)!.person}` : LABELS[scope] ?? scope),
+      // Started scopes are known, and visible to the person they're bound to.
+      knownScopes: () => [...Object.keys(LABELS), ...bound.keys()],
+      canView: async (viewer, scope) => bound.get(scope)?.person === viewer.userId || (CAN_SEE[viewer.userId] ?? []).includes(scope),
+      pairings,
+      askPairing: (_principal, target, preview) => {
+        asks.push({ target, preview });
+        return new Promise((resolve) => { answer = resolve; });
+      },
+      ...overrides,
+    });
+    return {
+      ...w, asks, bound, pairings,
+      answer: async (allowed: boolean | null) => { answer(allowed); await settle(); await settle(); },
+      advance: (ms: number) => { clock += ms; w.advance(ms); },
+    };
+  }
+
+  it("lists what its person sees, and names itself", async () => {
+    const { service } = principalWorld();
+    const listing = await service.listTool(kepler());
+    expect(listing.split("\n")[0]).toBe(`This session is Kepler [${KREF}].`);
+    expect(listing).toContain(`#alice [${peerRef(ALICE_ROOM)}]`);
+    expect(listing).not.toContain("#bob");
+  });
+
+  it("holds the first message of a new pairing, then delivers it as itself once allowed", async () => {
+    const { service, deliveries, asks, answer } = principalWorld();
+    expect(await service.sendTool(kepler(), peerRef(GENERAL), "hello there")).toBe(
+      `held: #general [${peerRef(GENERAL)}] (a new pairing: waiting for alice's approval; the outcome comes to your inbox)`);
+    expect(asks.map((a) => [a.target.scope, a.preview])).toEqual([[GENERAL, "hello there"]]);
+    expect(deliveries).toHaveLength(0);
+    expect(await service.sendTool(kepler(), peerRef(GENERAL), "again")).toBe(`Error: an earlier message to #general [${peerRef(GENERAL)}] is waiting for alice's approval`);
+
+    await answer(true);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].text.split("\n")[0]).toBe(`[peer: from Kepler [${KREF}] · agent kepler · on behalf of kepler · host MacBook]`);
+    expect(deliveries[0].meta).toEqual({ agentId: "main", userId: "kepler", userPlatform: "api", hops: 1, fromSudo: false, principal: "kepler" });
+    expect(service.drainInbox("kepler")).toEqual([
+      { at: new Date(NOW).toISOString(), kind: "notice", text: `alice allowed messages to #general [${peerRef(GENERAL)}]: your message was delivered.` },
+    ]);
+    expect(service.drainInbox("kepler")).toEqual([]);
+
+    // Allowed: the next message goes straight through.
+    expect(await service.sendTool(kepler(), peerRef(GENERAL), "and more")).toBe(`delivered: #general [${peerRef(GENERAL)}]`);
+    expect(asks).toHaveLength(1);
+  });
+
+  it("a denied (or unanswered) pairing refuses the pair for 24 hours", async () => {
+    const { service, deliveries, answer, advance, asks } = principalWorld();
+    await service.sendTool(kepler(), peerRef(GENERAL), "hi");
+    await answer(false);
+    expect(deliveries).toHaveLength(0);
+    expect(service.drainInbox("kepler")[0].text).toBe(`alice didn't allow messages to #general [${peerRef(GENERAL)}] (denied or unanswered): refused for 24 hours.`);
+    expect(await service.sendTool(kepler(), peerRef(GENERAL), "please")).toBe(
+      `Error: alice denied messages to #general [${peerRef(GENERAL)}] until ${new Date(NOW + PAIRING_DENY_MS).toISOString()}`);
+    advance(PAIRING_DENY_MS);
+    expect(await service.sendTool(kepler(), peerRef(GENERAL), "a day later")).toMatch(/^held: /);
+    expect(asks).toHaveLength(2);
+  });
+
+  it("with nowhere to ask, tells it and asks again next time", async () => {
+    const { service, answer, asks } = principalWorld();
+    await service.sendTool(kepler(), peerRef(GENERAL), "hi");
+    await answer(null);
+    expect(service.drainInbox("kepler")[0].text).toMatch(/there's nowhere to ask alice about it/);
+    expect(await service.sendTool(kepler(), peerRef(GENERAL), "hi")).toMatch(/^held: /);
+    expect(asks).toHaveLength(2);
+  });
+
+  it("goes straight through to pre-approved sessions", async () => {
+    const { service, deliveries, asks } = principalWorld({}, [GENERAL]);
+    expect(await service.sendTool(kepler(), peerRef(GENERAL), "hi")).toMatch(/^delivered: /);
+    expect(deliveries).toHaveLength(1);
+    expect(asks).toHaveLength(0);
+  });
+
+  it("is never in sudo mode: refused by a sudo-mode scope, including one that went sudo while it waited", async () => {
+    const { service, sudo, deliveries, answer } = principalWorld({ runsAsRoot: () => true }, [ALICE_ROOM]);
+    sudo.open(ALICE_ROOM, "discord:alice");
+    expect(await service.sendTool(kepler(), peerRef(ALICE_ROOM), "hi")).toBe(`Error: ${SUDO_TARGET}`);
+    await service.sendTool(kepler(), peerRef(GENERAL), "hi");
+    sudo.open(GENERAL, "discord:alice");
+    await answer(true);
+    expect(deliveries).toHaveLength(0);
+    expect(service.drainInbox("kepler").map((item) => item.text)).toEqual([`Your message to #general [${peerRef(GENERAL)}] wasn't delivered: ${SUDO_TARGET}.`]);
+  });
+
+  it("must be able to use the target's agent itself", async () => {
+    const { service, asks } = principalWorld({ canUseAgent: (userId) => userId === "alice" });
+    expect(await service.sendTool(kepler(), peerRef(GENERAL), "hi")).toBe("Error: kepler can't use agent main");
+    expect(asks).toHaveLength(0);
+  });
+
+  it("gets replies in its inbox, and principals can't message each other", async () => {
+    const { service } = principalWorld({}, [GENERAL]);
+    await service.sendTool(kepler(), peerRef(GENERAL), "status?");
+    expect(await service.sendTool(caller("alice", GENERAL, 1), `Kepler [${KREF}]`, "all green")).toBe(`delivered: Kepler [${KREF}]`);
+    expect(service.drainInbox("kepler")).toEqual([{
+      at: new Date(NOW).toISOString(), kind: "message", from: `#general [${peerRef(GENERAL)}]`, agent: "main", onBehalfOf: "alice", text: "all green",
+    }]);
+    // Only sessions it messaged can reply, and other sessions don't see it.
+    expect(await service.sendTool(caller("alice", ALICE_ROOM), `Kepler [${KREF}]`, "hi")).toBe(`Error: ${NOT_FOUND}`);
+    expect(await service.listTool(caller("alice", GENERAL))).not.toContain("Kepler");
+  });
+
+  it("starts sessions bound to its person with origin kepler, already paired", async () => {
+    const { service, bound, deliveries, asks } = principalWorld();
+    expect(await service.startTool(kepler(), undefined, undefined, "hi")).toBe("Error: `agent` is required");
+    const text = await service.startTool(kepler(), "macbook", "main", "hi");
+    expect(text).toBe(`Error: ${REMOTE_START}`);
+    expect(await service.startTool(kepler(), undefined, "main", "build the thing")).toMatch(/^started: peer session 000000000000 of alice \[[0-9a-f]{6}\] · agent main · scope peer:000000000000\. It's an ordinary session of alice:/);
+    expect([...bound]).toEqual([["peer:000000000000", { agentId: "main", person: "alice", origin: "kepler" }]]);
+    expect(deliveries[0].meta).toMatchObject({ userId: "kepler", principal: "kepler", fromSudo: false });
+    expect(await service.sendTool(kepler(), peerRef("peer:000000000000"), "next step")).toBe(
+      `delivered: peer session 000000000000 of alice [${peerRef("peer:000000000000")}]`);
+    expect(asks).toHaveLength(0);
+    // The started session replies to Kepler's from value.
+    expect(await service.sendTool({ ...caller("alice", "peer:000000000000", 1), userId: "kepler", userPlatform: "api" }, `Kepler [${KREF}]`, "done")).toMatch(/^delivered/);
+    expect(service.drainInbox("kepler")).toHaveLength(1);
+  });
+
+  it("uses its default agent for starts when configured", async () => {
+    const { service } = principalWorld();
+    expect(await service.startTool(kepler({ ...KEPLER, defaultAgent: "main" }), undefined, undefined, "hi")).toMatch(/· agent main ·/);
+  });
+
+  it("tells it when a delivered message was dropped", async () => {
+    const { service, replies } = principalWorld({}, [GENERAL]);
+    await service.sendTool(kepler(), peerRef(GENERAL), "hi");
+    replies.get(GENERAL)!({ text: "", dropped: "its sudo mode changed while it waited" });
+    await settle();
+    expect(service.drainInbox("kepler")[0].text).toBe(`Your message to #general [${peerRef(GENERAL)}] wasn't delivered: its sudo mode changed while it waited.`);
   });
 });

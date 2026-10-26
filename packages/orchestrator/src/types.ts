@@ -167,6 +167,20 @@ export interface PlatformConfig {
   gatekeeper?: GatekeeperConfig;
   redis?: { url: string; session_idle_timeout_sec?: number };
   controller?: ControllerConfig;
+  peers?: PeersConfig;
+}
+
+/** Peer principals (D3b §10): agents outside Stockade with their own identity and token. */
+export interface PeersConfig {
+  principals: Array<{
+    name: string;
+    label: string;
+    host: string;
+    for: string;
+    token_file: string;
+    default_agent?: string;
+    pre_approved: string[];
+  }>;
 }
 
 /** Controller API (D3b): one token per paired person; the token lives in token_file. */

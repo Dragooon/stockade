@@ -12,7 +12,8 @@ import { checkAccess, hasPermission, resolveUser } from "./rbac.js";
 import { SudoRegistry } from "./sudo.js";
 import { agentTranscriptDirs } from "./run-as.js";
 import { initSessionsTable, getSessionId, setSessionId, deleteSession, getAllSessions } from "./sessions.js";
-import { PeerService, escapePeerText } from "./peers.js";
+import { PeerService, escapePeerText, type PeerCaller } from "./peers.js";
+import { PeerPairings } from "./peer-pairings.js";
 import {
   initParticipantsTable, recordParticipant, backfillParticipants, hasParticipantBackfill,
   personParticipation, scopeParticipants,
@@ -22,6 +23,7 @@ import { ControllerService } from "./controller.js";
 import { TranscriptReader } from "./controller-transcript.js";
 import { ControllerApprovals } from "./controller-approvals.js";
 import { mountControllerRoutes } from "./api/controller-routes.js";
+import { mountPeerPrincipalRoutes } from "./api/peer-principal-routes.js";
 import { hostname } from "node:os";
 import {
   initSessionHistoryTable,
@@ -448,6 +450,11 @@ function peerAgentForScope(scope: string): string | null {
   return sessionManager.get(scope)?.agentId ?? null;
 }
 
+// Principals' pairing decisions (D3b §10), with the owner's standing approvals from config.
+const peerPairings = new PeerPairings(db, Object.fromEntries(
+  (config.platform.peers?.principals ?? []).map((principal) => [principal.name, principal.pre_approved]),
+));
+
 const peers = new PeerService({
   knownScopes: () => [...getAllSessions(db).map((r) => r.scope), ...sessionManager.liveScopes()],
   agentForScope: peerAgentForScope,
@@ -472,8 +479,9 @@ const peers = new PeerService({
     if (sudo && !meta.fromSudo) throw new Error("target is in sudo mode");
     // Approvals go to the target's own channel and its usual approvers, never to the sender.
     const person = resolveUser(meta.userId, meta.userPlatform, config.platform);
-    // A peer insert acts for the person but isn't them writing here: platform "peer".
-    if (person) noteParticipant(scope, person.username, "peer");
+    // A peer insert acts for the person but isn't them writing here: platform "peer". A principal
+    // (Kepler) participates as itself, platform "api" (D3b §10).
+    if (person) noteParticipant(scope, person.username, meta.principal ? "api" : "peer");
     const discordId = meta.userPlatform === "discord"
       ? meta.userId
       : person ? config.platform.rbac.users[person.username]?.identities.discord : undefined;
@@ -511,10 +519,28 @@ const peers = new PeerService({
   // mcp__peers__start (D3b §8): a fresh peer:<id> scope for the acting person.
   canUseAgent: (userId, userPlatform, agentId) =>
     !!config.agents.agents[agentId] && checkAccess(userId, userPlatform, agentId, config.platform),
-  createPeerScope: (agentId, person) => {
+  createPeerScope: (agentId, person, origin) => {
     const scope = `peer:${randomBytes(6).toString("hex")}`;
-    bindScope(db, { scope, agentId, person, origin: "peer" });
+    bindScope(db, { scope, agentId, person, origin });
     return scope;
+  },
+  pairings: peerPairings,
+  // A principal's first message to a session: peer_conversation, asked where the session's
+  // approvals go (the app for app:/peer:, the channel for Discord, mirrored read-only in the app).
+  askPairing: async (principal, target, preview) => {
+    const input = {
+      request: `${principal.label} wants to message ${target.label}. Allow?`,
+      from: principal.label,
+      host: principal.host,
+      to: target.label,
+      message: preview,
+    };
+    if (appDecidedScope(target.scope)) return controllerApprovals.ask(target.scope, "peer_conversation", input, { agentId: principal.name });
+    if (!target.scope.startsWith("discord:") || !discordAdapter) return null;
+    const discordId = config.platform.rbac.users[principal.forPerson]?.identities.discord;
+    const channel = await discordAdapter.approvalChannelForScope(target.scope, discordId, principal.name);
+    if (!channel) return null;
+    return controllerApprovals.mirror(channel, target.scope, "discord").askUser("peer_conversation", input, undefined, principal.name);
   },
   hostName: hostname().charAt(0).toUpperCase() + hostname().slice(1),
   now: () => Date.now(),
@@ -599,6 +625,23 @@ function sendFromController(scope: string, text: string, person: string, userId:
   return state;
 }
 
+/** A bearer token from its file (at least 32 characters), or null with the reason logged. */
+function readTokenFile(file: string, what: string): string | null {
+  let token: string;
+  try {
+    token = readFileSync(file, "utf-8").trim();
+    if (statSync(file).mode & 0o004) console.warn(`[tokens] ${file} is world-readable; make it 0640`);
+  } catch (err) {
+    console.error(`[tokens] ${what} skipped: can't read ${file}:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+  if (token.length < 32) {
+    console.error(`[tokens] ${what} skipped: ${file} holds fewer than 32 characters`);
+    return null;
+  }
+  return token;
+}
+
 for (const entry of config.platform.controller?.tokens ?? []) {
   const user = config.platform.rbac.users[entry.person];
   const identity = user && Object.entries(user.identities)[0];
@@ -606,20 +649,8 @@ for (const entry of config.platform.controller?.tokens ?? []) {
     console.error(`[controller] token for "${entry.person}" skipped: no such user with an identity in rbac.users`);
     continue;
   }
-  let token: string;
-  try {
-    token = readFileSync(entry.token_file, "utf-8").trim();
-    if (statSync(entry.token_file).mode & 0o004) {
-      console.warn(`[controller] ${entry.token_file} is world-readable; make it 0640`);
-    }
-  } catch (err) {
-    console.error(`[controller] token for "${entry.person}" skipped: can't read ${entry.token_file}:`, err instanceof Error ? err.message : err);
-    continue;
-  }
-  if (token.length < 32) {
-    console.error(`[controller] token for "${entry.person}" skipped: ${entry.token_file} holds fewer than 32 characters`);
-    continue;
-  }
+  const token = readTokenFile(entry.token_file, `controller token for "${entry.person}"`);
+  if (!token) continue;
   const [userPlatform, userId] = identity;
   controllerServices.set(token, new ControllerService({
     person: entry.person,
@@ -671,6 +702,40 @@ for (const entry of config.platform.controller?.tokens ?? []) {
   console.log(`[controller] token for "${entry.person}" loaded`);
 }
 
+// Peer principals (D3b §10): each acts as its own RBAC user (identity platform api), never with
+// approve or sudo, and reaches peers over /peers/* with its token.
+const principalCallers = new Map<string, PeerCaller>();
+for (const entry of config.platform.peers?.principals ?? []) {
+  const apiId = config.platform.rbac.users[entry.name]?.identities.api;
+  const forIdentity = Object.entries(config.platform.rbac.users[entry.for]?.identities ?? {})[0];
+  if (!apiId || !forIdentity) {
+    console.error(`[peers] principal "${entry.name}" skipped: it needs an rbac user with an api identity, and "${entry.for}" needs an identity`);
+    continue;
+  }
+  if (hasPermission(apiId, "api", "approve", config.platform) || hasPermission(apiId, "api", "sudo", config.platform)) {
+    console.error(`[peers] principal "${entry.name}" skipped: its role must not have approve or sudo`);
+    continue;
+  }
+  const token = readTokenFile(entry.token_file, `principal "${entry.name}"`);
+  if (!token) continue;
+  principalCallers.set(token, {
+    scope: `principal:${entry.name}`,
+    agentId: entry.name,
+    userId: apiId,
+    userPlatform: "api",
+    hops: 0,
+    principal: {
+      name: entry.name,
+      label: entry.label,
+      host: entry.host,
+      forPerson: entry.for,
+      viewer: { userId: forIdentity[1], userPlatform: forIdentity[0] },
+      ...(entry.default_agent && { defaultAgent: entry.default_agent }),
+    },
+  });
+  console.log(`[peers] principal "${entry.name}" loaded (for ${entry.for})`);
+}
+
 const stopCallbackServer = startCallbackServer(
   workerManager,
   bridge,
@@ -698,10 +763,13 @@ const stopCallbackServer = startCallbackServer(
     const person = resolveUser(userId, userPlatform, config.platform);
     if (person) noteParticipant(scope, person.username, "api");
   },
-  (app) => mountControllerRoutes(app, {
-    services: controllerServices,
-    controller: { id: hostname().toLowerCase(), name: hostname().charAt(0).toUpperCase() + hostname().slice(1) },
-  }),
+  (app) => {
+    mountControllerRoutes(app, {
+      services: controllerServices,
+      controller: { id: hostname().toLowerCase(), name: hostname().charAt(0).toUpperCase() + hostname().slice(1) },
+    });
+    mountPeerPrincipalRoutes(app, { callers: principalCallers, peers });
+  },
 );
 
 /**

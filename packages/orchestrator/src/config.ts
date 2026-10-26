@@ -48,6 +48,28 @@ const controllerConfigSchema = z.object({
   })).default([]),
 });
 
+/**
+ * Peer principals (D3b §10): agents outside Stockade with an identity of their own, e.g. Kepler.
+ * Each is an RBAC user (identity platform `api`) and reaches peers over /peers/* with its token.
+ */
+const peersConfigSchema = z.object({
+  principals: z.array(z.object({
+    /** RBAC username; the user needs an `api` identity. */
+    name: z.string(),
+    /** Shown as the sender, e.g. "Kepler". */
+    label: z.string(),
+    /** The machine it runs on, shown in the header, e.g. "MacBook". */
+    host: z.string(),
+    /** The person it works for (RBAC username): visibility, pairing approvals, owner of its starts. */
+    for: z.string(),
+    token_file: z.string(),
+    /** Agent its starts run when it names none. */
+    default_agent: z.string().optional(),
+    /** Target scopes it may message without asking (the owner's standing approvals). */
+    pre_approved: z.array(z.string()).default([]),
+  })).default([]),
+});
+
 const agentConfigSchema = z.object({
   model: z.string(),
   /** Display name, e.g. in the controller app (default: the agent id). */
@@ -141,6 +163,7 @@ const unifiedConfigSchema = z.object({
     session_idle_timeout_sec: z.number().int().positive().optional(),
   }).optional(),
   controller: controllerConfigSchema.optional(),
+  peers: peersConfigSchema.optional(),
 });
 
 // --- Environment variable substitution ---
@@ -245,6 +268,7 @@ export function loadConfig(configDir: string, projectRoot?: string): {
     gatekeeper: parsed.gatekeeper,
     redis: parsed.redis,
     controller: parsed.controller,
+    peers: parsed.peers,
   };
 
   // Resolve paths with smart defaults

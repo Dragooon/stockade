@@ -503,6 +503,31 @@ controller:
     });
   });
 
+  it("parses peer principals (D3b §10), with pre_approved defaulting to none", () => {
+    writeYaml(tmpDir, "config.yaml", VALID_CONFIG + `
+peers:
+  principals:
+    - name: kepler
+      label: Kepler
+      host: MacBook
+      for: alice
+      token_file: /tmp/kepler.token
+      default_agent: main
+    - name: other
+      label: Other
+      host: Elsewhere
+      for: alice
+      token_file: /tmp/other.token
+      pre_approved: ["discord:g:1"]
+`);
+    expect(loadConfig(tmpDir).platform.peers).toEqual({
+      principals: [
+        { name: "kepler", label: "Kepler", host: "MacBook", for: "alice", token_file: "/tmp/kepler.token", default_agent: "main", pre_approved: [] },
+        { name: "other", label: "Other", host: "Elsewhere", for: "alice", token_file: "/tmp/other.token", pre_approved: ["discord:g:1"] },
+      ],
+    });
+  });
+
   it("leaves the controller unset when config has none", () => {
     writeYaml(tmpDir, "config.yaml", VALID_CONFIG);
     expect(loadConfig(tmpDir).platform.controller).toBeUndefined();
