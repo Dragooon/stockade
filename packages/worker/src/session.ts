@@ -167,6 +167,10 @@ export class WorkerSession {
     // then is answered by the next result, and a result nobody waits on is a follow-up.
     let replyCid = "";
     let replied = true;
+    // Messages pushed into the running query after its reply. If the query ends without
+    // another result, the SDK never read them: they start the next query instead of being lost.
+    let afterReply: string[] = [];
+    let queryFailed = false;
 
     const messageHandler = (msg: { correlationId: string; text: string }) => {
       currentCorrelationId = msg.correlationId;
@@ -179,7 +183,9 @@ export class WorkerSession {
         if (replied) {
           replyCid = msg.correlationId;
           replied = false;
+          afterReply = [];
         }
+        afterReply.push(msg.text);
       } else {
         // No query running — enqueue and wake the idle loop.
         pendingMessages.push(msg.text);
@@ -218,6 +224,8 @@ export class WorkerSession {
       this._queryChannel = queryChannel;
       replyCid = queryCorrelationId;
       replied = false;
+      afterReply = [];
+      queryFailed = false;
 
       // Collapse pending messages into a single user input so a burst of chat
       // messages produces one model turn instead of N. The bridge already
@@ -240,6 +248,7 @@ export class WorkerSession {
           followup = replied;
           if (followup) cid = `followup:${randomUUID()}`;
           replied = true;
+          afterReply = [];
         }
 
         // For result events with files, embed base64 content so the orchestrator
@@ -299,6 +308,7 @@ export class WorkerSession {
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error(`[worker] Query failed for scope ${scope.slice(0, 40)}:`, errMsg);
+        queryFailed = true;
         bridge.publishEvent(scope, {
           kind: "evt:error",
           scope,
@@ -310,6 +320,14 @@ export class WorkerSession {
         queryRunning = false;
         activeChannel = null;
         this._queryChannel = null;
+        // The query ended between its reply and reading what arrived after it: nothing
+        // answers those messages yet, so they go first into the next query (answering replyCid).
+        if (!replied && !queryFailed && afterReply.length > 0) {
+          console.log(`[worker] requeue ${afterReply.length} message(s) that arrived after the reply cid=${replyCid.slice(0, 8)}`);
+          pendingMessages.unshift(...afterReply);
+          currentCorrelationId = replyCid;
+        }
+        afterReply = [];
         replied = true;
         queryChannel.close(); // Terminate any lingering SDK read-ahead iterator.
       }
