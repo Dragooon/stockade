@@ -11,12 +11,15 @@
  *
  * Read (§5): raw records when every participant is P, otherwise the text-only projection.
  * Written (§4, §7): messages into writable (app:/peer:) scopes only, and new app: scopes.
+ * Approvals (§6): those in listed scopes reach the app; only app:/peer: ones are decided there.
  */
 
 import { createHash } from "node:crypto";
 import type { Participant } from "./participants.js";
 import type { ScopeBinding } from "./scope-bindings.js";
 import { projectTranscript, transcriptRecordId, withRecordIds, type TranscriptRecord } from "./controller-transcript.js";
+import type { ApprovalBehaviour, ApprovalHubEvent, ControllerApproval, ControllerApprovals } from "./controller-approvals.js";
+import type { GatekeeperReview } from "./gatekeeper.js";
 
 export type ControllerSessionStatus = "busy" | "idle" | "closed";
 export type ControllerOrigin = "discord" | "app" | "peer" | "terminal";
@@ -49,13 +52,28 @@ export interface ControllerAgent {
 }
 
 /** Capabilities the Stockade source advertises; grows as D3b units land (d3b-5/6/7). */
-export const CONTROLLER_CAPABILITIES = ["list", "transcript", "send", "new_session"] as const;
+export const CONTROLLER_CAPABILITIES = ["list", "transcript", "send", "new_session", "decide"] as const;
 
 export type ControllerEvent =
   /** A visible session's state changed (turn started or ended, session opened or closed). */
   | { type: "session"; session: ControllerSession }
   /** A new record in a visible session's current transcript (raw or projected, as GET transcript serves it). */
-  | { type: "transcript"; id: string; claudeSessionId: string; recordId: string; record: TranscriptRecord };
+  | { type: "transcript"; id: string; claudeSessionId: string; recordId: string; record: TranscriptRecord }
+  /** A tool call in a visible session waits for approval. answerIn set = answered there, not in the app. */
+  | {
+    type: "approval";
+    id: string;
+    sessionId: string;
+    scope: string;
+    tool: string;
+    input: Record<string, unknown>;
+    receivedAt: string;
+    agentId: string | null;
+    review: GatekeeperReview | null;
+    answerIn: "discord" | "terminal" | null;
+  }
+  /** That approval was answered (anywhere) or timed out. */
+  | { type: "decision"; id: string; sessionId: string; scope: string; behaviour: ApprovalBehaviour };
 
 /** A refusal the routes turn into an HTTP status and `{error: code}`. */
 export class ControllerError extends Error {
@@ -104,6 +122,10 @@ export interface ControllerDeps {
   createAppScope: (agentId: string) => string;
   /** Transcript polling interval for live sessions (default TRANSCRIPT_FOLLOW_MS). */
   followMs?: number;
+  /** The process's approvals hub; without it the service has no approvals. */
+  approvals?: ControllerApprovals;
+  /** Does P hold `approve`? Without it P sees approvals but can't decide them. */
+  canApprove?: () => boolean;
 }
 
 const API_UUID_SCOPE = /^api:[^:]+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -127,8 +149,19 @@ export class ControllerService {
   /** scope → the running transcript check, so two checks never send a record twice. */
   private following = new Map<string, Promise<void>>();
   private followTimer: ReturnType<typeof setInterval> | null = null;
+  /** Approval events in hub order, so a decision never overtakes its approval. */
+  private approvalQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly deps: ControllerDeps) {}
+  constructor(private readonly deps: ControllerDeps) {
+    deps.approvals?.subscribe((event) => {
+      // Only streams open when it happened: a later one gets the waiting approvals replayed.
+      const listeners = [...this.listeners];
+      if (listeners.length === 0) return;
+      this.approvalQueue = this.approvalQueue
+        .then(() => this.forwardApproval(event, listeners))
+        .catch((err) => console.error("[controller] approval event failed:", err));
+    });
+  }
 
   get person(): string {
     return this.deps.person;
@@ -219,6 +252,50 @@ export class ControllerService {
     const session = await this.row(scope);
     if (!session) throw new Error(`new app scope is not listed: ${scope.slice(0, 60)}`);
     return session;
+  }
+
+  /** Approvals waiting in P's listed scopes, as events: sent to each new event stream. */
+  async pendingApprovals(): Promise<ControllerEvent[]> {
+    const visible: ControllerApproval[] = [];
+    for (const approval of this.deps.approvals?.list() ?? []) {
+      if (await this.listed(approval.scope)) visible.push(approval);
+    }
+    // Drop any answered while listed() ran, so a replay never follows its decision.
+    return visible.filter((approval) => this.deps.approvals?.get(approval.id)).map(approvalEvent);
+  }
+
+  /** POST approvals/:id: P allows or denies an app:/peer: approval. */
+  async decide(id: string, body: { behaviour?: unknown; behavior?: unknown }): Promise<{ decided: true }> {
+    const approval = this.deps.approvals?.get(id);
+    if (!approval || !(await this.listed(approval.scope))) {
+      throw new ControllerError(404, "not_found", "This approval was already answered");
+    }
+    if (approval.answerIn) {
+      throw new ControllerError(403, "read_only", `This approval is answered in ${approval.answerIn === "discord" ? "Discord" : "the terminal"}.`);
+    }
+    const behaviour = body.behaviour ?? body.behavior;
+    if (behaviour !== "allow" && behaviour !== "deny") {
+      throw new ControllerError(400, "invalid_behaviour", "behaviour must be allow or deny");
+    }
+    if (!this.deps.canApprove?.()) throw new ControllerError(403, "not_approver", "You can't approve actions here.");
+    const result = this.deps.approvals!.decide(id, behaviour);
+    if (result === "not_found") throw new ControllerError(404, "not_found", "This approval was already answered");
+    if (result === "read_only") throw new ControllerError(403, "read_only");
+    return { decided: true };
+  }
+
+  private async forwardApproval(event: ApprovalHubEvent, listeners: Array<(event: ControllerEvent) => void>): Promise<void> {
+    if (!(await this.listed(event.approval.scope))) return;
+    const out: ControllerEvent = event.type === "approval"
+      ? approvalEvent(event.approval)
+      : {
+        type: "decision",
+        id: event.approval.id,
+        sessionId: controllerSessionId(event.approval.scope),
+        scope: event.approval.scope,
+        behaviour: event.behaviour,
+      };
+    for (const listener of listeners) listener(out);
   }
 
   /**
@@ -339,6 +416,21 @@ export class ControllerService {
     }
     return null;
   }
+}
+
+function approvalEvent(approval: ControllerApproval): ControllerEvent {
+  return {
+    type: "approval",
+    id: approval.id,
+    sessionId: controllerSessionId(approval.scope),
+    scope: approval.scope,
+    tool: approval.tool,
+    input: approval.input,
+    receivedAt: approval.receivedAt,
+    agentId: approval.agentId,
+    review: approval.review,
+    answerIn: approval.answerIn,
+  };
 }
 
 function checkedText(text: unknown): string {

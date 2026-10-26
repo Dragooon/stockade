@@ -6,6 +6,7 @@ import { initScopeBindingsTable, bindScope, getScopeBinding, scopesBoundTo } fro
 import { ControllerService, controllerSessionId, type ControllerDeps, type ControllerEvent } from "../src/controller.js";
 import type { TranscriptRecord } from "../src/controller-transcript.js";
 import { mountControllerRoutes } from "../src/api/controller-routes.js";
+import { ControllerApprovals } from "../src/controller-approvals.js";
 
 const NOW = Date.parse("2026-10-26T12:00:00.000Z");
 const DISCORD = "discord:g:general";
@@ -256,7 +257,7 @@ describe("controller routes", () => {
     const app = server(new Map([[TOKEN, w.service]]));
 
     expect(await (await get(app, "/controller/info", TOKEN)).json()).toEqual({
-      controller: { id: "mustafar", name: "Mustafar", kind: "stockade", capabilities: ["list", "transcript", "send", "new_session"] },
+      controller: { id: "mustafar", name: "Mustafar", kind: "stockade", capabilities: ["list", "transcript", "send", "new_session", "decide"] },
       person: "shitiz",
     });
     const sessions = await (await get(app, "/controller/sessions", TOKEN)).json() as Array<{ id: string; scope: string }>;
@@ -548,6 +549,147 @@ describe("controller routes: d3b-4", () => {
     await readUntil("event: transcript");
     await readUntil("\n\n");
     expect(text).toMatch(/event: transcript\ndata: \{"type":"transcript"[^\n]*"recordId":"u9"[^\n]*\nid: u9\n/);
+    abort.abort();
+    await reader.cancel().catch(() => {});
+  });
+});
+
+describe("ControllerService: approvals (§6)", () => {
+  function approvalWorld(canApprove = true) {
+    let next = 0;
+    const approvals = new ControllerApprovals({ newId: () => `ap${++next}`, now: () => NOW });
+    const w = world({ approvals, canApprove: () => canApprove });
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    bindScope(w.db, { scope: OTHER_APP, agentId: "main", person: "urvashi", origin: "app" });
+    recordParticipant(w.db, DISCORD, "shitiz", "discord");
+    const events: ControllerEvent[] = [];
+    w.service.subscribe((event) => events.push(event));
+    const settled = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
+    return { ...w, approvals, events, settled };
+  }
+  const discordChannel = () => {
+    let answer!: (approved: boolean) => void;
+    return {
+      channel: { askUser: () => new Promise<boolean>((resolve) => { answer = resolve; }), notifyAutoApproved: async () => {} },
+      answer: (approved: boolean) => answer(approved),
+    };
+  };
+
+  it("forwards approvals and decisions in P's listed scopes only, in order", async () => {
+    const w = approvalWorld();
+    const mine = w.approvals.ask(APP, "Bash", { command: "ls" }, { agentId: "main" });
+    void w.approvals.ask(OTHER_APP, "Bash", {});
+    await w.settled();
+    expect(w.events).toEqual([{
+      type: "approval",
+      id: "ap1",
+      sessionId: controllerSessionId(APP),
+      scope: APP,
+      tool: "Bash",
+      input: { command: "ls" },
+      receivedAt: new Date(NOW).toISOString(),
+      agentId: "main",
+      review: null,
+      answerIn: null,
+    }]);
+    expect(await w.service.decide("ap1", { behaviour: "allow" })).toEqual({ decided: true });
+    expect(await mine).toBe(true);
+    await w.settled();
+    expect(w.events.at(-1)).toEqual({ type: "decision", id: "ap1", sessionId: controllerSessionId(APP), scope: APP, behaviour: "allow" });
+    expect(w.events.filter((e) => e.scope === OTHER_APP)).toEqual([]);
+  });
+
+  it("lists pending approvals for a new stream, without others' or answered ones", async () => {
+    const w = approvalWorld();
+    void w.approvals.ask(APP, "Bash", {});
+    void w.approvals.ask(OTHER_APP, "Bash", {});
+    void w.approvals.ask(APP, "Write", {});
+    w.approvals.decide("ap3", "deny");
+    expect((await w.service.pendingApprovals()).map((e) => e.id)).toEqual(["ap1"]);
+  });
+
+  it("shows Discord approvals read-only (403 read_only) and their channel answer as the decision", async () => {
+    const w = approvalWorld();
+    const { channel, answer } = discordChannel();
+    const asked = w.approvals.mirror(channel, DISCORD, "discord").askUser("Bash", {});
+    await w.settled();
+    expect(w.events[0]).toMatchObject({ type: "approval", id: "ap1", answerIn: "discord" });
+    await expect(w.service.decide("ap1", { behaviour: "allow" })).rejects.toMatchObject({ status: 403, code: "read_only" });
+    answer(false);
+    expect(await asked).toBe(false);
+    await w.settled();
+    expect(w.events.at(-1)).toMatchObject({ type: "decision", id: "ap1", behaviour: "deny" });
+  });
+
+  it("refuses unknown, others', answered, bad behaviours, and a P who can't approve", async () => {
+    const w = approvalWorld();
+    void w.approvals.ask(OTHER_APP, "Bash", {});
+    await expect(w.service.decide("ap1", { behaviour: "allow" })).rejects.toMatchObject({ status: 404, code: "not_found" });
+    await expect(w.service.decide("nope", { behaviour: "allow" })).rejects.toMatchObject({ status: 404 });
+    void w.approvals.ask(APP, "Bash", {});
+    await expect(w.service.decide("ap2", { behaviour: "maybe" })).rejects.toMatchObject({ status: 400, code: "invalid_behaviour" });
+    await expect(w.service.decide("ap2", {})).rejects.toMatchObject({ status: 400 });
+    expect(await w.service.decide("ap2", { behavior: "deny" })).toEqual({ decided: true });
+    await expect(w.service.decide("ap2", { behaviour: "allow" })).rejects.toMatchObject({ status: 404 });
+
+    const nobody = approvalWorld(false);
+    const pending = nobody.approvals.ask(APP, "Bash", {});
+    await expect(nobody.service.decide("ap1", { behaviour: "allow" })).rejects.toMatchObject({ status: 403, code: "not_approver" });
+    expect(nobody.approvals.list()).toHaveLength(1);
+    nobody.approvals.decide("ap1", "deny");
+    expect(await pending).toBe(false);
+  });
+
+  it("forwards nothing while nobody is subscribed", async () => {
+    let next = 0;
+    const approvals = new ControllerApprovals({ newId: () => `ap${++next}` });
+    const w = world({ approvals });
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    const events: ControllerEvent[] = [];
+    void approvals.ask(APP, "Bash", {});
+    const unsubscribe = w.service.subscribe((event) => events.push(event));
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(events).toEqual([]);
+    unsubscribe();
+    approvals.decide("ap1", "deny");
+  });
+});
+
+describe("controller routes: d3b-5", () => {
+  const TOKEN = "t".repeat(40);
+
+  it("decides over POST approvals/:id and replays pending approvals when a stream connects", async () => {
+    let next = 0;
+    const approvals = new ControllerApprovals({ newId: () => `ap${++next}` });
+    const w = world({ approvals, canApprove: () => true });
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    const hono = new Hono();
+    mountControllerRoutes(hono, { services: new Map([[TOKEN, w.service]]), controller: { id: "mustafar", name: "Mustafar" } });
+    const headers = { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" };
+
+    const asked = approvals.ask(APP, "Bash", { command: "ls" });
+    const abort = new AbortController();
+    const response = await hono.request("/controller/events", { headers, signal: abort.signal });
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    const readUntil = async (needle: string) => {
+      while (!text.includes(needle)) text += decoder.decode((await reader.read()).value);
+    };
+    await readUntil("event: approval");
+    await readUntil("\n\n");
+    expect(text).toMatch(/event: approval\ndata: \{"type":"approval","id":"ap1"[^\n]*"tool":"Bash"/);
+
+    const bad = await hono.request("/controller/approvals/ap1", { method: "POST", headers, body: JSON.stringify({ behaviour: "yes" }) });
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toMatchObject({ error: "invalid_behaviour" });
+    const decided = await hono.request("/controller/approvals/ap1", { method: "POST", headers, body: JSON.stringify({ behaviour: "allow" }) });
+    expect(await decided.json()).toEqual({ decided: true });
+    expect(await asked).toBe(true);
+    await readUntil("event: decision");
+    await readUntil('"behaviour":"allow"');
+    const again = await hono.request("/controller/approvals/ap1", { method: "POST", headers, body: JSON.stringify({ behaviour: "allow" }) });
+    expect(again.status).toBe(404);
     abort.abort();
     await reader.cancel().catch(() => {});
   });

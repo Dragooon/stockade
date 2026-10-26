@@ -20,6 +20,7 @@ import {
 import { initScopeBindingsTable, getScopeBinding, isBoundScope, scopesBoundTo, bindScope } from "./scope-bindings.js";
 import { ControllerService } from "./controller.js";
 import { TranscriptReader } from "./controller-transcript.js";
+import { ControllerApprovals } from "./controller-approvals.js";
 import { mountControllerRoutes } from "./api/controller-routes.js";
 import { hostname } from "node:os";
 import {
@@ -138,6 +139,32 @@ function notifyControllers(scope: string): void {
   for (const service of controllerServices.values()) {
     service.notify(scope).catch((err) => console.error(`[controller] notify failed for ${scope.slice(0, 60)}:`, err));
   }
+}
+/** Approvals the app sees (D3b §6): app:/peer: ones wait here, Discord/terminal ones are mirrored. */
+const controllerApprovals = new ControllerApprovals();
+/** Does this rbac user hold `approve` through one of their roles? */
+function personCanApprove(person: string): boolean {
+  const user = config.platform.rbac.users[person];
+  return !!user && user.roles.some((role) => config.platform.rbac.roles[role]?.permissions.includes("approve"));
+}
+/**
+ * Approvals for an app:/peer: scope: they wait for its person in the app. A scope with no person,
+ * or one whose person can't approve, has every escalated action denied straight away.
+ */
+function controllerApprovalChannel(scope: string): ApprovalChannel {
+  const person = getScopeBinding(db, scope)?.person;
+  if (person && personCanApprove(person)) return controllerApprovals.channel(scope);
+  return {
+    askUser: async (tool) => {
+      console.warn(`[controller] ${tool} denied in ${scope.slice(0, 60)}: ${person ?? "nobody"} can't approve it`);
+      return false;
+    },
+    notifyAutoApproved: async () => {},
+  };
+}
+/** Scopes whose approvals the app decides. */
+function appDecidedScope(scope: string): boolean {
+  return scope.startsWith("app:") || scope.startsWith("peer:");
 }
 
 console.log(`[paths] data_dir=${paths.data_dir}`);
@@ -307,6 +334,15 @@ function sendToChannel(scope: string, text: string, files?: ChannelFile[]): Prom
 
 // Follow-ups: what an agent says when a background task it started finishes after
 // its reply. Sub-agent scopes have no channel sender, so theirs go nowhere.
+// app: and peer: scopes have no channel either: the app reads the reply from the transcript,
+// so their "sender" only tells the controllers to look (again shortly after, once the SDK
+// has flushed the record). Files are dropped there.
+for (const platform of ["app", "peer"]) {
+  channelSenders.set(platform, async (scope) => {
+    notifyControllers(scope);
+    setTimeout(() => notifyControllers(scope), 1500).unref();
+  });
+}
 bridge.onFollowup((scope, response) => {
   sendToChannel(scope, response.text, response.files).catch((err: unknown) =>
     console.error(`[bus] Failed to deliver follow-up to ${scope.slice(0, 40)}:`, err)
@@ -438,9 +474,13 @@ const peers = new PeerService({
     const discordId = meta.userPlatform === "discord"
       ? meta.userId
       : person ? config.platform.rbac.users[person.username]?.identities.discord : undefined;
-    const approvalChannel = scope.startsWith("discord:") && discordAdapter
+    // app:/peer: approvals wait in the app for the scope's person; Discord ones also show there, read-only.
+    const discordChannel = scope.startsWith("discord:") && discordAdapter
       ? await discordAdapter.approvalChannelForScope(scope, discordId, meta.agentId)
       : undefined;
+    const approvalChannel = appDecidedScope(scope)
+      ? controllerApprovalChannel(scope)
+      : discordChannel ? controllerApprovals.mirror(discordChannel, scope, "discord") : undefined;
     const open = sessionManager.get(scope);
     if (open && open.sudo !== sudo) {
       await bridge.closeSession(scope, sudo ? "sudo_on" : "sudo_off").catch((err) =>
@@ -463,7 +503,8 @@ const peers = new PeerService({
         : null,
     });
   },
-  post: (scope, text) => (scope.startsWith("discord:") || scope.startsWith("terminal:") ? sendToChannel(scope, text) : Promise.resolve()),
+  // app:/peer: senders only refresh the controllers: the notice text itself isn't shown in the app (v1).
+  post: (scope, text) => sendToChannel(scope, text),
   hostName: hostname().charAt(0).toUpperCase() + hostname().slice(1),
   now: () => Date.now(),
 });
@@ -511,7 +552,7 @@ function sendFromController(scope: string, text: string, person: string, userId:
       userId,
       userPlatform,
       sudo,
-      // Approvals reach the app in d3b-5; until then an `ask` rule is refused in app sessions.
+      askApproval: askApprovalFor(controllerApprovalChannel(scope), agentId),
       beforeRun: () => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)) !== sudo
         ? "its sudo mode changed while it waited"
         : null,
@@ -572,6 +613,8 @@ for (const entry of config.platform.controller?.tokens ?? []) {
     },
     busyScopes: () => bridge.busyScopes(),
     send: (scope, text) => sendFromController(scope, text, entry.person, userId, userPlatform),
+    approvals: controllerApprovals,
+    canApprove: () => hasPermission(userId, userPlatform, "approve", config.platform),
     createAppScope: (agentId) => {
       const scope = `app:${entry.person}:${randomBytes(6).toString("hex")}`;
       bindScope(db, { scope, agentId, person: entry.person, origin: "app" });
@@ -738,7 +781,11 @@ async function handleMessage(
   const sudoNote = sudoNotes.get(msg.scope);
   sudoNotes.delete(msg.scope);
 
-  const askApproval = approvalChannel ? askApprovalFor(approvalChannel, agentId) : undefined;
+  // Approvals are answered in the channel; the app shows them read-only.
+  const mirrored = approvalChannel
+    ? controllerApprovals.mirror(approvalChannel, enqueueScope, msg.platform === "discord" ? "discord" : "terminal")
+    : undefined;
+  const askApproval = mirrored ? askApprovalFor(mirrored, agentId) : undefined;
 
   // Tag every message with its sender. Channels are shared by several people
   // and sessions are per-channel, so without this the agent has to guess who

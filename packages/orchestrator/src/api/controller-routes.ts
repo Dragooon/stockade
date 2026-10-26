@@ -12,8 +12,12 @@
  *                                 — write as the person (403 read_only outside app:/peer:)
  *   POST /controller/sessions {agentId, text}
  *                                 — start a new app:<person>:<id> session, returns its row
+ *   POST /controller/approvals/:id {behaviour: allow|deny}
+ *                                 — decide an app:/peer: approval (403 read_only for one
+ *                                   answered in Discord or the terminal)
  *   GET /controller/events        — SSE: `session` (a listed session's state changed),
  *                                   `transcript` (a new record, SSE id = record id),
+ *                                   `approval` / `decision` (pending ones replayed on connect),
  *                                   plus a `ping` comment every 20 s
  *
  * Auth is a dedicated controller token per person (config `controller.tokens`), never
@@ -23,7 +27,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { CONTROLLER_CAPABILITIES, ControllerError, type ControllerService } from "../controller.js";
+import { CONTROLLER_CAPABILITIES, ControllerError, type ControllerEvent, type ControllerService } from "../controller.js";
 
 export const CONTROLLER_PING_MS = 20_000;
 
@@ -106,20 +110,26 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
   app.post("/controller/sessions", (c) =>
     answer(c, async () => serviceOf(c).createSession(await jsonBody(c))));
 
+  app.post("/controller/approvals/:id", (c) =>
+    answer(c, async () => serviceOf(c).decide(c.req.param("id"), await jsonBody(c))));
+
   app.get("/controller/events", (c) => {
     const service = serviceOf(c);
     return streamSSE(c, async (stream) => {
       let open = true;
-      const unsubscribe = service.subscribe((event) => {
+      const send = (event: ControllerEvent) => {
         if (!open) return;
         const id = event.type === "transcript" ? event.recordId : undefined;
         stream.writeSSE({ event: event.type, data: JSON.stringify(event), ...(id ? { id } : {}) }).catch(() => {});
-      });
+      };
+      const unsubscribe = service.subscribe(send);
       stream.onAbort(() => {
         open = false;
         unsubscribe();
       });
       await stream.write(": connected\n\n");
+      // The client doesn't list approvals: replay the waiting ones (a repeat is deduplicated by id).
+      for (const event of await service.pendingApprovals()) send(event);
       while (open && !stream.aborted) {
         await stream.sleep(CONTROLLER_PING_MS);
         if (open && !stream.aborted) await stream.write(": ping\n\n");
