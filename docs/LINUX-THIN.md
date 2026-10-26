@@ -114,6 +114,27 @@ group `shitiz`, mode 0640). Not the `/dispatch` token. No tokens configured = ev
   ends, or its session opens or closes; a `: ping` comment every 20 s.
 - Anything else under `/controller/` answers 404 `{"error":"unsupported"}`.
 
+### Other controllers (D4)
+
+Sessions on another controller (Kepler's Mac) are reached through the person's local cc-controller daemon,
+which holds the peer pairing with the other daemon and the transport. Config `peers.remote`: `for` (the
+person), `url` (the daemon's peer proxy: loopback http or https), `token_file` (the person's controller
+token, reused as the bearer both ways) and `hosts: [{id, label, default_agent?}]`.
+
+- Outbound: `mcp__peers__list` adds the other host's sessions as `<label> [<host>:<ref>]` for that person's
+  sessions only (never principals); `mcp__peers__send` and `mcp__peers__start {host}` go to the daemon
+  (`GET {url}/peers/v1/<host>/sessions`, `POST …/message|start|notice`). The other controller decides: a
+  new conversation answers `held: …`, and the outcome comes back as a notice turn in the sending session.
+- Inbound, on the same controller token: `GET /controller/peer/sessions`, `POST /controller/peer/inbound
+  {from: {host, ref, label, agent}, to, text, hops}`, `POST /controller/peer/start {from, agent?, text, hops}`,
+  `POST /controller/peer/notice {from, to, text, outcome?}`. 404 unsupported for a person without
+  `peers.remote`. The turn runs as the person, header `host <label>`. The first message of a conversation
+  (and a sender's first start) waits for a `peer_conversation` approval, like a principal's; allow lasts until
+  idle for an hour, deny 24 hours. A refused start's `peer:` scope is unbound again.
+- A send that was delivered (or a notice with `outcome: allowed`) opens the conversation back the other way.
+  Notices are taken only for a session that wrote to that remote session (or started one on that host) in
+  the last 24 hours, and a notice turn never produces a notice back.
+
 ## Files and units
 
 - Code: `/var/lib/stockade/repo` (branch `master`, owner `stockade`, read-only for madge).

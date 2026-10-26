@@ -525,7 +525,35 @@ peers:
         { name: "kepler", label: "Kepler", host: "MacBook", for: "alice", token_file: "/tmp/kepler.token", default_agent: "main", pre_approved: [] },
         { name: "other", label: "Other", host: "Elsewhere", for: "alice", token_file: "/tmp/other.token", pre_approved: ["discord:g:1"] },
       ],
+      remote: [],
     });
+  });
+
+  it("parses other controllers behind a person's daemon (D4), and rejects bad host ids", () => {
+    writeYaml(tmpDir, "config.yaml", VALID_CONFIG + `
+peers:
+  remote:
+    - for: alice
+      url: http://127.0.0.1:47835
+      token_file: /tmp/alice.token
+      hosts:
+        - id: mac
+          label: MacBook
+          default_agent: main
+`);
+    expect(loadConfig(tmpDir).platform.peers).toEqual({
+      principals: [],
+      remote: [{ for: "alice", url: "http://127.0.0.1:47835", token_file: "/tmp/alice.token", hosts: [{ id: "mac", label: "MacBook", default_agent: "main" }] }],
+    });
+    writeYaml(tmpDir, "config.yaml", VALID_CONFIG + `
+peers:
+  remote:
+    - for: alice
+      url: http://127.0.0.1:47835
+      token_file: /tmp/alice.token
+      hosts: [{ id: "Mac Book", label: MacBook }]
+`);
+    expect(() => loadConfig(tmpDir)).toThrow();
   });
 
   it("leaves the controller unset when config has none", () => {

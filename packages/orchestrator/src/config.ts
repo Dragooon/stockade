@@ -68,6 +68,27 @@ const peersConfigSchema = z.object({
     /** Target scopes it may message without asking (the owner's standing approvals). */
     pre_approved: z.array(z.string()).default([]),
   })).default([]),
+  /**
+   * Other controllers (D4), reached through the person's local cc-controller daemon, which
+   * holds the peer pairing. Stockade calls the daemon's peer proxy with the person's controller
+   * token; the daemon calls back on /controller/peer/* with the same token.
+   */
+  remote: z.array(z.object({
+    /** The person (RBAC username) whose daemon this is: only their sessions see these hosts. */
+    for: z.string(),
+    /** The daemon's peer proxy: loopback http, or https. */
+    url: z.string().url(),
+    /** The person's controller token (the same file as in controller.tokens). */
+    token_file: z.string(),
+    hosts: z.array(z.object({
+      /** Short id used in refs, e.g. `mac` in `[mac:3fa9c1]`. */
+      id: z.string().regex(/^[a-z0-9-]{1,32}$/),
+      /** Shown as the host, e.g. "MacBook". */
+      label: z.string().min(1).max(60),
+      /** Agent a start from that host runs when it names none. */
+      default_agent: z.string().optional(),
+    })).min(1),
+  })).default([]),
 });
 
 const agentConfigSchema = z.object({

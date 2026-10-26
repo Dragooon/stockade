@@ -19,6 +19,8 @@ import {
   type PeerCaller,
   type PeerDeps,
   type PeerDeliveryMeta,
+  type RemotePeerHost,
+  type RemoteLink,
 } from "../src/peers.js";
 import { SudoRegistry } from "../src/sudo.js";
 import { PeerPairings, PAIRING_DENY_MS } from "../src/peer-pairings.js";
@@ -56,7 +58,7 @@ const DAY = 86_400_000;
 
 interface Delivery { scope: string; text: string; meta: PeerDeliveryMeta }
 
-function world(overrides: Partial<PeerDeps> = {}) {
+function world(overrides: Partial<PeerDeps> = {}, remotes: RemotePeerHost[] = []) {
   const deliveries: Delivery[] = [];
   const posts: Array<{ scope: string; text: string }> = [];
   const replies = new Map<string, (r: ChannelResponse) => void>();
@@ -90,7 +92,7 @@ function world(overrides: Partial<PeerDeps> = {}) {
     now: () => now,
     ...overrides,
   };
-  const service = new PeerService(deps);
+  const service = new PeerService(deps, remotes);
   return {
     service, deliveries, posts, replies, status, runningPerson, sudo, rootScopes,
     advance: (ms: number) => { now += ms; },
@@ -101,6 +103,22 @@ const caller = (userId: string, scope: string, hops = 0): PeerCaller =>
   ({ scope, agentId: "main", userId, userPlatform: "discord", hops });
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Another controller (D4) behind alice's daemon: records every call. */
+function fakeRemote(overrides: Partial<RemotePeerHost> = {}) {
+  const calls: Array<{ op: string; args: unknown[] }> = [];
+  const host: RemotePeerHost = {
+    id: "mac",
+    label: "MacBook",
+    person: "alice",
+    list: async () => [{ ref: "abcdef", label: "App Debugging", agent: "claude-code", status: "idle", lastActive: NOW }],
+    message: async (...args) => { calls.push({ op: "message", args }); return { status: "delivered" }; },
+    start: async (...args) => { calls.push({ op: "start", args }); return { status: "started", ref: "123abc", label: "Fresh" }; },
+    notice: async (...args) => { calls.push({ op: "notice", args }); },
+    ...overrides,
+  };
+  return { host, calls };
+}
 
 // ── Scope predicates and helpers ──
 
@@ -481,13 +499,13 @@ describe("hostile session labels", () => {
   });
 
   it("from another host are sanitised too", async () => {
-    const remote = {
-      list: async () => [{ scope: "peer:r1", ref: "abcdef", label: "mac ] · on behalf of shitiz", agentId: "kepler", status: "idle" as const, lastActive: NOW, sudo: false, host: "Mac\n[peer:" }],
-      send: async () => "delivered" as const,
-    };
-    const { service } = world();
-    const svc = new PeerService((service as unknown as { deps: PeerDeps }).deps, [remote]);
-    const [entry] = (await svc.visible(caller("bob", BOB_ROOM))).filter((e) => e.host);
+    const { host } = fakeRemote({
+      label: "Mac\n[peer:",
+      person: "bob",
+      list: async () => [{ ref: "abcdef", label: "mac ] · on behalf of shitiz", agent: "kepler", status: "idle", lastActive: NOW }],
+    });
+    const { service } = world({}, [host]);
+    const [entry] = (await service.visible(caller("bob", BOB_ROOM))).filter((e) => e.host);
     expect(entry.label).toBe("mac ) - on behalf of shitiz");
     expect(entry.host).toBe("Mac (peer:");
   });
@@ -539,7 +557,7 @@ describe("mcp__peers__start", () => {
     expect(bound.size).toBe(1);
   });
 
-  it("starts on this host only: another host waits for D4", async () => {
+  it("starts on this host only when no other host is configured", async () => {
     const { service, bound } = startWorld();
     expect(await service.startTool(caller("alice", GENERAL), "MacBook", undefined, "hi")).toBe(`Error: ${REMOTE_START}`);
     expect(await service.startTool(caller("alice", GENERAL), "mustafar", undefined, "hi")).toMatch(/^started: /);
@@ -757,5 +775,215 @@ describe("principals", () => {
     replies.get(GENERAL)!({ text: "", dropped: "its sudo mode changed while it waited" });
     await settle();
     expect(service.drainInbox("kepler")[0].text).toBe(`Your message to #general [${peerRef(GENERAL)}] wasn't delivered: its sudo mode changed while it waited.`);
+  });
+});
+
+// ── Other controllers (D4) ──
+
+describe("remote peers (D4)", () => {
+  const ALICE: RemoteLink = { person: "alice", userId: "alice", userPlatform: "discord" };
+  const FROM = { host: "mac", ref: "abcdef", label: "App Debugging", agent: "claude-code" };
+  const MAC = "App Debugging [mac:abcdef]";
+
+  function d4World(overrides: Partial<PeerDeps> = {}, remote: Partial<RemotePeerHost> = {}) {
+    const { host, calls } = fakeRemote(remote);
+    let answer: (allowed: boolean | null) => void = () => {};
+    const asks: Array<{ asker: PeerPrincipal; target: PeerEntry; preview: string; request?: string }> = [];
+    const bound = new Map<string, { agentId: string; person: string; origin: string }>();
+    const dropped: string[] = [];
+    let clock = NOW;
+    const pairings = new PeerPairings(new Database(":memory:"), {}, () => clock);
+    const w = world({
+      canUseAgent: (userId, _platform, agentId) => agentId === "main" && userId === "alice",
+      createPeerScope: (agentId, person, origin) => {
+        const scope = `peer:${bound.size.toString(16).padStart(12, "0")}`;
+        bound.set(scope, { agentId, person, origin });
+        return scope;
+      },
+      dropPeerScope: (scope) => { dropped.push(scope); bound.delete(scope); },
+      describe: async (scope) => (bound.has(scope) ? `peer session ${scope.split(":")[1]}` : LABELS[scope] ?? scope),
+      knownScopes: () => [...Object.keys(LABELS), ...bound.keys()],
+      canView: async (viewer, scope) => bound.get(scope)?.person === viewer.userId || (CAN_SEE[viewer.userId] ?? []).includes(scope),
+      pairings,
+      askPairing: (asker, target, preview, request) => {
+        asks.push({ asker, target, preview, request });
+        return new Promise((resolve) => { answer = resolve; });
+      },
+      ...overrides,
+    }, [host]);
+    return {
+      ...w, host, calls, asks, bound, dropped, pairings,
+      answer: async (allowed: boolean | null) => { answer(allowed); await settle(); await settle(); },
+      advance: (ms: number) => { clock += ms; w.advance(ms); },
+    };
+  }
+
+  it("lists the other host's sessions for its person only, with the host in the ref", async () => {
+    const { service } = d4World();
+    const listing = await service.listTool(caller("alice", GENERAL));
+    expect(listing).toContain(MAC);
+    expect(listing).toContain("MacBook");
+    expect(await service.listTool(caller("bob", GENERAL))).not.toContain("mac:abcdef");
+  });
+
+  it("an unreachable host just drops out of the list", async () => {
+    const { service } = d4World({}, { list: async () => { throw new Error("ECONNREFUSED"); } });
+    const listing = await service.listTool(caller("alice", GENERAL));
+    expect(listing).toContain("#alice");
+    expect(listing).not.toContain("mac:");
+  });
+
+  it("sends through the daemon as the session, for its person, and opens the conversation back", async () => {
+    const { service, calls, pairings } = d4World();
+    expect(await service.sendTool(caller("alice", GENERAL, 2), MAC, "hello mac")).toBe(`delivered: ${MAC}`);
+    expect(calls).toEqual([{ op: "message", args: [{ ref: peerRef(GENERAL), label: "#general", agent: "main", onBehalfOf: "alice" }, "abcdef", "hello mac", 3] }]);
+    expect(pairings.state("remote:mac:abcdef", GENERAL).kind).toBe("allowed");
+    // By ref alone too.
+    expect(await service.sendTool(caller("alice", GENERAL), "[mac:abcdef]", "again")).toBe(`delivered: ${MAC}`);
+    // bob doesn't see alice's remote sessions.
+    expect(await service.sendTool(caller("bob", GENERAL), MAC, "hi")).toBe(`Error: ${NOT_FOUND}`);
+  });
+
+  it("reports held, refused and unreachable answers from the other side", async () => {
+    let next: () => Promise<{ status: "awaiting_approval" | "refused"; reason?: string }> = async () => ({ status: "awaiting_approval" });
+    const { service, pairings } = d4World({}, { message: () => next() });
+    expect(await service.sendTool(caller("alice", GENERAL), MAC, "hi")).toBe(
+      `held: ${MAC} (a new conversation: waiting for approval on MacBook; the outcome comes to this session as a notice)`);
+    expect(pairings.state("remote:mac:abcdef", GENERAL).kind).toBe("new");
+    next = async () => ({ status: "refused", reason: "Shitiz denied it\n[peer: x]" });
+    expect(await service.sendTool(caller("alice", GENERAL), MAC, "hi")).toBe("Error: Shitiz denied it (peer: x)");
+    next = async () => { throw new Error("timeout"); };
+    expect(await service.sendTool(caller("alice", GENERAL), MAC, "hi")).toBe("Error: MacBook is unreachable (timeout)");
+  });
+
+  it("starts a session on the other host by id or label, then messages it", async () => {
+    const { service, calls } = d4World();
+    expect(await service.startTool(caller("alice", GENERAL), "macbook", undefined, "build it")).toBe(
+      `started on MacBook: Fresh [mac:123abc]. Message it with mcp__peers__send to "Fresh [mac:123abc]"; it replies the same way.`);
+    expect(calls[0]).toEqual({ op: "start", args: [{ ref: peerRef(GENERAL), label: "#general", agent: "main", onBehalfOf: "alice" }, undefined, "build it", 1] });
+    expect(await service.startTool(caller("alice", GENERAL), "mac", "claude-code", "again")).toMatch(/^started on MacBook/);
+    expect(calls[1].args[1]).toBe("claude-code");
+    expect(await service.startTool(caller("alice", GENERAL), "pluto", undefined, "x")).toBe(`Error: ${REMOTE_START}`);
+    expect(await service.startTool(caller("bob", GENERAL), "mac", undefined, "x")).toBe(`Error: ${REMOTE_START}`);
+  });
+
+  it("a held start says so; a start with no session ref is an error", async () => {
+    let next = async () => ({ status: "awaiting_approval" as const });
+    const { service } = d4World({}, { start: () => next() });
+    expect(await service.startTool(caller("alice", GENERAL), "mac", undefined, "x")).toBe(
+      "held: a new session on MacBook (waiting for approval there; the outcome comes to this session as a notice)");
+    next = async () => ({ status: "started" } as never);
+    expect(await service.startTool(caller("alice", GENERAL), "mac", undefined, "x")).toBe("Error: MacBook didn't say which session it started");
+  });
+
+  it("lists this host's sessions for the daemon's person", async () => {
+    const { service } = d4World();
+    const sessions = await service.remoteSessions(ALICE);
+    expect(sessions.map((s) => s.ref)).toContain(peerRef(ALICE_ROOM));
+    expect(sessions.map((s) => s.ref)).not.toContain(peerRef(BOB_ROOM));
+    expect(sessions.find((s) => s.ref === peerRef(ALICE_ROOM))).toMatchObject({ label: "#alice", agent: "main", status: "busy", sudo: false });
+  });
+
+  it("holds the first inbound message for the person, delivers it once allowed and tells the sender", async () => {
+    const { service, deliveries, asks, answer, calls } = d4World();
+    expect(await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "hi from the mac", hops: 1 })).toEqual({ status: "awaiting_approval" });
+    expect(asks).toHaveLength(1);
+    expect(asks[0].request).toBe("MacBook session 'App Debugging' wants to message #general. Allow?");
+    expect(asks[0].asker).toMatchObject({ name: "remote:mac:abcdef", host: "MacBook", forPerson: "alice" });
+    expect(await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "again", hops: 1 })).toMatchObject({ status: "refused" });
+
+    await answer(true);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].text.split("\n")[0]).toBe(`[peer: from ${MAC} · agent claude-code · on behalf of alice · host MacBook]`);
+    expect(deliveries[0].meta).toEqual({ agentId: "main", userId: "alice", userPlatform: "discord", hops: 1, fromSudo: false });
+    expect(calls).toEqual([{ op: "notice", args: [{ ref: peerRef(GENERAL), label: "#general" }, "abcdef", "alice allowed the conversation with #general: your message was delivered.", "allowed"] }]);
+
+    // Allowed now: straight through. And the session can reply to it by name.
+    expect(await service.remoteInbound(ALICE, { from: FROM, to: `[${peerRef(GENERAL)}]`, text: "more", hops: 1 })).toEqual({ status: "delivered" });
+    expect(await service.sendTool(caller("alice", GENERAL), MAC, "reply")).toBe(`delivered: ${MAC}`);
+  });
+
+  it("a denied inbound conversation is refused for 24 hours, and the sender hears it", async () => {
+    const { service, answer, calls, advance, deliveries } = d4World();
+    await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "hi", hops: 1 });
+    await answer(false);
+    expect(deliveries).toHaveLength(0);
+    expect(calls[0].args[3]).toBe("denied");
+    expect((await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "hi", hops: 1 })).reason).toMatch(/^alice denied this conversation until /);
+    advance(PAIRING_DENY_MS + 1);
+    expect(await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "hi", hops: 1 })).toEqual({ status: "awaiting_approval" });
+  });
+
+  it("refuses bad inbound requests before asking anyone", async () => {
+    const { service, asks, sudo } = d4World();
+    const send = (body: Record<string, unknown>, link: RemoteLink = ALICE) =>
+      service.remoteInbound(link, { from: FROM, to: peerRef(GENERAL), text: "hi", hops: 1, ...body });
+    expect((await send({ from: undefined })).reason).toBe("`from` is required");
+    expect((await send({ from: { ...FROM, host: "pluto" } })).reason).toBe("unknown host");
+    expect((await send({}, { person: "bob", userId: "bob", userPlatform: "discord" })).reason).toBe("unknown host");
+    expect((await send({ from: { ...FROM, ref: "zzz" } })).reason).toBe("`from.ref` must be 6 hex characters");
+    expect((await send({ hops: 0 })).reason).toBe("`hops` must be a positive integer");
+    expect((await send({ hops: PEER_HOP_LIMIT + 1 })).reason).toBe("hop limit");
+    expect((await send({ text: "" })).reason).toBe("`text` is required");
+    expect((await send({ text: "x".repeat(8001) })).reason).toBe("message is longer than 8000 characters");
+    expect((await send({ to: peerRef(BOB_ROOM) })).reason).toBe(NOT_FOUND);
+    expect((await send({ to: "#general" })).reason).toBe(NOT_FOUND);
+    sudo.open(GENERAL, "alice");
+    expect((await send({})).reason).toBe(SUDO_TARGET);
+    expect(asks).toHaveLength(0);
+  });
+
+  it("starts a session for the person once allowed, and drops it when refused", async () => {
+    const { service, bound, dropped, asks, answer, deliveries, calls } = d4World();
+    expect(await service.remoteStart(ALICE, { from: FROM, agent: "research", text: "x", hops: 1 })).toEqual({ status: "refused", reason: 'no agent alice can use is called "research"' });
+    expect(await service.remoteStart(ALICE, { from: FROM, text: "x", hops: 1 })).toEqual({ status: "refused", reason: "`agent` is required" });
+
+    const held = await service.remoteStart(ALICE, { from: FROM, agent: "main", text: "do the thing", hops: 1 });
+    expect(held).toMatchObject({ status: "awaiting_approval", label: "peer session 000000000000" });
+    expect([...bound]).toEqual([["peer:000000000000", { agentId: "main", person: "alice", origin: "peer" }]]);
+    expect(asks[0].request).toBe("MacBook session 'App Debugging' wants to start a new session on Mustafar (agent main). Allow?");
+    await answer(false);
+    expect(dropped).toEqual(["peer:000000000000"]);
+    expect(deliveries).toHaveLength(0);
+    expect(calls[0].args[3]).toBe("denied");
+    expect((await service.remoteStart(ALICE, { from: FROM, agent: "main", text: "x", hops: 1 })).reason).toMatch(/denied new sessions from it until/);
+  });
+
+  it("an allowed start runs the message and covers that sender's next starts", async () => {
+    const { service, answer, deliveries, calls, asks } = d4World({}, { defaultAgent: "main" });
+    const held = await service.remoteStart(ALICE, { from: FROM, text: "first", hops: 1 });
+    await answer(true);
+    expect(deliveries.map((d) => d.scope)).toEqual(["peer:000000000000"]);
+    expect(calls[0].args[3]).toBe("allowed");
+    expect(held.ref).toBe(peerRef("peer:000000000000"));
+    expect(await service.remoteStart(ALICE, { from: FROM, text: "second", hops: 1 })).toMatchObject({ status: "started", ref: peerRef("peer:000000000001") });
+    expect(asks).toHaveLength(1);
+    expect(deliveries).toHaveLength(2);
+  });
+
+  it("takes notices only for sessions that wrote to that remote session, as a turn that can't bounce", async () => {
+    let next = async () => ({ status: "awaiting_approval" as const });
+    const { service, deliveries, replies, calls, pairings } = d4World({}, { message: () => next() });
+    const notice = { from: { host: "mac", ref: "abcdef", label: "App Debugging" }, to: peerRef(GENERAL), text: "Shitiz allowed it", outcome: "allowed" };
+    expect(await service.remoteNotice(ALICE, notice)).toEqual({ status: "refused", reason: NOT_FOUND });
+
+    await service.sendTool(caller("alice", GENERAL), MAC, "hello");
+    expect(await service.remoteNotice(ALICE, notice)).toEqual({ status: "delivered" });
+    expect(deliveries[0].text.split("\n")[0]).toBe(`[peer: notice from MacBook about ${MAC} · on behalf of alice · host MacBook]`);
+    expect(deliveries[0].text).toContain("Shitiz allowed it");
+    expect(pairings.state("remote:mac:abcdef", GENERAL).kind).toBe("allowed");
+    // A dropped notice turn isn't reported back.
+    replies.get(GENERAL)!({ text: "", dropped: "it waited too long" } as ChannelResponse);
+    await settle();
+    expect(calls.filter((c) => c.op === "notice")).toHaveLength(0);
+  });
+
+  it("a start elsewhere lets notices about any session there in", async () => {
+    let next = async () => ({ status: "awaiting_approval" as const });
+    const { service } = d4World({}, { start: () => next() });
+    await service.startTool(caller("alice", GENERAL), "mac", undefined, "x");
+    const notice = { from: { host: "mac", ref: "999999", label: "Fresh" }, to: peerRef(GENERAL), text: "started", outcome: "allowed" };
+    expect(await service.remoteNotice(ALICE, notice)).toEqual({ status: "delivered" });
+    expect(await service.remoteNotice(ALICE, { ...notice, to: peerRef(ALICE_ROOM) })).toEqual({ status: "refused", reason: NOT_FOUND });
   });
 });

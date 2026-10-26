@@ -181,6 +181,13 @@ export interface PeersConfig {
     default_agent?: string;
     pre_approved: string[];
   }>;
+  /** Other controllers through the person's daemon (D4). */
+  remote: Array<{
+    for: string;
+    url: string;
+    token_file: string;
+    hosts: Array<{ id: string; label: string; default_agent?: string }>;
+  }>;
 }
 
 /** Controller API (D3b): one token per paired person; the token lives in token_file. */

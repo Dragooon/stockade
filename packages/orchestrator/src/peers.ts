@@ -37,7 +37,13 @@ export const PEER_PREVIEW_CHARS = 300;
 
 export const NOT_FOUND = "no visible session matches";
 export const SUDO_TARGET = "target is in sudo mode; only sudo sessions can message it";
-export const REMOTE_START = "starting sessions on another host isn't supported yet";
+export const REMOTE_START = "no peer host is called that";
+/** Longest notice another controller may send about a conversation (D4). */
+export const PEER_NOTICE_MAX_CHARS = 2_000;
+/** A session ref: this host's, or another controller's as its daemon reports it. */
+const REF = /^[0-9a-f]{6}$/;
+/** The pairing "scope" for fresh starts from a remote session: one allow covers its starts for the idle hour. */
+const START_PAIRING = "#start";
 /** Messages kept for a principal until it fetches them. */
 export const PEER_INBOX_CAP = 200;
 
@@ -131,6 +137,21 @@ export interface PeerCaller {
   hops: number;
   /** Set when a principal calls (over its own token), not a Stockade session. */
   principal?: PeerPrincipal;
+  /** Set for a session on another controller writing in (D4): its turn runs as the daemon's person. */
+  remote?: RemoteSender;
+  /** A notice turn from another controller: a failure isn't reported back (notices never answer notices). */
+  notice?: boolean;
+}
+
+/** A session on another controller (D4), as that controller's daemon describes it. */
+export interface RemoteSender {
+  /** The other controller's host id, e.g. "mac". */
+  host: string;
+  /** Shown as its host, e.g. "MacBook". */
+  hostLabel: string;
+  ref: string;
+  label: string;
+  agent: string;
 }
 
 /** Something waiting for a principal: a message sent to it, or the outcome of a held message. */
@@ -155,8 +176,11 @@ export interface PeerEntry {
   /** ms since epoch, or null if unknown. */
   lastActive: number | null;
   sudo: boolean;
-  /** Set for sessions on another machine (a later RemotePeerProvider). */
+  /** Set for sessions on another controller: the host's label, e.g. "MacBook". */
   host?: string;
+  /** Another controller's sessions: its host id and their own ref there. Sends go through its daemon. */
+  remoteHost?: string;
+  remoteRef?: string;
   /** Set for a principal reachable by reply: sends go to its inbox. */
   principal?: string;
 }
@@ -206,16 +230,75 @@ export interface PeerDeps {
    * approval in the target's channel or the app): true allowed, false denied or unanswered,
    * null when there's nowhere to ask.
    */
-  askPairing?(principal: PeerPrincipal, target: PeerEntry, preview: string): Promise<boolean | null>;
+  askPairing?(principal: PeerPrincipal, target: PeerEntry, preview: string, request?: string): Promise<boolean | null>;
+  /** Undo createPeerScope for a fresh start that was refused before anything ran in it. */
+  dropPeerScope?(scope: string): void;
   hostName: string;
   now(): number;
 }
 
-/** A source of peer sessions. The local one lives here; a remote one can be added later. */
+/** A source of peer sessions on this host. */
 export interface PeerProvider {
   list(caller: PeerCaller): Promise<PeerEntry[]>;
   send(entry: PeerEntry, wrapped: string, from: PeerCaller): Promise<"delivered" | "queued">;
 }
+
+/** Another controller's answer (D4 peer API). */
+export type RemoteStatus = "delivered" | "queued" | "awaiting_approval" | "started" | "refused";
+export interface RemoteResult {
+  status: RemoteStatus;
+  reason?: string;
+  /** started / awaiting_approval for a start: the new session. */
+  ref?: string;
+  label?: string;
+}
+/** What a notice says about the conversation: the receiver's person allowed or denied it, or a message didn't land. */
+export type RemoteOutcome = "allowed" | "denied" | "undelivered";
+/** A session on another controller, as its daemon lists it. */
+export interface RemoteListing {
+  ref: string;
+  label: string;
+  agent: string;
+  status: PeerStatus;
+  lastActive: number | null;
+}
+/** The sending session on this host, as the other controller sees it. */
+export interface RemoteFrom {
+  ref: string;
+  label: string;
+  agent: string;
+  onBehalfOf: string;
+}
+
+/**
+ * Another controller, reached through the local cc-controller daemon (D4). Its sessions are
+ * one person's: only that person's sessions list or reach them, and what it sends in runs as
+ * that person. The receiving controller guards its own boundary (it may hold a message for
+ * its person's approval).
+ */
+export interface RemotePeerHost {
+  /** Host id, e.g. "mac": refs read `[mac:3fa9c1]`. */
+  id: string;
+  /** e.g. "MacBook". */
+  label: string;
+  /** RBAC username of the person whose sessions these are. */
+  person: string;
+  /** Agent a start from that host runs when it names none. */
+  defaultAgent?: string;
+  list(): Promise<RemoteListing[]>;
+  message(from: RemoteFrom, to: string, text: string, hops: number): Promise<RemoteResult>;
+  start(from: RemoteFrom, agent: string | undefined, text: string, hops: number): Promise<RemoteResult>;
+  notice(from: { ref: string; label: string }, to: string, text: string, outcome?: RemoteOutcome): Promise<void>;
+}
+
+/** The local daemon's person, for calls that come in from another controller through it. */
+export interface RemoteLink {
+  person: string;
+  userId: string;
+  userPlatform: string;
+}
+
+const refused = (reason: string): RemoteResult => ({ status: "refused", reason });
 
 /** Whose visibility a caller has: a principal sees what its person sees. */
 const viewerOf = (caller: PeerCaller) => caller.principal?.viewer ?? { userId: caller.userId, userPlatform: caller.userPlatform };
@@ -233,6 +316,14 @@ export function formatRelative(ms: number | null, now: number): string {
 
 const entryName = (e: { label: string; ref: string }) => `${e.label} [${e.ref}]`;
 
+/** Who messaged a scope from outside it and may get a reply: an api: scope, a principal or a remote session. */
+interface InboundNote {
+  at: number;
+  agentId: string;
+  principal?: PeerPrincipal;
+  remote?: RemoteSender;
+}
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 export class PeerService implements PeerProvider {
@@ -241,13 +332,15 @@ export class PeerService implements PeerProvider {
   /** sender scope → fresh-start timestamps inside the start window. */
   private readonly starts = new Map<string, number[]>();
   /** receiving scope → (api: scope or principal → when it last messaged the receiver, and its agent). */
-  private readonly apiInbound = new Map<string, Map<string, { at: number; agentId: string; principal?: PeerPrincipal }>>();
+  private readonly apiInbound = new Map<string, Map<string, InboundNote>>();
   /** principal name → what's waiting for it, oldest first. */
   private readonly inboxes = new Map<string, PeerInboxItem[]>();
-  private readonly providers: PeerProvider[];
+  /** sending scope → (`remote:<host>:<ref>`, or `remote:<host>:*` for a start → when it last wrote there): whose notices it takes. */
+  private readonly outbound = new Map<string, Map<string, number>>();
+  private readonly remotes: Map<string, RemotePeerHost>;
 
-  constructor(private readonly deps: PeerDeps, remoteProviders: PeerProvider[] = []) {
-    this.providers = [this, ...remoteProviders];
+  constructor(private readonly deps: PeerDeps, remotes: RemotePeerHost[] = []) {
+    this.remotes = new Map(remotes.map((host) => [host.id, host]));
   }
 
   /** Local provider: the caller's person's visible conversations, newest first. */
@@ -289,7 +382,9 @@ export class PeerService implements PeerProvider {
     const fromLabel = await this.callerLabel(from);
     const tellSender = (text: string) => from.principal
       ? Promise.resolve(this.notify(from.principal.name, text))
-      : this.deps.post(from.scope, text);
+      : from.remote
+        ? (from.notice ? Promise.resolve() : this.noticeRemote(from.remote, entry, text, "undelivered"))
+        : this.deps.post(from.scope, text);
     this.deps.deliver(entry.scope, wrapped, meta).then(async (result) => {
       if (result.dropped) {
         // It waited behind another turn and never ran: tell the sender's conversation.
@@ -303,14 +398,16 @@ export class PeerService implements PeerProvider {
       await this.deps.post(entry.scope, `*Message from ${fromLabel} on behalf of ${person}:* ${preview}\n\n${result.text}`);
     }).catch((err) => {
       console.error(`[peers] delivery to ${entry.scope.slice(0, 40)} failed:`, err instanceof Error ? err.message : err);
-      if (from.principal) this.notify(from.principal.name, `Your message to ${entryName(entry)} wasn't delivered: ${err instanceof Error ? err.message : String(err)}.`);
+      const text = `Your message to ${entryName(entry)} wasn't delivered: ${err instanceof Error ? err.message : String(err)}.`;
+      if (from.principal) this.notify(from.principal.name, text);
+      if (from.remote && !from.notice) void this.noticeRemote(from.remote, entry, text, "undelivered");
     });
     return state;
   }
 
   /** All providers' entries for the caller, newest first, capped. */
   async visible(caller: PeerCaller): Promise<PeerEntry[]> {
-    const all = (await Promise.all(this.providers.map((p) => p.list(caller)))).flat();
+    const all = [...(await this.list(caller)), ...(await this.remoteEntries(caller))];
     // Other hosts' labels are as untrusted as Discord's.
     return all
       .map((e) => ({ ...e, label: sanitizePeerLabel(e.label), ...(e.host !== undefined && { host: sanitizePeerLabel(e.host) }) }))
@@ -359,6 +456,7 @@ export class PeerService implements PeerProvider {
       });
       return `delivered: ${entryName(target)}`;
     }
+    if (target.remoteHost) return this.sendRemote(caller, target, message, person);
 
     // Visibility is checked again at send time, not only when listing.
     if (!target.scope.startsWith("api:") && !target.host) {
@@ -381,9 +479,7 @@ export class PeerService implements PeerProvider {
     const wrapped = await this.wrap(caller, message);
     if (caller.principal) return this.sendAsPrincipal(caller, caller.principal, target, wrapped, message);
     if (caller.scope.startsWith("api:")) this.noteInbound(target.scope, caller);
-    const provider = target.host ? this.providers.find((p) => p !== this) : this;
-    if (!provider) return `Error: ${NOT_FOUND}`;
-    const state = await provider.send(target, wrapped, caller);
+    const state = await this.send(target, wrapped, caller);
     return `${state}: ${entryName(target)}${state === "queued" ? " (it's busy with someone else's turn; your message starts its own turn when that ends)" : ""}`;
   }
 
@@ -403,9 +499,9 @@ export class PeerService implements PeerProvider {
     const person = this.deps.personName(caller.userId, caller.userPlatform);
     if (!person) return "Error: this session has no person behind it, so it can't start sessions";
     if (caller.hops + 1 > PEER_HOP_LIMIT) return "Error: hop limit";
-    // Cross-host starts need the receiving controller's approval: they come with D4.
+    // Another host's controller decides there (D4): it may ask its person first.
     if (typeof host === "string" && host.trim() && host.trim().toLowerCase() !== this.deps.hostName.toLowerCase()) {
-      return `Error: ${REMOTE_START}`;
+      return this.startRemote(caller, host.trim(), agent, message, person);
     }
     if (!this.deps.canUseAgent || !this.deps.createPeerScope) return "Error: starting sessions isn't available here";
     const agentId = typeof agent === "string" && agent.trim()
@@ -444,6 +540,179 @@ export class PeerService implements PeerProvider {
     const taken = items.splice(0, Math.max(1, max));
     if (!items.length) this.inboxes.delete(principal);
     return taken;
+  }
+
+  // ── From another controller (D4), through the local daemon ──
+
+  /** This host's sessions the daemon's person sees, for the other controller's list. */
+  async remoteSessions(link: RemoteLink): Promise<Array<RemoteListing & { sudo: boolean }>> {
+    const viewer: PeerCaller = { scope: "remote:", agentId: "", userId: link.userId, userPlatform: link.userPlatform, hops: 0 };
+    return (await this.list(viewer))
+      .sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0))
+      .slice(0, PEER_LIST_CAP)
+      .map((e) => ({ ref: e.ref, label: sanitizePeerLabel(e.label), agent: e.agentId, status: e.status, lastActive: e.lastActive, sudo: e.sudo }));
+  }
+
+  /**
+   * A message from a session on another controller to one of the daemon's person's sessions.
+   * This controller guards its boundary: the first message of a new conversation is held and
+   * the person is asked (peer_conversation); the outcome goes back to the sender as a notice.
+   */
+  async remoteInbound(link: RemoteLink, body: Record<string, unknown>): Promise<RemoteResult> {
+    const caller = this.remoteCaller(link, body);
+    if (typeof caller === "string") return refused(caller);
+    const text = this.remoteText(body.text, PEER_MAX_MESSAGE_CHARS);
+    if (!text.ok) return refused(text.error);
+    const target = await this.localTarget(caller, body.to);
+    if (typeof target === "string") return refused(target);
+    if (this.deps.inSudo(target.scope)) return refused(SUDO_TARGET);
+    const pairings = this.deps.pairings;
+    if (!pairings || !this.deps.askPairing) return refused("conversations from other controllers aren't available here");
+    const pairing = pairings.state(caller.scope, target.scope);
+    if (pairing.kind === "denied") return refused(`${link.person} denied this conversation until ${new Date(pairing.until).toISOString()}`);
+    if (pairing.kind === "pending") return refused(`an earlier message to ${target.label} is waiting for ${link.person}'s approval`);
+    if (!this.takeRateSlot(caller.scope)) return refused(`rate limit (${PEER_RATE_LIMIT} sends per ${PEER_RATE_WINDOW_MS / 60_000} minutes)`);
+
+    const wrapped = await this.wrap(caller, text.value);
+    if (pairing.kind === "allowed") {
+      pairings.touch(caller.scope, target.scope);
+      this.noteInbound(target.scope, caller);
+      return { status: await this.send(target, wrapped, caller) };
+    }
+
+    const remote = caller.remote!;
+    const asker = this.remoteAsker(link, remote);
+    pairings.begin(caller.scope, target.scope);
+    this.deps.askPairing(asker, target, text.value.slice(0, PEER_PREVIEW_CHARS), `${asker.label} wants to message ${target.label}. Allow?`).then(async (allowed) => {
+      if (allowed === null) {
+        pairings.cancel(caller.scope, target.scope);
+        await this.noticeRemote(remote, target, `Your message to ${target.label} wasn't delivered: there's nowhere to ask ${link.person} about it.`, "undelivered");
+        return;
+      }
+      pairings.decide(caller.scope, target.scope, allowed);
+      if (!allowed) {
+        await this.noticeRemote(remote, target, `${link.person} didn't allow the conversation with ${target.label} (denied or unanswered): refused for 24 hours.`, "denied");
+        return;
+      }
+      if (this.deps.inSudo(target.scope)) {
+        await this.noticeRemote(remote, target, `Your message to ${target.label} wasn't delivered: ${SUDO_TARGET}.`, "undelivered");
+        return;
+      }
+      this.noteInbound(target.scope, caller);
+      const state = await this.send(target, wrapped, caller);
+      await this.noticeRemote(remote, target, `${link.person} allowed the conversation with ${target.label}: your message was ${state}.`, "allowed");
+    }).catch(async (err) => {
+      pairings.cancel(caller.scope, target.scope);
+      console.error(`[peers] pairing ask for ${target.scope.slice(0, 40)} failed:`, err instanceof Error ? err.message : err);
+      await this.noticeRemote(remote, target, `Your message to ${target.label} wasn't delivered: asking ${link.person} failed.`, "undelivered");
+    });
+    return { status: "awaiting_approval" };
+  }
+
+  /**
+   * A fresh session here for the daemon's person, started from another controller (D3b §8):
+   * `peer:<id>` bound to the person, origin `peer`. The person approves (peer_conversation, on
+   * the new session in the app); an allow covers that sender's starts until idle for an hour.
+   */
+  async remoteStart(link: RemoteLink, body: Record<string, unknown>): Promise<RemoteResult> {
+    const caller = this.remoteCaller(link, body);
+    if (typeof caller === "string") return refused(caller);
+    const text = this.remoteText(body.text, PEER_MAX_MESSAGE_CHARS);
+    if (!text.ok) return refused(text.error);
+    if (body.agent !== undefined && body.agent !== null && typeof body.agent !== "string") return refused("`agent` must be a string");
+    const pairings = this.deps.pairings;
+    if (!this.deps.canUseAgent || !this.deps.createPeerScope || !pairings || !this.deps.askPairing) {
+      return refused("starting sessions isn't available here");
+    }
+    const remote = caller.remote!;
+    const agentId = typeof body.agent === "string" && body.agent.trim() ? body.agent.trim() : this.remotes.get(remote.host)?.defaultAgent;
+    if (!agentId) return refused("`agent` is required");
+    if (!this.deps.canUseAgent(link.userId, link.userPlatform, agentId)) return refused(`no agent ${link.person} can use is called "${agentId.slice(0, 60)}"`);
+    const pairing = pairings.state(caller.scope, START_PAIRING);
+    if (pairing.kind === "denied") return refused(`${link.person} denied new sessions from it until ${new Date(pairing.until).toISOString()}`);
+    if (pairing.kind === "pending") return refused(`an earlier new session is waiting for ${link.person}'s approval`);
+    if (!this.takeSlot(this.starts, caller.scope, PEER_START_LIMIT, PEER_START_WINDOW_MS)) {
+      return refused(`rate limit (${PEER_START_LIMIT} new sessions per hour)`);
+    }
+
+    const scope = this.deps.createPeerScope(agentId, link.person, "peer");
+    const entry: PeerEntry = { scope, ref: peerRef(scope), label: await this.labelFor(scope), agentId, status: "idle", lastActive: this.deps.now(), sudo: false };
+    const wrapped = await this.wrap(caller, text.value);
+    const run = () => {
+      pairings.decide(caller.scope, scope, true);
+      this.noteInbound(scope, caller);
+      return this.send(entry, wrapped, caller);
+    };
+    if (pairing.kind === "allowed") {
+      pairings.touch(caller.scope, START_PAIRING);
+      await run();
+      return { status: "started", ref: entry.ref, label: entry.label };
+    }
+
+    const asker = this.remoteAsker(link, remote);
+    const refuse = async (text: string, outcome: RemoteOutcome) => {
+      this.deps.dropPeerScope?.(scope);
+      await this.noticeRemote(remote, entry, text, outcome);
+    };
+    pairings.begin(caller.scope, START_PAIRING);
+    this.deps.askPairing(asker, entry, text.value.slice(0, PEER_PREVIEW_CHARS),
+      `${asker.label} wants to start a new session on ${this.deps.hostName} (agent ${agentId}). Allow?`).then(async (allowed) => {
+      if (allowed === null) {
+        pairings.cancel(caller.scope, START_PAIRING);
+        await refuse(`The new session wasn't started: there's nowhere to ask ${link.person} about it.`, "undelivered");
+        return;
+      }
+      pairings.decide(caller.scope, START_PAIRING, allowed);
+      if (!allowed) {
+        await refuse(`${link.person} didn't allow a new session on ${this.deps.hostName} (denied or unanswered): refused for 24 hours.`, "denied");
+        return;
+      }
+      const state = await run();
+      await this.noticeRemote(remote, entry, `${link.person} allowed the new session ${entry.label}: your message was ${state}.`, "allowed");
+    }).catch(async (err) => {
+      pairings.cancel(caller.scope, START_PAIRING);
+      console.error(`[peers] start ask from ${caller.scope.slice(0, 40)} failed:`, err instanceof Error ? err.message : err);
+      await refuse(`The new session wasn't started: asking ${link.person} failed.`, "undelivered");
+    });
+    return { status: "awaiting_approval", ref: entry.ref, label: entry.label };
+  }
+
+  /**
+   * The other controller's notice about a conversation a session here opened (allowed, denied,
+   * a message that didn't land). It runs as a turn in that session, so the agent knows. Only
+   * sessions that wrote to that remote session (or started one there) in the last 24 h take one.
+   */
+  async remoteNotice(link: RemoteLink, body: Record<string, unknown>): Promise<RemoteResult> {
+    const caller = this.remoteCaller(link, { ...body, hops: 1 });
+    if (typeof caller === "string") return refused(caller);
+    const text = this.remoteText(body.text, PEER_NOTICE_MAX_CHARS);
+    if (!text.ok) return refused(text.error);
+    const target = await this.localTarget(caller, body.to);
+    if (typeof target === "string") return refused(target);
+    const remote = caller.remote!;
+    const sent = this.outbound.get(target.scope);
+    const now = this.deps.now();
+    const wroteTo = (key: string) => {
+      const at = sent?.get(key);
+      return at !== undefined && now - at < PEER_API_REPLY_WINDOW_MS;
+    };
+    if (!wroteTo(caller.scope) && !wroteTo(`remote:${remote.host}:*`)) return refused(NOT_FOUND);
+    if (this.deps.inSudo(target.scope)) return refused(SUDO_TARGET);
+    if (!this.takeRateSlot(caller.scope)) return refused(`rate limit (${PEER_RATE_LIMIT} sends per ${PEER_RATE_WINDOW_MS / 60_000} minutes)`);
+    // The other side's person allowed it: the conversation is open both ways.
+    if (body.outcome === "allowed") {
+      this.openReverse(caller.scope, target.scope);
+      this.noteOutbound(target.scope, caller.scope);
+    }
+    const about = `${sanitizePeerLabel(remote.label)} [${this.callerRef(caller)}]`;
+    const host = sanitizePeerLabel(remote.hostLabel);
+    const wrapped = [
+      `[peer: notice from ${host} about ${about} · on behalf of ${link.person} · host ${host}]`,
+      `<cross-session-message from="${about.replace(/"/g, "'")}">`,
+      escapePeerText(text.value),
+      `</cross-session-message>`,
+    ].join("\n");
+    return { status: await this.send(target, wrapped, { ...caller, hops: 0, notice: true }) };
   }
 
   // ── Internals ──
@@ -498,12 +767,177 @@ export class PeerService implements PeerProvider {
     return `held: ${entryName(target)} (a new pairing: waiting for ${principal.forPerson}'s approval; the outcome comes to your inbox)`;
   }
 
+  /** A message to a session on another controller: its daemon passes it on, and that controller decides. */
+  private async sendRemote(caller: PeerCaller, target: PeerEntry, message: string, person: string): Promise<string> {
+    const host = this.remotes.get(target.remoteHost!);
+    if (!host || caller.principal || caller.remote || host.person !== person) return `Error: ${NOT_FOUND}`;
+    if (!this.takeRateSlot(caller.scope)) return `Error: rate limit (${PEER_RATE_LIMIT} sends per ${PEER_RATE_WINDOW_MS / 60_000} minutes)`;
+    const key = target.scope;
+    this.noteOutbound(caller.scope, key);
+    let result: RemoteResult;
+    try {
+      result = await host.message(await this.remoteFrom(caller, person), target.remoteRef!, message, caller.hops + 1);
+    } catch (err) {
+      return `Error: ${host.label} is unreachable (${err instanceof Error ? err.message : String(err)})`;
+    }
+    if (result.status === "delivered" || result.status === "queued") {
+      this.openReverse(key, caller.scope);
+      return `${result.status}: ${entryName(target)}${result.status === "queued" ? " (it's busy; your message runs when it's free)" : ""}`;
+    }
+    if (result.status === "awaiting_approval") {
+      return `held: ${entryName(target)} (a new conversation: waiting for approval on ${host.label}; the outcome comes to this session as a notice)`;
+    }
+    return `Error: ${sanitizePeerLabel(result.reason ?? "refused").slice(0, 300)}`;
+  }
+
+  /** mcp__peers__start on another controller: it starts the session, or holds the start for its person's approval. */
+  private async startRemote(caller: PeerCaller, wantHost: string, agent: unknown, message: string, person: string): Promise<string> {
+    const lower = wantHost.toLowerCase();
+    const host = [...this.remotes.values()].find((h) => h.id.toLowerCase() === lower || h.label.toLowerCase() === lower);
+    if (!host || caller.principal || caller.remote || host.person !== person) return `Error: ${REMOTE_START}`;
+    if (!this.takeSlot(this.starts, caller.scope, PEER_START_LIMIT, PEER_START_WINDOW_MS)) {
+      return `Error: rate limit (${PEER_START_LIMIT} new sessions per hour)`;
+    }
+    this.noteOutbound(caller.scope, `remote:${host.id}:*`);
+    let result: RemoteResult;
+    try {
+      const agentName = typeof agent === "string" && agent.trim() ? agent.trim() : undefined;
+      result = await host.start(await this.remoteFrom(caller, person), agentName, message, caller.hops + 1);
+    } catch (err) {
+      return `Error: ${host.label} is unreachable (${err instanceof Error ? err.message : String(err)})`;
+    }
+    if (result.status === "started" || result.status === "delivered" || result.status === "queued") {
+      if (!result.ref || !REF.test(result.ref)) return `Error: ${host.label} didn't say which session it started`;
+      const entry = this.remoteEntry(host, { ref: result.ref, label: result.label ?? "new session", agent: typeof agent === "string" ? agent : "", status: "idle", lastActive: this.deps.now() });
+      this.noteOutbound(caller.scope, entry.scope);
+      this.openReverse(entry.scope, caller.scope);
+      const name = entryName({ ...entry, label: sanitizePeerLabel(entry.label) });
+      return `started on ${host.label}: ${name}. Message it with mcp__peers__send to "${name}"; it replies the same way.`;
+    }
+    if (result.status === "awaiting_approval") {
+      return `held: a new session on ${host.label} (waiting for approval there; the outcome comes to this session as a notice)`;
+    }
+    return `Error: ${sanitizePeerLabel(result.reason ?? "refused").slice(0, 300)}`;
+  }
+
+  /** Other controllers' sessions, for sessions of the person they belong to (never principals or remote callers). */
+  private async remoteEntries(caller: PeerCaller): Promise<PeerEntry[]> {
+    if (caller.principal || caller.remote || !this.remotes.size) return [];
+    const person = this.deps.personName(caller.userId, caller.userPlatform);
+    const hosts = [...this.remotes.values()].filter((host) => host.person === person);
+    const lists = await Promise.all(hosts.map(async (host) => {
+      try {
+        return (await host.list()).filter((s) => typeof s?.ref === "string" && REF.test(s.ref)).map((s) => this.remoteEntry(host, s));
+      } catch (err) {
+        console.warn(`[peers] listing ${host.id} failed:`, err instanceof Error ? err.message : err);
+        return [];
+      }
+    }));
+    return lists.flat();
+  }
+
+  private remoteEntry(host: RemotePeerHost, s: RemoteListing): PeerEntry {
+    const status: PeerStatus = s.status === "busy" || s.status === "closed" ? s.status : "idle";
+    return {
+      scope: `remote:${host.id}:${s.ref}`,
+      ref: `${host.id}:${s.ref}`,
+      label: typeof s.label === "string" ? s.label.slice(0, 200) : "unnamed session",
+      agentId: sanitizePeerLabel(typeof s.agent === "string" && s.agent ? s.agent : "claude-code").slice(0, 60),
+      status,
+      lastActive: typeof s.lastActive === "number" ? s.lastActive : null,
+      sudo: false,
+      host: host.label,
+      remoteHost: host.id,
+      remoteRef: s.ref,
+    };
+  }
+
+  /** How the other controller sees the sending session. */
+  private async remoteFrom(caller: PeerCaller, person: string): Promise<RemoteFrom> {
+    return { ref: peerRef(caller.scope), label: await this.callerLabel(caller), agent: caller.agentId, onBehalfOf: person };
+  }
+
+  /**
+   * The caller for a request from another controller: one of the link person's configured hosts,
+   * a 6-hex ref, hops within the limit. Its turns run as the daemon's person.
+   */
+  private remoteCaller(link: RemoteLink, body: Record<string, unknown>): PeerCaller | string {
+    const from = body.from && typeof body.from === "object" && !Array.isArray(body.from) ? body.from as Record<string, unknown> : null;
+    if (!from) return "`from` is required";
+    const host = typeof from.host === "string" ? this.remotes.get(from.host) : undefined;
+    if (!host || host.person !== link.person) return "unknown host";
+    if (typeof from.ref !== "string" || !REF.test(from.ref)) return "`from.ref` must be 6 hex characters";
+    const hops = body.hops;
+    if (typeof hops !== "number" || !Number.isInteger(hops) || hops < 1) return "`hops` must be a positive integer";
+    if (hops > PEER_HOP_LIMIT) return "hop limit";
+    const label = sanitizePeerLabel(typeof from.label === "string" ? from.label.slice(0, 200) : "");
+    const agent = sanitizePeerLabel(typeof from.agent === "string" && from.agent.trim() ? from.agent.slice(0, 60) : "claude-code");
+    return {
+      scope: `remote:${host.id}:${from.ref}`,
+      agentId: agent,
+      userId: link.userId,
+      userPlatform: link.userPlatform,
+      hops: hops - 1,
+      remote: { host: host.id, hostLabel: host.label, ref: from.ref, label, agent },
+    };
+  }
+
+  private remoteText(value: unknown, max: number): { ok: true; value: string } | { ok: false; error: string } {
+    if (typeof value !== "string" || !value.trim()) return { ok: false, error: "`text` is required" };
+    if (value.length > max) return { ok: false, error: `message is longer than ${max} characters` };
+    return { ok: true, value };
+  }
+
+  /** One of the daemon's person's sessions here, by ref (`abc123` or `[abc123]`). */
+  private async localTarget(caller: PeerCaller, to: unknown): Promise<PeerEntry | string> {
+    if (typeof to !== "string" || !to.trim()) return "`to` is required";
+    const ref = to.trim().replace(/^\[|\]$/g, "").toLowerCase();
+    if (!REF.test(ref)) return NOT_FOUND;
+    return (await this.list(caller)).find((e) => e.ref === ref) ?? NOT_FOUND;
+  }
+
+  /** The remote session as the approval names it: "MacBook session 'App Debugging'". */
+  private remoteAsker(link: RemoteLink, remote: RemoteSender): PeerPrincipal {
+    return {
+      name: `remote:${remote.host}:${remote.ref}`,
+      label: `${sanitizePeerLabel(remote.hostLabel)} session '${sanitizePeerLabel(remote.label)}'`,
+      host: remote.hostLabel,
+      forPerson: link.person,
+      viewer: { userId: link.userId, userPlatform: link.userPlatform },
+    };
+  }
+
+  /** The other side allowed the conversation (or never needed to ask): its replies here are part of it. A deny here stands. */
+  private openReverse(remoteKey: string, scope: string): void {
+    const pairings = this.deps.pairings;
+    if (!pairings) return;
+    const state = pairings.state(remoteKey, scope).kind;
+    if (state === "allowed") pairings.touch(remoteKey, scope);
+    else if (state === "new") pairings.decide(remoteKey, scope, true);
+  }
+
+  private noteOutbound(scope: string, remoteKey: string): void {
+    const sent = this.outbound.get(scope) ?? new Map<string, number>();
+    sent.set(remoteKey, this.deps.now());
+    this.outbound.set(scope, sent);
+  }
+
+  /** Tell a session on another controller how its message or start went. Best effort. */
+  private async noticeRemote(sender: RemoteSender, about: { ref: string; label: string }, text: string, outcome?: RemoteOutcome): Promise<void> {
+    const host = this.remotes.get(sender.host);
+    if (!host) return;
+    await host.notice({ ref: about.ref, label: sanitizePeerLabel(about.label) }, sender.ref, text, outcome).catch((err) =>
+      console.warn(`[peers] notice to ${sender.host}:${sender.ref} failed:`, err instanceof Error ? err.message : err));
+  }
+
   /** The wrapped, orchestrator-stamped message the target sees. */
   async wrap(caller: PeerCaller, message: string): Promise<string> {
-    const from = `${await this.callerLabel(caller)} [${peerRef(caller.scope)}]`;
+    const from = `${await this.callerLabel(caller)} [${this.callerRef(caller)}]`;
     const person = this.deps.personName(caller.userId, caller.userPlatform) ?? caller.userId;
     const noReply = caller.scope.startsWith("#sched:") ? " · no reply possible" : "";
-    const host = caller.principal ? sanitizePeerLabel(caller.principal.host) : this.deps.hostName;
+    const host = caller.principal
+      ? sanitizePeerLabel(caller.principal.host)
+      : caller.remote ? sanitizePeerLabel(caller.remote.hostLabel) : this.deps.hostName;
     return [
       `[peer: from ${from} · agent ${caller.agentId} · on behalf of ${person} · host ${host}${noReply}]`,
       `<cross-session-message from="${from.replace(/"/g, "'")}">`,
@@ -523,18 +957,30 @@ export class PeerService implements PeerProvider {
   }
 
   private callerLabel(caller: PeerCaller): Promise<string> {
-    return caller.principal ? Promise.resolve(sanitizePeerLabel(caller.principal.label)) : this.labelFor(caller.scope);
+    if (caller.principal) return Promise.resolve(sanitizePeerLabel(caller.principal.label));
+    if (caller.remote) return Promise.resolve(sanitizePeerLabel(caller.remote.label));
+    return this.labelFor(caller.scope);
   }
 
-  /** A principal is never in sudo mode; a session is when its open session runs as root. */
+  /** The ref replies use: this host's, or `<host>:<ref>` for a session on another controller. */
+  private callerRef(caller: PeerCaller): string {
+    return caller.remote ? `${caller.remote.host}:${caller.remote.ref}` : peerRef(caller.scope);
+  }
+
+  /** Principals and other controllers' sessions are never in sudo mode; a session is when its open session runs as root. */
   private fromSudo(caller: PeerCaller): boolean {
-    return !caller.principal && this.deps.runsAsRoot(caller.scope);
+    return !caller.principal && !caller.remote && this.deps.runsAsRoot(caller.scope);
   }
 
-  /** The receiver may reply to this api: scope or principal for the next 24 h. */
+  /** The receiver may reply to this api: scope, principal or remote session for the next 24 h. */
   private noteInbound(targetScope: string, caller: PeerCaller): void {
-    const inbound = this.apiInbound.get(targetScope) ?? new Map<string, { at: number; agentId: string; principal?: PeerPrincipal }>();
-    inbound.set(caller.scope, { at: this.deps.now(), agentId: caller.agentId, ...(caller.principal && { principal: caller.principal }) });
+    const inbound = this.apiInbound.get(targetScope) ?? new Map<string, InboundNote>();
+    inbound.set(caller.scope, {
+      at: this.deps.now(),
+      agentId: caller.agentId,
+      ...(caller.principal && { principal: caller.principal }),
+      ...(caller.remote && { remote: caller.remote }),
+    });
     this.apiInbound.set(targetScope, inbound);
   }
 
@@ -551,8 +997,9 @@ export class PeerService implements PeerProvider {
 
   /** `to` may be a ref, a unique label, or the full `label [ref]` form. */
   private async resolve(caller: PeerCaller, to: string): Promise<PeerEntry | string> {
-    const full = to.match(/^(.*)\s\[([0-9a-f]{6})\]$/i);
-    const refOnly = /^\[?([0-9a-f]{6})\]?$/i.exec(to);
+    // Another controller's sessions carry their host: `[mac:3fa9c1]`.
+    const full = to.match(/^(.*)\s\[((?:[a-z0-9-]{1,32}:)?[0-9a-f]{6})\]$/i);
+    const refOnly = /^\[?((?:[a-z0-9-]{1,32}:)?[0-9a-f]{6})\]?$/i.exec(to);
     const wantRef = (full?.[2] ?? refOnly?.[1])?.toLowerCase();
     const wantLabel = full ? full[1].trim() : refOnly ? null : to;
 
@@ -578,8 +1025,13 @@ export class PeerService implements PeerProvider {
     if (!inbound) return [];
     const now = this.deps.now();
     const out: PeerEntry[] = [];
-    for (const [scope, { at, agentId, principal }] of inbound) {
+    for (const [scope, { at, agentId, principal, remote }] of inbound) {
       if (now - at > PEER_API_REPLY_WINDOW_MS) { inbound.delete(scope); continue; }
+      if (remote) {
+        const host = this.remotes.get(remote.host);
+        if (host) out.push(this.remoteEntry(host, { ref: remote.ref, label: remote.label, agent: agentId, status: "idle", lastActive: at }));
+        continue;
+      }
       if (principal) {
         out.push({ scope, ref: peerRef(scope), label: sanitizePeerLabel(principal.label), agentId, status: "idle", lastActive: at, sudo: false, principal: principal.name });
         continue;

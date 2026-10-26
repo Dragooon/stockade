@@ -17,6 +17,18 @@
  *   POST /controller/approvals/:id {behaviour: allow|deny}
  *                                 — decide an app:/peer: approval (403 read_only for one
  *                                   answered in Discord or the terminal)
+ *   GET /controller/peer/sessions — D4: the person's sessions, for another controller's list
+ *   POST /controller/peer/inbound {from, to, text, hops}
+ *                                 — D4: a session on another controller messages one of them
+ *                                   → {status: delivered|queued|awaiting_approval|refused, reason?}
+ *   POST /controller/peer/start {from, agent?, text, hops}
+ *                                 — D4: start a new peer: session for the person
+ *                                   → {status: started|awaiting_approval|refused, ref?, label?}
+ *   POST /controller/peer/notice {from, to, text, outcome?}
+ *                                 — D4: the other controller's outcome for a message or start a
+ *                                   session here sent (allowed|denied|undelivered)
+ *                                   (`from.host` is a configured peers.remote host id; without
+ *                                   peers.remote for the person, these are 404 unsupported)
  *   GET /controller/events        — SSE: `session` (a listed session's state changed),
  *                                   `transcript` (a new record, SSE id = record id),
  *                                   `approval` / `decision` (pending ones replayed on connect),
@@ -38,6 +50,16 @@ export interface ControllerRoutesOptions {
   services: Map<string, ControllerService>;
   /** This Stockade's controller identity, e.g. {id: "mustafar", name: "Mustafar"}. */
   controller: { id: string; name: string };
+  /** D4: other controllers' requests through the daemon, for the token's person (null: not set up for them). */
+  peerLink?: (person: string) => PeerLinkHandlers | null;
+}
+
+/** What /controller/peer/* calls for one person. */
+export interface PeerLinkHandlers {
+  sessions(): Promise<unknown>;
+  inbound(body: Record<string, unknown>): Promise<unknown>;
+  start(body: Record<string, unknown>): Promise<unknown>;
+  notice(body: Record<string, unknown>): Promise<unknown>;
 }
 
 const digest = (value: string) => createHash("sha256").update(value).digest();
@@ -117,6 +139,24 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
 
   app.post("/controller/approvals/:id", (c) =>
     answer(c, async () => serviceOf(c).decide(c.req.param("id"), await jsonBody(c))));
+
+  const linkOf = (c: Context) => options.peerLink?.(serviceOf(c).person) ?? null;
+  const unsupported = (c: Context) => c.json({ error: "unsupported" }, 404);
+  app.get("/controller/peer/sessions", async (c) => {
+    const link = linkOf(c);
+    return link ? c.json(await link.sessions() as object) : unsupported(c);
+  });
+  for (const op of ["inbound", "start", "notice"] as const) {
+    app.post(`/controller/peer/${op}`, async (c) => {
+      const link = linkOf(c);
+      if (!link) return unsupported(c);
+      return answer(c, async () => {
+        const result = await link[op](await jsonBody(c)) as { status?: string; reason?: string };
+        console.log(`[peers] remote ${op} for ${serviceOf(c).person}: ${result.status ?? "?"}${result.reason ? ` (${result.reason.slice(0, 80)})` : ""}`);
+        return result;
+      });
+    });
+  }
 
   app.get("/controller/events", (c) => {
     const service = serviceOf(c);

@@ -5,6 +5,7 @@ import {
   bindScope,
   getScopeBinding,
   isBoundScope,
+  unbindScope,
 } from "../src/scope-bindings.js";
 
 const APP = "app:shitiz:abc";
@@ -49,5 +50,12 @@ describe("scope bindings", () => {
 
   it("refuses to bind scopes that config resolves", () => {
     expect(() => bindScope(db, { scope: "discord:1:2", agentId: "main", person: "shitiz", origin: "app" })).toThrow(/not a bound scope/);
+  });
+
+  it("forgets a binding on request (a refused peer start)", () => {
+    bindScope(db, { scope: PEER, agentId: "main", person: "shitiz", origin: "peer" });
+    expect(unbindScope(db, PEER)).toBe(true);
+    expect(getScopeBinding(db, PEER)).toBeNull();
+    expect(unbindScope(db, PEER)).toBe(false);
   });
 });

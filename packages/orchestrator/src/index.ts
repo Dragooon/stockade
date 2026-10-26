@@ -12,13 +12,14 @@ import { checkAccess, hasPermission, resolveUser } from "./rbac.js";
 import { SudoRegistry } from "./sudo.js";
 import { agentTranscriptDirs } from "./run-as.js";
 import { initSessionsTable, getSessionId, setSessionId, deleteSession, getAllSessions } from "./sessions.js";
-import { PeerService, escapePeerText, type PeerCaller } from "./peers.js";
+import { PeerService, escapePeerText, type PeerCaller, type RemoteLink, type RemotePeerHost } from "./peers.js";
+import { HttpRemotePeerHost } from "./peer-remote.js";
 import { PeerPairings } from "./peer-pairings.js";
 import {
   initParticipantsTable, recordParticipant, backfillParticipants, hasParticipantBackfill,
   personParticipation, scopeParticipants,
 } from "./participants.js";
-import { initScopeBindingsTable, getScopeBinding, isBoundScope, scopesBoundTo, bindScope } from "./scope-bindings.js";
+import { initScopeBindingsTable, getScopeBinding, isBoundScope, scopesBoundTo, bindScope, unbindScope } from "./scope-bindings.js";
 import { ControllerService } from "./controller.js";
 import { TranscriptReader } from "./controller-transcript.js";
 import { ControllerApprovals } from "./controller-approvals.js";
@@ -455,6 +456,30 @@ const peerPairings = new PeerPairings(db, Object.fromEntries(
   (config.platform.peers?.principals ?? []).map((principal) => [principal.name, principal.pre_approved]),
 ));
 
+// Other controllers (D4), through each person's local cc-controller daemon.
+const remotePeerHosts: RemotePeerHost[] = [];
+for (const entry of config.platform.peers?.remote ?? []) {
+  if (!Object.entries(config.platform.rbac.users[entry.for]?.identities ?? {})[0]) {
+    console.error(`[peers] remote for "${entry.for}" skipped: no such user with an identity in rbac.users`);
+    continue;
+  }
+  const token = readTokenFile(entry.token_file, `peer proxy token for "${entry.for}"`);
+  if (!token) continue;
+  for (const host of entry.hosts) {
+    if (remotePeerHosts.some((known) => known.id === host.id)) {
+      console.error(`[peers] remote host "${host.id}" skipped: the id is used twice`);
+      continue;
+    }
+    try {
+      remotePeerHosts.push(new HttpRemotePeerHost({
+        id: host.id, label: host.label, person: entry.for, defaultAgent: host.default_agent, url: entry.url, token,
+      }));
+    } catch (err) {
+      console.error(`[peers] remote host "${host.id}" skipped:`, err instanceof Error ? err.message : err);
+    }
+  }
+}
+
 const peers = new PeerService({
   knownScopes: () => [...getAllSessions(db).map((r) => r.scope), ...sessionManager.liveScopes()],
   agentForScope: peerAgentForScope,
@@ -524,12 +549,16 @@ const peers = new PeerService({
     bindScope(db, { scope, agentId, person, origin });
     return scope;
   },
+  // A start its person refused: the scope never got a session.
+  dropPeerScope: (scope) => {
+    if (scope.startsWith("peer:") && !sessionManager.get(scope)) unbindScope(db, scope);
+  },
   pairings: peerPairings,
   // A principal's first message to a session: peer_conversation, asked where the session's
   // approvals go (the app for app:/peer:, the channel for Discord, mirrored read-only in the app).
-  askPairing: async (principal, target, preview) => {
+  askPairing: async (principal, target, preview, request) => {
     const input = {
-      request: `${principal.label} wants to message ${target.label}. Allow?`,
+      request: request ?? `${principal.label} wants to message ${target.label}. Allow?`,
       from: principal.label,
       host: principal.host,
       to: target.label,
@@ -544,7 +573,14 @@ const peers = new PeerService({
   },
   hostName: hostname().charAt(0).toUpperCase() + hostname().slice(1),
   now: () => Date.now(),
-});
+}, remotePeerHosts);
+
+/** D4: who /controller/peer/* acts as for a person with a peers.remote entry (their first identity, like their controller token). */
+function remoteLinkFor(person: string): RemoteLink | null {
+  if (!remotePeerHosts.some((host) => host.person === person)) return null;
+  const identity = Object.entries(config.platform.rbac.users[person]?.identities ?? {})[0];
+  return identity ? { person, userId: identity[1], userPlatform: identity[0] } : null;
+}
 
 /** /sudo on, from Discord or the app: the next message resumes the conversation as the sudo user. */
 async function sudoOn(scope: string, openedBy: string, who: string): Promise<void> {
@@ -767,6 +803,15 @@ const stopCallbackServer = startCallbackServer(
     mountControllerRoutes(app, {
       services: controllerServices,
       controller: { id: hostname().toLowerCase(), name: hostname().charAt(0).toUpperCase() + hostname().slice(1) },
+      peerLink: (person) => {
+        const link = remoteLinkFor(person);
+        return link && {
+          sessions: () => peers.remoteSessions(link),
+          inbound: (body) => peers.remoteInbound(link, body),
+          start: (body) => peers.remoteStart(link, body),
+          notice: (body) => peers.remoteNotice(link, body),
+        };
+      },
     });
     mountPeerPrincipalRoutes(app, { callers: principalCallers, peers });
   },

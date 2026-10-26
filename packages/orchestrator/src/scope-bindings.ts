@@ -58,6 +58,11 @@ export function bindScope(
   return stored;
 }
 
+/** Forget a binding that never got a session: a peer start its person refused. */
+export function unbindScope(db: Database.Database, scope: string): boolean {
+  return db.prepare("DELETE FROM scope_bindings WHERE scope = ?").run(scope).changes > 0;
+}
+
 interface ScopeBindingRow {
   scope: string;
   agent_id: string;

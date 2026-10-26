@@ -554,6 +554,49 @@ describe("controller routes: d3b-4", () => {
   });
 });
 
+describe("controller routes: peer link (D4)", () => {
+  const TOKEN = "t".repeat(40);
+  const call = (hono: Hono, method: string, path: string, body?: unknown) =>
+    hono.request(path, {
+      method,
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  it("is 404 unsupported without a link for the token's person", async () => {
+    const hono = new Hono();
+    mountControllerRoutes(hono, { services: new Map([[TOKEN, world().service]]), controller: { id: "mustafar", name: "Mustafar" }, peerLink: () => null });
+    for (const [method, path] of [["GET", "/controller/peer/sessions"], ["POST", "/controller/peer/inbound"], ["POST", "/controller/peer/start"], ["POST", "/controller/peer/notice"]]) {
+      const res = await call(hono, method, path, method === "POST" ? {} : undefined);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "unsupported" });
+    }
+  });
+
+  it("passes the token's person and the body to the link, and needs the token", async () => {
+    const seen: Array<[string, string, unknown]> = [];
+    const hono = new Hono();
+    mountControllerRoutes(hono, {
+      services: new Map([[TOKEN, world().service]]),
+      controller: { id: "mustafar", name: "Mustafar" },
+      peerLink: (person) => ({
+        sessions: async () => { seen.push([person, "sessions", null]); return [{ ref: "abcdef" }]; },
+        inbound: async (body) => { seen.push([person, "inbound", body]); return { status: "delivered" }; },
+        start: async (body) => { seen.push([person, "start", body]); return { status: "awaiting_approval", ref: "123abc" }; },
+        notice: async (body) => { seen.push([person, "notice", body]); return { status: "refused", reason: "no" }; },
+      }),
+    });
+    expect(await (await call(hono, "GET", "/controller/peer/sessions")).json()).toEqual([{ ref: "abcdef" }]);
+    expect(await (await call(hono, "POST", "/controller/peer/inbound", { to: "x" })).json()).toEqual({ status: "delivered" });
+    expect(await (await call(hono, "POST", "/controller/peer/start", { text: "y" })).json()).toEqual({ status: "awaiting_approval", ref: "123abc" });
+    expect(await (await call(hono, "POST", "/controller/peer/notice", {})).json()).toEqual({ status: "refused", reason: "no" });
+    expect(seen).toEqual([["shitiz", "sessions", null], ["shitiz", "inbound", { to: "x" }], ["shitiz", "start", { text: "y" }], ["shitiz", "notice", {}]]);
+    expect((await hono.request("/controller/peer/sessions")).status).toBe(401);
+    const bad = await hono.request("/controller/peer/inbound", { method: "POST", headers: { authorization: `Bearer ${TOKEN}` }, body: "{nope" });
+    expect(bad.status).toBe(400);
+  });
+});
+
 describe("ControllerService: approvals (§6)", () => {
   function approvalWorld(canApprove = true) {
     let next = 0;
