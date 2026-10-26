@@ -13,6 +13,7 @@
  * Written (§4, §7): messages into writable (app:/peer:) scopes only, and new app: scopes.
  * Approvals (§6): those in listed scopes reach the app; only app:/peer: ones are decided there.
  * AskUserQuestion questions are approvals with `questions`, answered with `answers`.
+ * Sudo (§9): P toggles sudo mode on writable scopes, with Discord's canSudo check.
  */
 
 import { createHash } from "node:crypto";
@@ -55,6 +56,8 @@ export interface ControllerAgent {
 
 /** Capabilities the Stockade source advertises; grows as D3b units land (d3b-5/6/7). */
 export const CONTROLLER_CAPABILITIES = ["list", "transcript", "send", "new_session", "decide", "questions"] as const;
+/** Advertised too when Stockade has sudo mode (an agent with a sudo_user). */
+export const CONTROLLER_SUDO_CAPABILITY = "sudo";
 
 export type ControllerEvent =
   /** A visible session's state changed (turn started or ended, session opened or closed). */
@@ -130,6 +133,8 @@ export interface ControllerDeps {
   approvals?: ControllerApprovals;
   /** Does P hold `approve`? Without it P sees approvals but can't decide them. */
   canApprove?: () => boolean;
+  /** Sudo mode, when Stockade has it: P's `sudo` permission, and the /sudo toggle (true = now on). */
+  sudo?: { canSudo: () => boolean; toggle: (scope: string) => Promise<boolean> };
 }
 
 const API_UUID_SCOPE = /^api:[^:]+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -191,6 +196,10 @@ export class ControllerService {
     return this.deps.agents();
   }
 
+  capabilities(): string[] {
+    return [...CONTROLLER_CAPABILITIES, ...(this.deps.sudo ? [CONTROLLER_SUDO_CAPABILITY] : [])];
+  }
+
   subscribe(listener: (event: ControllerEvent) => void): () => void {
     this.listeners.add(listener);
     if (!this.followTimer) {
@@ -241,6 +250,26 @@ export class ControllerService {
     const message = checkedText(text);
     const state = this.deps.send(session.scope, message);
     return { delivered: true, queued: state === "queued" };
+  }
+
+  /**
+   * POST sessions/:id/sudo (§9): /sudo from the app. Turns the writable scope's sudo mode on, or off
+   * when it's on, like Discord's /sudo; a task is sent as P's first message once it's on.
+   */
+  async toggleSudo(id: string, body: { task?: unknown }): Promise<ControllerSession> {
+    const session = await this.find(id);
+    if (!session) throw new ControllerError(404, "not_found");
+    if (!session.writable) throw new ControllerError(403, "read_only", "This session is read-only here.");
+    const sudo = this.deps.sudo;
+    if (!sudo) throw new ControllerError(404, "unsupported", "Sudo mode isn't set up here");
+    if (!sudo.canSudo()) throw new ControllerError(403, "not_sudoer", "You don't have sudo.");
+    const hasTask = body.task !== undefined && body.task !== null && !(typeof body.task === "string" && !body.task.trim());
+    const task = hasTask ? checkedText(body.task) : null;
+    const on = await sudo.toggle(session.scope);
+    if (on && task) this.deps.send(session.scope, task);
+    const updated = await this.row(session.scope);
+    if (!updated) throw new ControllerError(404, "not_found");
+    return updated;
   }
 
   /** POST sessions (§7): a new app:<P>:<id> scope with the agent, started with P's first message. */

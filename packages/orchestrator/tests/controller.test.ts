@@ -731,3 +731,66 @@ describe("ControllerService: questions (d3b-6)", () => {
     approvals.decide("a1", "deny");
   });
 });
+
+describe("ControllerService: /sudo from the app (§9)", () => {
+  function sudoWorld(canSudo = true) {
+    const toggled: string[] = [];
+    const w = world({
+      sudo: {
+        canSudo: () => canSudo,
+        toggle: async (scope) => {
+          toggled.push(scope);
+          const on = !w.sudo.has(scope);
+          if (on) w.sudo.add(scope); else w.sudo.delete(scope);
+          return on;
+        },
+      },
+    });
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    recordParticipant(w.db, DISCORD, "shitiz", "discord");
+    return { ...w, toggled };
+  }
+
+  it("toggles a writable session, sends the task only when turning on, and returns the row", async () => {
+    const w = sudoWorld();
+    const id = controllerSessionId(APP);
+    expect(await w.service.toggleSudo(id, { task: "restart stockade" })).toMatchObject({ scope: APP, sudo: true });
+    expect(w.sent).toEqual([{ scope: APP, text: "restart stockade" }]);
+    expect(await w.service.toggleSudo(id, { task: "ignored when turning off" })).toMatchObject({ sudo: false });
+    expect(await w.service.toggleSudo(id, {})).toMatchObject({ sudo: true });
+    expect(await w.service.toggleSudo(id, { task: "   " })).toMatchObject({ sudo: false });
+    expect(w.sent).toHaveLength(1);
+  });
+
+  it("refuses read-only, unknown, non-sudoers and bad tasks without toggling", async () => {
+    const w = sudoWorld();
+    await expect(w.service.toggleSudo(controllerSessionId(DISCORD), {})).rejects.toMatchObject({ status: 403, code: "read_only" });
+    await expect(w.service.toggleSudo("000000000000", {})).rejects.toMatchObject({ status: 404 });
+    await expect(w.service.toggleSudo(controllerSessionId(APP), { task: 42 })).rejects.toMatchObject({ status: 400 });
+    const nobody = sudoWorld(false);
+    await expect(nobody.service.toggleSudo(controllerSessionId(APP), {})).rejects.toMatchObject({ status: 403, code: "not_sudoer" });
+    expect([...w.toggled, ...nobody.toggled]).toEqual([]);
+  });
+
+  it("is unsupported, and not advertised, without sudo mode", async () => {
+    const w = world();
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    expect(w.service.capabilities()).not.toContain("sudo");
+    expect(sudoWorld().service.capabilities()).toContain("sudo");
+    await expect(w.service.toggleSudo(controllerSessionId(APP), {})).rejects.toMatchObject({ status: 404, code: "unsupported" });
+  });
+
+  it("is served at POST sessions/:id/sudo", async () => {
+    const TOKEN = "t".repeat(40);
+    const w = sudoWorld();
+    const hono = new Hono();
+    mountControllerRoutes(hono, { services: new Map([[TOKEN, w.service]]), controller: { id: "mustafar", name: "Mustafar" } });
+    const headers = { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" };
+    const info = await (await hono.request("/controller/info", { headers })).json() as { controller: { capabilities: string[] } };
+    expect(info.controller.capabilities).toContain("sudo");
+    const response = await hono.request(`/controller/sessions/${controllerSessionId(APP)}/sudo`, { method: "POST", headers, body: JSON.stringify({ task: "go" }) });
+    expect(await response.json()).toMatchObject({ scope: APP, sudo: true });
+    const readOnly = await hono.request(`/controller/sessions/${controllerSessionId(DISCORD)}/sudo`, { method: "POST", headers, body: "{}" });
+    expect(readOnly.status).toBe(403);
+  });
+});

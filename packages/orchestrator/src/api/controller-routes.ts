@@ -12,6 +12,8 @@
  *                                 — write as the person (403 read_only outside app:/peer:)
  *   POST /controller/sessions {agentId, text}
  *                                 — start a new app:<person>:<id> session, returns its row
+ *   POST /controller/sessions/:id/sudo {task?}
+ *                                 — /sudo: toggle the writable session's sudo mode, returns its row
  *   POST /controller/approvals/:id {behaviour: allow|deny}
  *                                 — decide an app:/peer: approval (403 read_only for one
  *                                   answered in Discord or the terminal)
@@ -27,7 +29,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { CONTROLLER_CAPABILITIES, ControllerError, type ControllerEvent, type ControllerService } from "../controller.js";
+import { ControllerError, type ControllerEvent, type ControllerService } from "../controller.js";
 
 export const CONTROLLER_PING_MS = 20_000;
 
@@ -64,7 +66,7 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
 
   app.get("/controller/info", (c) =>
     c.json({
-      controller: { ...options.controller, kind: "stockade", capabilities: [...CONTROLLER_CAPABILITIES] },
+      controller: { ...options.controller, kind: "stockade", capabilities: serviceOf(c).capabilities() },
       person: serviceOf(c).person,
     }));
 
@@ -109,6 +111,9 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
 
   app.post("/controller/sessions", (c) =>
     answer(c, async () => serviceOf(c).createSession(await jsonBody(c))));
+
+  app.post("/controller/sessions/:id/sudo", (c) =>
+    answer(c, async () => serviceOf(c).toggleSudo(c.req.param("id"), await jsonBody(c))));
 
   app.post("/controller/approvals/:id", (c) =>
     answer(c, async () => serviceOf(c).decide(c.req.param("id"), await jsonBody(c))));

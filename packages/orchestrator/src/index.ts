@@ -512,6 +512,27 @@ const peers = new PeerService({
   now: () => Date.now(),
 });
 
+/** /sudo on, from Discord or the app: the next message resumes the conversation as the sudo user. */
+async function sudoOn(scope: string, openedBy: string, who: string): Promise<void> {
+  sudoRegistry.open(scope, openedBy);
+  sudoNotes.set(scope, SUDO_ON_NOTE(who));
+  await bridge.closeSession(scope, "sudo_on").catch((err) =>
+    console.error(`[sudo] closeSession failed for ${scope.slice(0, 60)}:`, err));
+  console.log(`[sudo] on ${scope} by ${who}`);
+  notifyControllers(scope);
+}
+
+/** /sudo off; false if the scope wasn't in sudo mode. */
+async function sudoOff(scope: string, who: string): Promise<boolean> {
+  if (!sudoRegistry.end(scope)) return false;
+  sudoNotes.set(scope, SUDO_OFF_NOTE);
+  await bridge.closeSession(scope, "sudo_off").catch((err) =>
+    console.error(`[sudo] closeSession failed for ${scope.slice(0, 60)}:`, err));
+  console.log(`[sudo] off ${scope} by ${who}`);
+  notifyControllers(scope);
+  return true;
+}
+
 // Controller API (D3b): one service per configured token, each bound to one person.
 const controllerTranscripts = new TranscriptReader();
 /** scope → the controller message being prepared there, so two messages keep their order. */
@@ -620,6 +641,19 @@ for (const entry of config.platform.controller?.tokens ?? []) {
     send: (scope, text) => sendFromController(scope, text, entry.person, userId, userPlatform),
     approvals: controllerApprovals,
     canApprove: () => hasPermission(userId, userPlatform, "approve", config.platform),
+    ...(sudoEnabled ? {
+      sudo: {
+        canSudo: () => hasPermission(userId, userPlatform, "sudo", config.platform),
+        toggle: async (scope: string) => {
+          if (sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE))) {
+            await sudoOff(scope, entry.person);
+            return false;
+          }
+          await sudoOn(scope, `${userPlatform}:${userId}`, entry.person);
+          return true;
+        },
+      },
+    } : {}),
     createAppScope: (agentId) => {
       const scope = `app:${entry.person}:${randomBytes(6).toString("hex")}`;
       bindScope(db, { scope, agentId, person: entry.person, origin: "app" });
@@ -911,22 +945,9 @@ if (config.platform.channels.discord?.enabled) {
       sudo: {
         canSudo: (id: string) => hasPermission(id, "discord", "sudo", config.platform),
         isActive: (scope: string) => sudoRegistry.state(scope) === "active",
-        start: async (scope: string, id: string) => {
-          sudoRegistry.open(scope, id);
-          const who = resolveUser(id, "discord", config.platform)?.username ?? id;
-          sudoNotes.set(scope, SUDO_ON_NOTE(who));
-          await bridge.closeSession(scope, "sudo_on").catch((err) =>
-            console.error(`[sudo] closeSession failed for ${scope.slice(0, 60)}:`, err));
-          console.log(`[sudo] on ${scope} by ${who}`);
-        },
-        end: async (scope: string, id: string) => {
-          if (!sudoRegistry.end(scope)) return false;
-          sudoNotes.set(scope, SUDO_OFF_NOTE);
-          await bridge.closeSession(scope, "sudo_off").catch((err) =>
-            console.error(`[sudo] closeSession failed for ${scope.slice(0, 60)}:`, err));
-          console.log(`[sudo] off ${scope} by ${id}`);
-          return true;
-        },
+        start: (scope: string, id: string) =>
+          sudoOn(scope, id, resolveUser(id, "discord", config.platform)?.username ?? id),
+        end: (scope: string, id: string) => sudoOff(scope, id),
         idleMinutes: SUDO_IDLE_MINUTES,
       },
     } : {}),
