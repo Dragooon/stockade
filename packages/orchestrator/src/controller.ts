@@ -8,11 +8,15 @@
  * P; and, when `peer_sessions` is on, scopes a peer message or a /dispatch acted for P in
  * (cross-agent sessions, including Kepler's api:kepler). Never: scheduler scopes and
  * throwaway api:<agent>:<uuid> runs.
+ *
+ * Read (§5): raw records when every participant is P, otherwise the text-only projection.
+ * Written (§4, §7): messages into writable (app:/peer:) scopes only, and new app: scopes.
  */
 
 import { createHash } from "node:crypto";
 import type { Participant } from "./participants.js";
 import type { ScopeBinding } from "./scope-bindings.js";
+import { projectTranscript, transcriptRecordId, withRecordIds, type TranscriptRecord } from "./controller-transcript.js";
 
 export type ControllerSessionStatus = "busy" | "idle" | "closed";
 export type ControllerOrigin = "discord" | "app" | "peer" | "terminal";
@@ -44,12 +48,27 @@ export interface ControllerAgent {
   name: string;
 }
 
-/** Capabilities the Stockade source advertises; grows as D3b units land (d3b-4/5/6/7). */
-export const CONTROLLER_CAPABILITIES = ["list"] as const;
+/** Capabilities the Stockade source advertises; grows as D3b units land (d3b-5/6/7). */
+export const CONTROLLER_CAPABILITIES = ["list", "transcript", "send", "new_session"] as const;
 
 export type ControllerEvent =
   /** A visible session's state changed (turn started or ended, session opened or closed). */
-  | { type: "session"; session: ControllerSession };
+  | { type: "session"; session: ControllerSession }
+  /** A new record in a visible session's current transcript (raw or projected, as GET transcript serves it). */
+  | { type: "transcript"; id: string; claudeSessionId: string; recordId: string; record: TranscriptRecord };
+
+/** A refusal the routes turn into an HTTP status and `{error: code}`. */
+export class ControllerError extends Error {
+  constructor(readonly status: 400 | 403 | 404, readonly code: string, message: string = code) {
+    super(message);
+  }
+}
+
+export const TRANSCRIPT_DEFAULT_LIMIT = 500;
+export const TRANSCRIPT_MAX_LIMIT = 1000;
+/** How often a busy session's transcript is checked for new records while an app is connected. */
+export const TRANSCRIPT_FOLLOW_MS = 1000;
+export const CONTROLLER_MESSAGE_MAX_CHARS = 100_000;
 
 export interface ControllerDeps {
   /** P: the config username the token is bound to. */
@@ -75,6 +94,16 @@ export interface ControllerDeps {
   /** Agents P may talk to, from config. */
   agents: () => ControllerAgent[];
   now: () => number;
+  /** Raw records of the scope's current Claude session, oldest first; [] before its first session. */
+  transcript: (scope: string) => Promise<TranscriptRecord[]>;
+  /** Scopes with a turn running right now. */
+  busyScopes: () => string[];
+  /** Start (or join) a turn in the scope as P, without waiting for it. Queued = held behind someone else's turn. */
+  send: (scope: string, text: string) => "delivered" | "queued";
+  /** Bind a new `app:<P>:<id>` scope to the agent and return it. */
+  createAppScope: (agentId: string) => string;
+  /** Transcript polling interval for live sessions (default TRANSCRIPT_FOLLOW_MS). */
+  followMs?: number;
 }
 
 const API_UUID_SCOPE = /^api:[^:]+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -93,6 +122,11 @@ function isAgentRow(row: Participant): boolean {
 
 export class ControllerService {
   private listeners = new Set<(event: ControllerEvent) => void>();
+  /** scope → how many records of its current session subscribers have been sent. */
+  private followed = new Map<string, { claudeSessionId: string; count: number }>();
+  /** scope → the running transcript check, so two checks never send a record twice. */
+  private following = new Map<string, Promise<void>>();
+  private followTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly deps: ControllerDeps) {}
 
@@ -122,21 +156,131 @@ export class ControllerService {
 
   subscribe(listener: (event: ControllerEvent) => void): () => void {
     this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+    if (!this.followTimer) {
+      this.followTimer = setInterval(() => {
+        for (const scope of this.deps.busyScopes()) void this.follow(scope);
+      }, this.deps.followMs ?? TRANSCRIPT_FOLLOW_MS);
+      this.followTimer.unref?.();
+    }
+    return () => {
+      this.listeners.delete(listener);
+      if (this.listeners.size === 0 && this.followTimer) {
+        clearInterval(this.followTimer);
+        this.followTimer = null;
+        // Reconnecting clients page GET transcript from where they were, so start counting afresh.
+        this.followed.clear();
+      }
+    };
   }
 
-  /** Something about a scope changed: tell subscribers, if P can see it. */
+  /** Something about a scope changed: tell subscribers, if P can see it. New records go first, then the row. */
   async notify(scope: string): Promise<void> {
     if (this.listeners.size === 0) return;
+    await this.follow(scope);
     const session = await this.row(scope);
     if (!session) return;
     for (const listener of this.listeners) listener({ type: "session", session });
   }
 
+  /**
+   * GET transcript: the session's current transcript as P may read it, oldest first, after the
+   * record with id `after` (from the start when it isn't there, e.g. after a rotation).
+   */
+  async transcript(id: string, options: { after?: string | null; limit?: number | null } = {}): Promise<TranscriptRecord[]> {
+    const session = await this.find(id);
+    if (!session) throw new ControllerError(404, "not_found");
+    const records = this.readable(session.scope, await this.deps.transcript(session.scope));
+    const start = options.after ? records.findIndex((record, index) => transcriptRecordId(record, index) === options.after) + 1 : 0;
+    const asked = Number.isFinite(options.limit) ? Math.trunc(options.limit!) : TRANSCRIPT_DEFAULT_LIMIT;
+    const limit = Math.max(1, Math.min(TRANSCRIPT_MAX_LIMIT, asked));
+    return records.slice(start, start + limit);
+  }
+
+  /** POST message: P writes in a writable scope (§4). Read-only scopes get 403 read_only. */
+  async send(id: string, text: unknown): Promise<{ delivered: true; queued: boolean }> {
+    const session = await this.find(id);
+    if (!session) throw new ControllerError(404, "not_found");
+    if (!session.writable) throw new ControllerError(403, "read_only", "This session is read-only here.");
+    const message = checkedText(text);
+    const state = this.deps.send(session.scope, message);
+    return { delivered: true, queued: state === "queued" };
+  }
+
+  /** POST sessions (§7): a new app:<P>:<id> scope with the agent, started with P's first message. */
+  async createSession(body: { agentId?: unknown; text?: unknown }): Promise<ControllerSession> {
+    const agentId = typeof body.agentId === "string" ? body.agentId.trim() : "";
+    if (!agentId) throw new ControllerError(400, "agent_required", "agentId is required");
+    const message = checkedText(body.text);
+    if (!this.deps.agents().some((agent) => agent.id === agentId)) {
+      throw new ControllerError(403, "agent_forbidden", "You can't start sessions with this agent");
+    }
+    const scope = this.deps.createAppScope(agentId);
+    this.deps.send(scope, message);
+    const session = await this.row(scope);
+    if (!session) throw new Error(`new app scope is not listed: ${scope.slice(0, 60)}`);
+    return session;
+  }
+
+  /**
+   * Raw records when every participant is P (§5), otherwise the text-only projection. P's own
+   * app: scope counts as P's before anyone has written in it.
+   */
+  private readable(scope: string, records: TranscriptRecord[]): TranscriptRecord[] {
+    const participants = this.deps.participants(scope);
+    const onlyP = participants.every((row) => row.person === this.deps.person) &&
+      (participants.length > 0 || this.deps.binding(scope)?.origin === "app");
+    return onlyP ? withRecordIds(records) : projectTranscript(records);
+  }
+
+  /** Send subscribers the records added to a visible scope's transcript since the last check. */
+  private follow(scope: string): Promise<void> {
+    const previous = this.following.get(scope) ?? Promise.resolve();
+    const next = previous.then(() => this.followNow(scope)).catch((err) =>
+      console.error(`[controller] transcript follow failed for ${scope.slice(0, 60)}:`, err));
+    this.following.set(scope, next);
+    void next.finally(() => {
+      if (this.following.get(scope) === next) this.following.delete(scope);
+    });
+    return next;
+  }
+
+  private async followNow(scope: string): Promise<void> {
+    if (this.listeners.size === 0) return;
+    if (!(await this.listed(scope))) return;
+    const claudeSessionId = this.deps.claudeSessionId(scope);
+    if (!claudeSessionId) {
+      // No Claude session yet (a new app session's first turn is starting): its first
+      // session's records all count as new.
+      this.followed.set(scope, { claudeSessionId: "", count: 0 });
+      return;
+    }
+    const records = this.readable(scope, await this.deps.transcript(scope));
+    const seen = this.followed.get(scope);
+    // First sight of a scope: what's already there was served by GET transcript. A rotated
+    // scope's new session is sent from its first record.
+    const from = !seen ? records.length : seen.claudeSessionId === claudeSessionId ? seen.count : 0;
+    this.followed.set(scope, { claudeSessionId, count: records.length });
+    for (let index = from; index < records.length; index++) {
+      const event: ControllerEvent = {
+        type: "transcript",
+        id: controllerSessionId(scope),
+        claudeSessionId,
+        recordId: transcriptRecordId(records[index], index),
+        record: records[index],
+      };
+      for (const listener of this.listeners) listener(event);
+    }
+  }
+
+  /** Is the scope listed for P? row() without building the row. */
+  private async listed(scope: string): Promise<boolean> {
+    const membership = await this.membership(scope);
+    return !!membership && (membership === "own" || this.deps.peerSessions);
+  }
+
   /** The session as P sees it, or null when it isn't listed for P. */
   private async row(scope: string): Promise<ControllerSession | null> {
-    const membership = await this.membership(scope);
-    if (!membership || (membership === "cross" && !this.deps.peerSessions)) return null;
+    if (!(await this.listed(scope))) return null;
     const label = await this.deps.describe(scope);
     // No awaits from here on: the state is read right before the row is returned, so when two
     // notifies for one scope race, the event emitted last carries the latest state.
@@ -195,6 +339,12 @@ export class ControllerService {
     }
     return null;
   }
+}
+
+function checkedText(text: unknown): string {
+  if (typeof text !== "string" || !text.trim()) throw new ControllerError(400, "text_required", "text is required");
+  if (text.length > CONTROLLER_MESSAGE_MAX_CHARS) throw new ControllerError(400, "text_too_long", "text is too long");
+  return text;
 }
 
 function originOf(scope: string): ControllerOrigin {

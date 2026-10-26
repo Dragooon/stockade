@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { initParticipantsTable, recordParticipant, personParticipation, scopeParticipants } from "../src/participants.js";
 import { initScopeBindingsTable, bindScope, getScopeBinding, scopesBoundTo } from "../src/scope-bindings.js";
 import { ControllerService, controllerSessionId, type ControllerDeps, type ControllerEvent } from "../src/controller.js";
+import type { TranscriptRecord } from "../src/controller-transcript.js";
 import { mountControllerRoutes } from "../src/api/controller-routes.js";
 
 const NOW = Date.parse("2026-10-26T12:00:00.000Z");
@@ -23,6 +24,10 @@ function world(overrides: Partial<ControllerDeps> = {}) {
   const live = new Map<string, "busy" | "idle">();
   const sudo = new Set<string>();
   const turnEnded = new Map<string, number>();
+  const transcripts = new Map<string, TranscriptRecord[]>();
+  const claudeIds = new Map<string, string>([[DISCORD, "claude-1"]]);
+  const sent: Array<{ scope: string; text: string }> = [];
+  let created = 0;
   const service = new ControllerService({
     person: "shitiz",
     peerSessions: true,
@@ -36,12 +41,24 @@ function world(overrides: Partial<ControllerDeps> = {}) {
     status: (scope) => live.get(scope) ?? "closed",
     lastTurnEnded: (scope) => turnEnded.get(scope) ?? null,
     inSudo: (scope) => sudo.has(scope),
-    claudeSessionId: (scope) => (scope === DISCORD ? "claude-1" : null),
+    claudeSessionId: (scope) => claudeIds.get(scope) ?? null,
     agents: () => [{ id: "main", name: "Madge" }],
     now: () => NOW,
+    transcript: async (scope) => transcripts.get(scope) ?? [],
+    busyScopes: () => [...live].filter(([, state]) => state === "busy").map(([scope]) => scope),
+    send: (scope, text) => {
+      sent.push({ scope, text });
+      return live.get(scope) === "busy" ? "queued" : "delivered";
+    },
+    createAppScope: (agentId) => {
+      const scope = `app:shitiz:new${++created}`;
+      bindScope(db, { scope, agentId, person: "shitiz", origin: "app" });
+      return scope;
+    },
+    followMs: 10,
     ...overrides,
   });
-  return { db, service, live, sudo, turnEnded };
+  return { db, service, live, sudo, turnEnded, transcripts, claudeIds, sent };
 }
 
 describe("ControllerService: what the app lists", () => {
@@ -239,7 +256,7 @@ describe("controller routes", () => {
     const app = server(new Map([[TOKEN, w.service]]));
 
     expect(await (await get(app, "/controller/info", TOKEN)).json()).toEqual({
-      controller: { id: "mustafar", name: "Mustafar", kind: "stockade", capabilities: ["list"] },
+      controller: { id: "mustafar", name: "Mustafar", kind: "stockade", capabilities: ["list", "transcript", "send", "new_session"] },
       person: "shitiz",
     });
     const sessions = await (await get(app, "/controller/sessions", TOKEN)).json() as Array<{ id: string; scope: string }>;
@@ -249,7 +266,7 @@ describe("controller routes", () => {
     expect((await get(app, "/controller/sessions/000000000000", TOKEN)).status).toBe(404);
     expect(await (await get(app, "/controller/agents", TOKEN)).json()).toEqual([{ id: "main", name: "Madge" }]);
 
-    const unsupported = await get(app, `/controller/sessions/${sessions[0].id}/transcript`, TOKEN);
+    const unsupported = await get(app, "/controller/approvals", TOKEN);
     expect(unsupported.status).toBe(404);
     expect(await unsupported.json()).toEqual({ error: "unsupported" });
   });
@@ -290,6 +307,248 @@ describe("controller routes", () => {
     await readUntil('"status":"busy"');
     expect(text).toContain(`"scope":"${DISCORD}"`);
     controller.abort();
+    await reader.cancel().catch(() => {});
+  });
+});
+
+const user = (uuid: string, content: unknown, extra: TranscriptRecord = {}): TranscriptRecord =>
+  ({ type: "user", uuid, sessionId: "claude-1", message: { role: "user", content }, ...extra });
+const assistant = (uuid: string, content: unknown[]): TranscriptRecord =>
+  ({ type: "assistant", uuid, sessionId: "claude-1", message: { role: "assistant", id: `m-${uuid}`, model: "opus", content } });
+
+describe("ControllerService: transcripts (§5)", () => {
+  const records: TranscriptRecord[] = [
+    { type: "summary", summary: "no uuid" },
+    user("u1", "[sender: shitiz]\nhello"),
+    assistant("a1", [{ type: "thinking", thinking: "secret" }, { type: "text", text: "hi" }, { type: "tool_use", id: "t1", name: "Bash", input: { command: "cat ~/.ssh/id" } }]),
+    user("u2", [{ type: "tool_result", tool_use_id: "t1", content: "PRIVATE KEY" }]),
+    user("u3", "<command-name>/clear</command-name>"),
+    user("u4", "meta", { isMeta: true }),
+    assistant("s1", [{ type: "text", text: "sidechain" }]),
+    assistant("a2", [{ type: "text", text: "done" }]),
+  ];
+  records[6].isSidechain = true;
+
+  it("serves raw records, with ids for records without a uuid, when only P is in the session", async () => {
+    const w = world();
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    recordParticipant(w.db, APP, "shitiz", "app");
+    w.transcripts.set(APP, records);
+    const served = await w.service.transcript(controllerSessionId(APP));
+    expect(served).toHaveLength(records.length);
+    expect(served[0]).toEqual({ type: "summary", summary: "no uuid", id: "line-0" });
+    expect(served[3]).toBe(records[3]);
+  });
+
+  it("serves the text-only projection when someone else is in the session", async () => {
+    const w = world();
+    recordParticipant(w.db, DISCORD, "shitiz", "discord");
+    recordParticipant(w.db, DISCORD, "urvashi", "discord");
+    w.transcripts.set(DISCORD, records);
+    const served = await w.service.transcript(controllerSessionId(DISCORD));
+    expect(served.map((r) => r.uuid)).toEqual(["u1", "a1", "a2"]);
+    expect(served[1]).toEqual({
+      type: "assistant", uuid: "a1", sessionId: "claude-1",
+      message: { role: "assistant", id: "m-a1", model: "opus", content: [{ type: "text", text: "hi" }] },
+    });
+    expect(JSON.stringify(served)).not.toMatch(/PRIVATE KEY|secret|ssh|sidechain/);
+  });
+
+  it("pages by after and limit, from the start when after is unknown", async () => {
+    const w = world();
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    w.transcripts.set(APP, records);
+    const id = controllerSessionId(APP);
+    expect((await w.service.transcript(id, { after: "a1", limit: 2 })).map((r) => r.uuid)).toEqual(["u2", "u3"]);
+    expect((await w.service.transcript(id, { after: "line-0", limit: 1 }))[0].uuid).toBe("u1");
+    expect(await w.service.transcript(id, { after: "a2" })).toEqual([]);
+    expect(await w.service.transcript(id, { after: "gone", limit: 1 })).toEqual([records[0] && { ...records[0], id: "line-0" }]);
+    expect(await w.service.transcript(id, { limit: 0 })).toHaveLength(1);
+  });
+
+  it("is 404 for a session P can't see", async () => {
+    const w = world();
+    bindScope(w.db, { scope: OTHER_APP, agentId: "main", person: "urvashi", origin: "app" });
+    await expect(w.service.transcript(controllerSessionId(OTHER_APP))).rejects.toMatchObject({ status: 404, code: "not_found" });
+  });
+});
+
+describe("ControllerService: writing (§4, §7)", () => {
+  it("sends into an app scope, reporting queued while someone else's turn runs", async () => {
+    const w = world();
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    expect(await w.service.send(controllerSessionId(APP), "hello")).toEqual({ delivered: true, queued: false });
+    w.live.set(APP, "busy");
+    expect(await w.service.send(controllerSessionId(APP), "again")).toEqual({ delivered: true, queued: true });
+    expect(w.sent).toEqual([{ scope: APP, text: "hello" }, { scope: APP, text: "again" }]);
+  });
+
+  it("refuses Discord scopes as read_only, unknown ids as not_found, and empty text", async () => {
+    const w = world();
+    recordParticipant(w.db, DISCORD, "shitiz", "discord");
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    await expect(w.service.send(controllerSessionId(DISCORD), "hi")).rejects.toMatchObject({ status: 403, code: "read_only" });
+    await expect(w.service.send("000000000000", "hi")).rejects.toMatchObject({ status: 404 });
+    await expect(w.service.send(controllerSessionId(APP), "  ")).rejects.toMatchObject({ status: 400, code: "text_required" });
+    await expect(w.service.send(controllerSessionId(APP), 7)).rejects.toMatchObject({ status: 400 });
+    expect(w.sent).toEqual([]);
+  });
+
+  it("creates an app scope bound to P and the agent, sends the first message, returns its row", async () => {
+    const w = world();
+    const session = await w.service.createSession({ agentId: "main", text: "Check the build" });
+    expect(session).toMatchObject({ scope: "app:shitiz:new1", agentId: "main", origin: "app", writable: true });
+    expect(getScopeBinding(w.db, "app:shitiz:new1")).toMatchObject({ person: "shitiz", agentId: "main", origin: "app" });
+    expect(w.sent).toEqual([{ scope: "app:shitiz:new1", text: "Check the build" }]);
+    expect((await w.service.sessions()).map((s) => s.scope)).toContain("app:shitiz:new1");
+  });
+
+  it("refuses an agent P can't use, and a missing agent or text, without creating anything", async () => {
+    const w = world();
+    await expect(w.service.createSession({ agentId: "kleya", text: "hi" })).rejects.toMatchObject({ status: 403, code: "agent_forbidden" });
+    await expect(w.service.createSession({ text: "hi" })).rejects.toMatchObject({ status: 400, code: "agent_required" });
+    await expect(w.service.createSession({ agentId: "main" })).rejects.toMatchObject({ status: 400, code: "text_required" });
+    expect(scopesBoundTo(w.db, "shitiz")).toEqual([]);
+    expect(w.sent).toEqual([]);
+  });
+});
+
+describe("ControllerService: live transcript events", () => {
+  const transcriptEvents = (events: ControllerEvent[]) =>
+    events.filter((e): e is Extract<ControllerEvent, { type: "transcript" }> => e.type === "transcript");
+
+  it("sends records added after the first look, before the session row, and restarts on a new Claude session", async () => {
+    const w = world();
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    w.claudeIds.set(APP, "c1");
+    w.transcripts.set(APP, [user("u1", "old")]);
+    const events: ControllerEvent[] = [];
+    w.service.subscribe((event) => events.push(event));
+    await w.service.notify(APP); // baseline: u1 was served by GET transcript
+    expect(transcriptEvents(events)).toEqual([]);
+
+    w.transcripts.set(APP, [user("u1", "old"), user("u2", "new"), { type: "summary" }]);
+    await w.service.notify(APP);
+    expect(transcriptEvents(events).map((e) => e.recordId)).toEqual(["u2", "line-2"]);
+    expect(transcriptEvents(events)[0]).toMatchObject({ id: controllerSessionId(APP), claudeSessionId: "c1", record: { uuid: "u2" } });
+    expect(events.at(-1)?.type).toBe("session");
+
+    w.claudeIds.set(APP, "c2");
+    w.transcripts.set(APP, [user("v1", "fresh")]);
+    await w.service.notify(APP);
+    expect(transcriptEvents(events).at(-1)).toMatchObject({ claudeSessionId: "c2", recordId: "v1" });
+  });
+
+  it("sends a new session's first records when it had no Claude session at the first look", async () => {
+    const w = world();
+    const events: ControllerEvent[] = [];
+    w.service.subscribe((event) => events.push(event));
+    const session = await w.service.createSession({ agentId: "main", text: "hi" });
+    await w.service.notify(session.scope); // turn starts: no Claude session yet
+    w.claudeIds.set(session.scope, "c1");
+    w.transcripts.set(session.scope, [user("u1", "hi"), assistant("a1", [{ type: "text", text: "hello" }])]);
+    await w.service.notify(session.scope);
+    expect(transcriptEvents(events).map((e) => e.recordId)).toEqual(["u1", "a1"]);
+  });
+
+  it("polls busy sessions while someone is subscribed, and stops when they leave", async () => {
+    const w = world();
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    w.claudeIds.set(APP, "c1");
+    w.live.set(APP, "busy");
+    const events: ControllerEvent[] = [];
+    const unsubscribe = w.service.subscribe((event) => events.push(event));
+    await new Promise((r) => setTimeout(r, 30));
+    w.transcripts.set(APP, [user("u1", "streamed")]);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(transcriptEvents(events).map((e) => e.recordId)).toEqual(["u1"]);
+    unsubscribe();
+    w.transcripts.set(APP, [user("u1", "streamed"), user("u2", "after")]);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(transcriptEvents(events)).toHaveLength(1);
+  });
+
+  it("projects live records too when the session isn't only P's, and skips scopes P can't see", async () => {
+    const w = world();
+    recordParticipant(w.db, DISCORD, "shitiz", "discord");
+    recordParticipant(w.db, DISCORD, "urvashi", "discord");
+    w.claudeIds.set(HIDDEN, "h1");
+    const events: ControllerEvent[] = [];
+    w.service.subscribe((event) => events.push(event));
+    await w.service.notify(DISCORD);
+    await w.service.notify(HIDDEN);
+    w.transcripts.set(DISCORD, [user("u2", [{ type: "tool_result", content: "PRIVATE" }]), assistant("a3", [{ type: "text", text: "ok" }])]);
+    w.transcripts.set(HIDDEN, [user("x1", "hidden")]);
+    await w.service.notify(DISCORD);
+    await w.service.notify(HIDDEN);
+    expect(transcriptEvents(events).map((e) => e.recordId)).toEqual(["a3"]);
+  });
+});
+
+describe("controller routes: d3b-4", () => {
+  const TOKEN = "t".repeat(40);
+  const app = (service: ControllerService) => {
+    const hono = new Hono();
+    mountControllerRoutes(hono, { services: new Map([[TOKEN, service]]), controller: { id: "mustafar", name: "Mustafar" } });
+    return hono;
+  };
+  const call = (hono: Hono, method: string, path: string, body?: unknown) =>
+    hono.request(path, {
+      method,
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
+    });
+
+  it("serves a transcript page, writes messages, creates sessions, and maps refusals to {error}", async () => {
+    const w = world();
+    recordParticipant(w.db, DISCORD, "shitiz", "discord");
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    w.transcripts.set(APP, [user("u1", "a"), user("u2", "b"), user("u3", "c")]);
+    const hono = app(w.service);
+    const appId = controllerSessionId(APP);
+
+    const page = await call(hono, "GET", `/controller/sessions/${appId}/transcript?after=u1&limit=1`);
+    expect(((await page.json()) as TranscriptRecord[]).map((r) => r.uuid)).toEqual(["u2"]);
+    expect((await call(hono, "GET", "/controller/sessions/000000000000/transcript")).status).toBe(404);
+
+    const sent = await call(hono, "POST", `/controller/sessions/${appId}/message`, { text: "hello" });
+    expect(await sent.json()).toEqual({ delivered: true, queued: false });
+    const readOnly = await call(hono, "POST", `/controller/sessions/${controllerSessionId(DISCORD)}/message`, { text: "hi" });
+    expect(readOnly.status).toBe(403);
+    expect(await readOnly.json()).toMatchObject({ error: "read_only" });
+    expect((await call(hono, "POST", `/controller/sessions/${appId}/message`, "{nope")).status).toBe(400);
+    expect((await call(hono, "POST", `/controller/sessions/${appId}/message`, {})).status).toBe(400);
+
+    const created = await call(hono, "POST", "/controller/sessions", { agentId: "main", text: "Check the build" });
+    expect(created.status).toBe(200);
+    expect(await created.json()).toMatchObject({ scope: "app:shitiz:new1", origin: "app" });
+    const forbidden = await call(hono, "POST", "/controller/sessions", { agentId: "kleya", text: "hi" });
+    expect(forbidden.status).toBe(403);
+    expect(await forbidden.json()).toMatchObject({ error: "agent_forbidden" });
+    expect(w.sent.map((s) => s.text)).toEqual(["hello", "Check the build"]);
+  });
+
+  it("streams transcript events with the record id as the SSE id", async () => {
+    const w = world();
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    w.claudeIds.set(APP, "c1");
+    const hono = app(w.service);
+    const abort = new AbortController();
+    const response = await hono.request("/controller/events", { headers: { authorization: `Bearer ${TOKEN}` }, signal: abort.signal });
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    const readUntil = async (needle: string) => {
+      while (!text.includes(needle)) text += decoder.decode((await reader.read()).value);
+    };
+    await readUntil(": connected");
+    await w.service.notify(APP);
+    w.transcripts.set(APP, [user("u9", "live")]);
+    await w.service.notify(APP);
+    await readUntil("event: transcript");
+    await readUntil("\n\n");
+    expect(text).toMatch(/event: transcript\ndata: \{"type":"transcript"[^\n]*"recordId":"u9"[^\n]*\nid: u9\n/);
+    abort.abort();
     await reader.cancel().catch(() => {});
   });
 });

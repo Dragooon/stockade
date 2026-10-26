@@ -5,7 +5,15 @@
  *   GET /controller/sessions      — sessions listed for the token's person (ControllerSession[])
  *   GET /controller/sessions/:id  — one of them, 404 if not listed
  *   GET /controller/agents        — [{id, name}] the person may talk to
+ *   GET /controller/sessions/:id/transcript?after=&limit=
+ *                                 — the session's current transcript records, oldest first
+ *                                   (raw when only the person is in it, else text-only)
+ *   POST /controller/sessions/:id/message {text}
+ *                                 — write as the person (403 read_only outside app:/peer:)
+ *   POST /controller/sessions {agentId, text}
+ *                                 — start a new app:<person>:<id> session, returns its row
  *   GET /controller/events        — SSE: `session` (a listed session's state changed),
+ *                                   `transcript` (a new record, SSE id = record id),
  *                                   plus a `ping` comment every 20 s
  *
  * Auth is a dedicated controller token per person (config `controller.tokens`), never
@@ -15,7 +23,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { CONTROLLER_CAPABILITIES, type ControllerService } from "../controller.js";
+import { CONTROLLER_CAPABILITIES, ControllerError, type ControllerService } from "../controller.js";
 
 export const CONTROLLER_PING_MS = 20_000;
 
@@ -65,13 +73,47 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
 
   app.get("/controller/agents", (c) => c.json(serviceOf(c).agents()));
 
+  /** Run a service call, turning a ControllerError into its status and `{error: code}`. */
+  const answer = async (c: Context, run: () => Promise<unknown>) => {
+    try {
+      return c.json(await run() as object);
+    } catch (err) {
+      if (err instanceof ControllerError) return c.json({ error: err.code, message: err.message }, err.status);
+      throw err;
+    }
+  };
+  const jsonBody = async (c: Context): Promise<Record<string, unknown>> => {
+    try {
+      const value = await c.req.json();
+      return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    } catch {
+      throw new ControllerError(400, "invalid_json", "body must be a JSON object");
+    }
+  };
+
+  app.get("/controller/sessions/:id/transcript", (c) =>
+    answer(c, () => {
+      const limit = c.req.query("limit");
+      return serviceOf(c).transcript(c.req.param("id"), {
+        after: c.req.query("after") || null,
+        limit: limit === undefined ? null : Number(limit),
+      });
+    }));
+
+  app.post("/controller/sessions/:id/message", (c) =>
+    answer(c, async () => serviceOf(c).send(c.req.param("id"), (await jsonBody(c)).text)));
+
+  app.post("/controller/sessions", (c) =>
+    answer(c, async () => serviceOf(c).createSession(await jsonBody(c))));
+
   app.get("/controller/events", (c) => {
     const service = serviceOf(c);
     return streamSSE(c, async (stream) => {
       let open = true;
       const unsubscribe = service.subscribe((event) => {
         if (!open) return;
-        stream.writeSSE({ event: event.type, data: JSON.stringify(event) }).catch(() => {});
+        const id = event.type === "transcript" ? event.recordId : undefined;
+        stream.writeSSE({ event: event.type, data: JSON.stringify(event), ...(id ? { id } : {}) }).catch(() => {});
       });
       stream.onAbort(() => {
         open = false;

@@ -1,10 +1,10 @@
 import { config as loadEnv } from "dotenv";
 import Database from "better-sqlite3";
 import { resolve } from "node:path";
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import { loadConfig } from "./config.js";
 import { resolveAgent, resolveBinding } from "./router.js";
@@ -17,8 +17,9 @@ import {
   initParticipantsTable, recordParticipant, backfillParticipants, hasParticipantBackfill,
   personParticipation, scopeParticipants,
 } from "./participants.js";
-import { initScopeBindingsTable, getScopeBinding, isBoundScope, scopesBoundTo } from "./scope-bindings.js";
+import { initScopeBindingsTable, getScopeBinding, isBoundScope, scopesBoundTo, bindScope } from "./scope-bindings.js";
 import { ControllerService } from "./controller.js";
+import { TranscriptReader } from "./controller-transcript.js";
 import { mountControllerRoutes } from "./api/controller-routes.js";
 import { hostname } from "node:os";
 import {
@@ -315,14 +316,37 @@ bridge.onFollowup((scope, response) => {
 // 3b. Session history — every session each scope has had, searchable by agents
 // through mcp__sessions__*, bounded by the asking user's own permissions.
 let discordAdapter: DiscordAdapter | null = null;
+/** Where an agent's Claude transcripts live (one projects dir per run-as user). */
+function transcriptDirsFor(agentId: string): string[] {
+  const cfg = config.agents.agents[agentId];
+  return cfg?.host_user ? agentTranscriptDirs(cfg) : [resolve(paths.agents_dir, agentId, ".claude", "projects")];
+}
 const transcriptIndex = new TranscriptIndex(
   resolve(paths.data_dir, "session-index.db"),
   paths.agents_dir,
-  (agentId) => {
-    const cfg = config.agents.agents[agentId];
-    return cfg?.host_user ? agentTranscriptDirs(cfg) : [resolve(paths.agents_dir, agentId, ".claude", "projects")];
-  },
+  transcriptDirsFor,
 );
+
+/**
+ * The newest copy of a Claude session's JSONL (a /sudo switch leaves one per run-as user),
+ * found directly rather than through the index, so a live session can be read every second.
+ */
+function transcriptPath(agentId: string, sessionId: string): string | null {
+  if (!/^[\w-]+$/.test(sessionId)) return null;
+  let best: { path: string; mtime: number } | null = null;
+  for (const projectsDir of transcriptDirsFor(agentId)) {
+    let projects: string[];
+    try { projects = readdirSync(projectsDir); } catch { continue; }
+    for (const project of projects) {
+      const path = resolve(projectsDir, project, `${sessionId}.jsonl`);
+      try {
+        const mtime = statSync(path).mtimeMs;
+        if (!best || mtime > best.mtime) best = { path, mtime };
+      } catch { /* not in this project */ }
+    }
+  }
+  return best?.path ?? null;
+}
 
 /** Human-readable location for a scope, e.g. `thread 'X' in #general`. */
 async function describeScope(scope: string): Promise<string> {
@@ -445,6 +469,61 @@ const peers = new PeerService({
 });
 
 // Controller API (D3b): one service per configured token, each bound to one person.
+const controllerTranscripts = new TranscriptReader();
+/** scope → the controller message being prepared there, so two messages keep their order. */
+const controllerSends = new Map<string, Promise<void>>();
+
+/**
+ * A message the person wrote in the app (POST message / POST sessions): it runs like their
+ * message in a channel (sudo mode, session-start header, sender tag), and nobody waits for
+ * the reply: the app reads it from the transcript.
+ */
+function sendFromController(scope: string, text: string, person: string, userId: string, userPlatform: string): "delivered" | "queued" {
+  const state = bridge.deliveryState(scope, { userId, userPlatform });
+  const previous = controllerSends.get(scope) ?? Promise.resolve();
+  const next = previous.then(async () => {
+    const agentId = peerAgentForScope(scope);
+    if (!agentId || !checkAccess(userId, userPlatform, agentId, config.platform)) {
+      console.error(`[controller] message for ${scope.slice(0, 60)} dropped: ${person} can't use its agent`);
+      return;
+    }
+    let sudoState = sudoRegistry.state(scope);
+    if (sudoState === "expired") {
+      sudoRegistry.clear(scope);
+      sudoNotes.set(scope, SUDO_TIMEOUT_NOTE);
+      sudoState = "none";
+    }
+    const sudo = sudoState === "active";
+    if (sudo) sudoRegistry.touch(scope);
+    const open = sessionManager.get(scope);
+    if (open && open.sudo !== sudo) {
+      await bridge.closeSession(scope, sudo ? "sudo_on" : "sudo_off").catch((err) =>
+        console.error(`[sudo] closeSession failed for ${scope.slice(0, 60)}:`, err));
+    }
+    const sudoNote = sudoNotes.get(scope);
+    sudoNotes.delete(scope);
+    noteParticipant(scope, person, "app");
+    const isFresh = !sessionManager.get(scope) && !getSessionId(db, scope);
+    const header = isFresh ? `${buildSessionStartHeader({ locationLabel: await describeScope(scope) }, scope, agentId)}\n` : "";
+    // Only the platform writes [sender:/[platform:/[peer: lines: neutralise look-alikes in what people type.
+    void bridge.sendAndWait(scope, `${header}${sudoNote ? `${sudoNote}\n` : ""}[sender: ${person} | via: app]\n${escapePeerText(text)}`, {
+      agentId,
+      userId,
+      userPlatform,
+      sudo,
+      // Approvals reach the app in d3b-5; until then an `ask` rule is refused in app sessions.
+      beforeRun: () => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)) !== sudo
+        ? "its sudo mode changed while it waited"
+        : null,
+    }).catch((err) => console.error(`[controller] turn failed in ${scope.slice(0, 60)}:`, err));
+  }).catch((err) => console.error(`[controller] message for ${scope.slice(0, 60)} failed:`, err));
+  controllerSends.set(scope, next);
+  void next.finally(() => {
+    if (controllerSends.get(scope) === next) controllerSends.delete(scope);
+  });
+  return state;
+}
+
 for (const entry of config.platform.controller?.tokens ?? []) {
   const user = config.platform.rbac.users[entry.person];
   const identity = user && Object.entries(user.identities)[0];
@@ -485,6 +564,19 @@ for (const entry of config.platform.controller?.tokens ?? []) {
       .filter(([agentId]) => checkAccess(userId, userPlatform, agentId, config.platform))
       .map(([agentId, agent]) => ({ id: agentId, name: agent.name ?? agentId })),
     now: () => Date.now(),
+    transcript: async (scope) => {
+      const sessionId = getSessionId(db, scope);
+      const agentId = sessionId ? peerAgentForScope(scope) : null;
+      const path = agentId ? transcriptPath(agentId, sessionId!) : null;
+      return path ? controllerTranscripts.read(path) : [];
+    },
+    busyScopes: () => bridge.busyScopes(),
+    send: (scope, text) => sendFromController(scope, text, entry.person, userId, userPlatform),
+    createAppScope: (agentId) => {
+      const scope = `app:${entry.person}:${randomBytes(6).toString("hex")}`;
+      bindScope(db, { scope, agentId, person: entry.person, origin: "app" });
+      return scope;
+    },
   }));
   console.log(`[controller] token for "${entry.person}" loaded`);
 }

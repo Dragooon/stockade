@@ -148,6 +148,11 @@ export class OrchestratorBridge {
     return (this.inFlight.get(scope) ?? 0) > 0;
   }
 
+  /** Scopes with a turn running right now. */
+  busyScopes(): string[] {
+    return [...this.inFlight.keys()];
+  }
+
   /** When the scope's last turn ended (epoch ms), or null if none has since startup. */
   lastTurnEnded(scope: string): number | null {
     return this.turnEnded.get(scope) ?? null;
