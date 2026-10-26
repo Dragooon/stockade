@@ -73,8 +73,6 @@ function world(overrides: Partial<PeerDeps> = {}) {
     inSudo: (scope) => sudo.isActive(scope),
     runsAsRoot: (scope) => rootScopes.has(scope),
     personName: (userId) => (userId === "system" ? null : userId),
-    deliveryState: (scope, meta) =>
-      status[scope] === "busy" && runningPerson[scope] !== meta.userId ? "queued" : "delivered",
     deliver: (scope, text, meta) => {
       deliveries.push({ scope, text, meta });
       return new Promise<ChannelResponse>((resolve) => replies.set(scope, resolve));
@@ -231,11 +229,12 @@ describe("delivery", () => {
     expect(deliveries.map((d) => d.scope)).toEqual([SAME_NAME_A, ALICE_ROOM]);
   });
 
-  it("a busy session running someone else's turn queues the message", async () => {
-    const { service, runningPerson, status } = world();
+  it("a busy session running someone else's turn gets the message injected too", async () => {
+    const { service, runningPerson, status, deliveries } = world();
     status[GENERAL] = "busy";
     runningPerson[GENERAL] = "bob";
-    expect(await service.sendTool(caller("alice", ALICE_ROOM), peerRef(GENERAL), "later")).toMatch(/^queued/);
+    expect(await service.sendTool(caller("alice", ALICE_ROOM), peerRef(GENERAL), "now")).toMatch(/^delivered/);
+    expect(deliveries.map((d) => d.scope)).toEqual([GENERAL]);
   });
 
   it("a closed session is resumed by its scope", async () => {

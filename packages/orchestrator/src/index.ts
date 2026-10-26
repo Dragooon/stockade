@@ -386,7 +386,6 @@ const peers = new PeerService({
   inSudo: (scope) => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)),
   runsAsRoot: (scope) => !!sessionManager.get(scope)?.sudo,
   personName: (userId, userPlatform) => resolveUser(userId, userPlatform, config.platform)?.username ?? null,
-  deliveryState: (scope, meta) => bridge.deliveryState(scope, { userId: meta.userId, userPlatform: meta.userPlatform }),
   deliver: async (scope, text, meta) => {
     // A scope in sudo mode takes the message in its sudo session, like a person's message there
     // (expired = everyday again), but only from a sudo session: sendTool checks first, and this
@@ -418,11 +417,6 @@ const peers = new PeerService({
       sudo,
       askApproval: approvalChannel ? askApprovalFor(approvalChannel, meta.agentId) : undefined,
       askQuestions: approvalChannel?.askQuestions,
-      // A message held behind a busy turn is checked again when it's released: if /sudo was
-      // turned on or off meanwhile, it would run in the wrong mode, so the bridge drops it.
-      beforeRun: () => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)) !== sudo
-        ? "target's sudo mode changed while the message waited"
-        : null,
     });
   },
   post: (scope, text) => (scope.startsWith("discord:") || scope.startsWith("terminal:") ? sendToChannel(scope, text) : Promise.resolve()),

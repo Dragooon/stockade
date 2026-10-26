@@ -143,8 +143,6 @@ export interface PeerDeps {
   runsAsRoot(scope: string): boolean;
   /** Display name for the person (RBAC username), or null for nobody. */
   personName(userId: string, userPlatform: string): string | null;
-  /** Would a message for this person join or start a turn now ("delivered"), or wait ("queued")? */
-  deliveryState(scope: string, meta: PeerDeliveryMeta): "delivered" | "queued";
   /** Hand the wrapped message to the target's session. Resolves with the turn's result. */
   deliver(scope: string, text: string, meta: PeerDeliveryMeta): Promise<ChannelResponse>;
   /** Post into a scope's own chat channel (no-op for scopes without one). */
@@ -218,7 +216,6 @@ export class PeerService implements PeerProvider {
       hops: from.hops + 1,
       fromSudo: this.deps.runsAsRoot(from.scope),
     };
-    const state = this.deps.deliveryState(entry.scope, meta);
     const person = this.deps.personName(from.userId, from.userPlatform) ?? from.userId;
     const fromLabel = await this.labelFor(from.scope);
     this.deps.deliver(entry.scope, wrapped, meta).then(async (result) => {
@@ -230,7 +227,8 @@ export class PeerService implements PeerProvider {
     }).catch((err) => {
       console.error(`[peers] delivery to ${entry.scope.slice(0, 40)} failed:`, err instanceof Error ? err.message : err);
     });
-    return state;
+    // Local delivery is immediate: it starts a turn, or joins the running one (anyone's).
+    return "delivered";
   }
 
   /** All providers' entries for the caller, newest first, capped. */
@@ -292,7 +290,7 @@ export class PeerService implements PeerProvider {
     const provider = target.host ? this.providers.find((p) => p !== this) : this;
     if (!provider) return `Error: ${NOT_FOUND}`;
     const state = await provider.send(target, wrapped, caller);
-    return `${state}: ${entryName(target)}${state === "queued" ? " (it's busy with someone else's turn; your message starts its own turn when that ends)" : ""}`;
+    return `${state}: ${entryName(target)}${state === "queued" ? " (not reachable right now; it's delivered when it is)" : ""}`;
   }
 
   // ── Internals ──
