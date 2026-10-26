@@ -11,7 +11,7 @@ const SCOPE = "discord:g:c";
 async function startBridge() {
   let onEvent!: (scope: string, event: any) => void;
   const published: Array<{ correlationId: string; text: string; userId: string }> = [];
-  const ensureCalls: Array<{ userId: string; turnRunning: boolean }> = [];
+  const ensureCalls: string[] = [];
   const bus = {
     subscribeAllEvents: async (callback: typeof onEvent) => { onEvent = callback; },
     subscribeWorkerLifecycle: async () => {},
@@ -20,8 +20,8 @@ async function startBridge() {
     shutdown: async () => {},
   };
   const sessionManager = {
-    ensureSession: async (_scope: string, meta: any, opts?: { turnRunning?: boolean }) => {
-      ensureCalls.push({ userId: meta.userId, turnRunning: !!opts?.turnRunning });
+    ensureSession: async (_scope: string, meta: any) => {
+      ensureCalls.push(meta.userId);
       return { agentId: "main", agentCwd: "/tmp", sandboxed: false };
     },
     touch: () => {},
@@ -39,146 +39,47 @@ async function startBridge() {
 
 const fromPerson = (userId: string) => ({ userId, userPlatform: "discord" });
 
-describe("OrchestratorBridge: identity is fixed for a whole turn", () => {
-  it("lets the same person's follow-up join the running turn without re-applying identity", async () => {
-    const { bridge, published, ensureCalls, settle, finishTurn } = await startBridge();
-    const first = bridge.sendAndWait(SCOPE, "do the thing", fromPerson("alice"));
-    await settle();
-    const second = bridge.sendAndWait(SCOPE, "and this too", fromPerson("alice"));
-    await settle();
-
-    expect(published.map((m) => m.text)).toEqual(["do the thing", "and this too"]);
-    expect(ensureCalls).toEqual([
-      { userId: "alice", turnRunning: false },
-      { userId: "alice", turnRunning: true },
-    ]);
-
-    finishTurn(published[0].correlationId, "done");
-    expect((await first).text).toBe("done");
-    expect((await second).text).toBe(""); // coalesced into the one reply
-  });
-
-  it("holds another person's message until the running turn ends, then starts a turn as them", async () => {
+describe("OrchestratorBridge: universal mid-turn injection", () => {
+  it("injects anyone's message into the running turn, applying each sender as it arrives", async () => {
     const { bridge, published, ensureCalls, settle, finishTurn } = await startBridge();
     const aliceTurn = bridge.sendAndWait(SCOPE, "alice asks", fromPerson("alice"));
     await settle();
-    const bobMessage = bridge.sendAndWait(SCOPE, "bob asks", fromPerson("bob"));
+    const bobMessage = bridge.sendAndWait(SCOPE, "bob adds", fromPerson("bob"));
+    const aliceAgain = bridge.sendAndWait(SCOPE, "alice again", fromPerson("alice"));
     await settle();
 
-    // Bob's text never reaches the worker during Alice's turn.
-    expect(published.map((m) => m.text)).toEqual(["alice asks"]);
-    expect(ensureCalls).toEqual([{ userId: "alice", turnRunning: false }]);
+    // Nothing waits: every message reaches the worker at once.
+    expect(published.map((m) => m.text)).toEqual(["alice asks", "bob adds", "alice again"]);
+    expect(ensureCalls).toEqual(["alice", "bob", "alice"]);
+    expect(bridge.isTurnRunning(SCOPE)).toBe(true);
 
-    finishTurn(published[0].correlationId, "for alice");
-    expect((await aliceTurn).text).toBe("for alice");
-    await settle();
-
-    expect(published.map((m) => m.text)).toEqual(["alice asks", "bob asks"]);
-    expect(ensureCalls[1]).toEqual({ userId: "bob", turnRunning: false });
-
-    finishTurn(published[1].correlationId, "for bob");
-    expect((await bobMessage).text).toBe("for bob");
+    // The worker answers the latest message; the others are coalesced into that reply.
+    finishTurn(published[2].correlationId, "one reply for all three");
+    expect((await aliceTurn).text).toBe("");
+    expect((await bobMessage).text).toBe("");
+    expect((await aliceAgain).text).toBe("one reply for all three");
+    expect(bridge.isTurnRunning(SCOPE)).toBe(false);
   });
 
-  it("releases held messages in order, batching each person's run into one turn", async () => {
-    const { bridge, published, ensureCalls, settle, finishTurn } = await startBridge();
-    void bridge.sendAndWait(SCOPE, "alice 1", fromPerson("alice"));
-    await settle();
-    void bridge.sendAndWait(SCOPE, "bob 1", fromPerson("bob"));
-    void bridge.sendAndWait(SCOPE, "carol 1", fromPerson("carol"));
-    void bridge.sendAndWait(SCOPE, "bob 2", fromPerson("bob"));
-    await settle();
-
-    finishTurn(published[0].correlationId, "a");
-    await settle();
-    expect(published.map((m) => m.text)).toEqual(["alice 1", "bob 1", "bob 2"]);
-    expect(ensureCalls.slice(1)).toEqual([
-      { userId: "bob", turnRunning: false },
-      { userId: "bob", turnRunning: true },
-    ]);
-
-    finishTurn(published[1].correlationId, "b");
-    await settle();
-    expect(published.map((m) => m.text)).toEqual(["alice 1", "bob 1", "bob 2", "carol 1"]);
-    expect(ensureCalls.at(-1)).toEqual({ userId: "carol", turnRunning: false });
-  });
-
-  it("two near-simultaneous first messages from different people don't both start the turn", async () => {
-    const { bridge, published, ensureCalls, settle } = await startBridge();
-    void bridge.sendAndWait(SCOPE, "alice", fromPerson("alice"));
-    void bridge.sendAndWait(SCOPE, "bob", fromPerson("bob"));
-    await settle();
-    expect(published.map((m) => m.text)).toEqual(["alice"]);
-    expect(ensureCalls).toEqual([{ userId: "alice", turnRunning: false }]);
-  });
-
-  it("coalesces onto the peer message when the turn's result lands on its correlation id", async () => {
-    // A Discord message starts the turn; a peer message for the same person joins it. The
-    // worker answers the most recent message, so the result carries the peer's correlation id:
-    // the Discord pending resolves empty (its adapter posts nothing) and the peer path gets
-    // the text (peers.ts posts it to the channel).
+  it("coalesces onto a peer message when the turn's result lands on its correlation id", async () => {
     const { bridge, published, settle, finishTurn } = await startBridge();
     const discordTurn = bridge.sendAndWait(SCOPE, "from discord", fromPerson("alice"));
     await settle();
-    const peerMessage = bridge.sendAndWait(SCOPE, "[peer: from #general …]", { ...fromPerson("alice"), hops: 1 });
+    const peerMessage = bridge.sendAndWait(SCOPE, "[peer: from #general …]", { ...fromPerson("bob"), hops: 1 });
     await settle();
-    expect(bridge.deliveryState(SCOPE, fromPerson("alice"))).toBe("delivered");
-    expect(bridge.deliveryState(SCOPE, fromPerson("bob"))).toBe("queued");
 
     finishTurn(published[1].correlationId, "one reply for both");
     expect((await discordTurn).text).toBe("");
     expect((await peerMessage).text).toBe("one reply for both");
-    expect(bridge.isTurnRunning(SCOPE)).toBe(false);
   });
 
-  it("drops a held message whose beforeRun check fails at release, and runs the rest", async () => {
-    const { bridge, published, ensureCalls, settle, finishTurn } = await startBridge();
-    let sudoChanged = false;
-    const aliceTurn = bridge.sendAndWait(SCOPE, "alice asks", fromPerson("alice"));
-    await settle();
-    // Bob's peer message passed its checks when queued; /sudo flips before it's released.
-    const bobMessage = bridge.sendAndWait(SCOPE, "bob's peer message", {
-      ...fromPerson("bob"),
-      beforeRun: () => (sudoChanged ? "its sudo mode changed while it waited" : null),
-    });
-    const carolMessage = bridge.sendAndWait(SCOPE, "carol asks", fromPerson("carol"));
-    await settle();
-    sudoChanged = true;
-
-    finishTurn(published[0].correlationId, "for alice");
-    expect((await aliceTurn).text).toBe("for alice");
-    expect(await bobMessage).toEqual({ text: "", silent: true, dropped: "its sudo mode changed while it waited" });
-    await settle();
-
-    // Bob's text never reaches the worker; Carol's turn starts as her.
-    expect(published.map((m) => m.text)).toEqual(["alice asks", "carol asks"]);
-    expect(ensureCalls.map((c) => c.userId)).toEqual(["alice", "carol"]);
-    finishTurn(published[1].correlationId, "for carol");
-    expect((await carolMessage).text).toBe("for carol");
-  });
-
-  it("releases nothing when every held message fails its check", async () => {
-    const { bridge, published, settle, finishTurn } = await startBridge();
-    void bridge.sendAndWait(SCOPE, "alice asks", fromPerson("alice"));
-    await settle();
-    const bobMessage = bridge.sendAndWait(SCOPE, "bob's peer message", {
-      ...fromPerson("bob"), beforeRun: () => "changed",
-    });
-    await settle();
-    finishTurn(published[0].correlationId, "for alice");
-    expect((await bobMessage).silent).toBe(true);
-    await settle();
-    expect(published).toHaveLength(1);
-    expect(bridge.isTurnRunning(SCOPE)).toBe(false);
-  });
-
-  it("resolves held messages on shutdown", async () => {
+  it("is idle again once every dispatch has resolved, and resolves pending ones on shutdown", async () => {
     const { bridge, settle } = await startBridge();
-    void bridge.sendAndWait(SCOPE, "alice", fromPerson("alice"));
+    const pending = bridge.sendAndWait(SCOPE, "alice", fromPerson("alice"));
     await settle();
-    const held = bridge.sendAndWait(SCOPE, "bob", fromPerson("bob"));
-    await settle();
+    expect(bridge.isTurnRunning(SCOPE)).toBe(true);
     await bridge.shutdown();
-    expect((await held).text).toBe("Queue is shutting down.");
+    expect((await pending).text).toBe("Queue is shutting down.");
+    expect(bridge.isTurnRunning(SCOPE)).toBe(false);
   });
 });

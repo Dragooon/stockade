@@ -143,7 +143,6 @@ export class SessionManager {
   async ensureSession(
     scope: string,
     meta: SessionMeta,
-    opts?: { turnRunning?: boolean },
   ): Promise<ManagedSession> {
     const existing = this.sessions.get(scope);
     if (existing) {
@@ -158,18 +157,15 @@ export class SessionManager {
       clearTimeout(existing.idleTimer);
       existing.idleTimer = this.startIdleTimer(scope);
 
-      // Identity and the HITL callbacks are fixed for a whole turn: a message that joins a
-      // running turn never changes whose permissions its tool calls are checked against.
-      // They're applied here only when this message starts a turn.
-      if (!opts?.turnRunning) {
-        updateCallbackSession(existing.callbackToken, {
-          userId: meta.userId,
-          userPlatform: meta.userPlatform,
-          askApproval: meta.askApproval,
-          askQuestions: meta.askQuestions,
-          hops: meta.hops ?? 0,
-        });
-      }
+      // Update identity and HITL callbacks on the long-lived callback session: the latest
+      // message's sender applies, mid-turn included (per-channel permissions are the boundary).
+      updateCallbackSession(existing.callbackToken, {
+        userId: meta.userId,
+        userPlatform: meta.userPlatform,
+        askApproval: meta.askApproval,
+        askQuestions: meta.askQuestions,
+        hops: meta.hops ?? 0,
+      });
 
       return existing;
     }

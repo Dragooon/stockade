@@ -41,9 +41,11 @@ sudoers: `/etc/sudoers.d/50-stockade` (`stockade ALL=(madge,madge-sudo) NOPASSWD
    `TeamDelete`) are disallowed in every session, and the inline settings pin `crossSessionInbound: "refuse"`,
    `remoteControlAtStartup: false` and `isolatePeerMachines: true` over any agent `sdk_settings`: natively,
    a session would reach every local Claude session of its OS user, whoever it belongs to.
-10. A turn runs as one person from start to end. Identity and the approval/question callbacks are applied
-    when a message starts a turn; the same person's next messages join the running turn, anyone else's wait
-    and start their own turn when it ends.
+10. Every message goes straight to the worker: one arriving mid-turn is injected into the running turn,
+    whoever sent it, and the session takes the latest sender's identity and approval/question callbacks.
+    Per-channel permissions are the boundary (Shitiz, 26 Oct 2026: channel members are willing participants).
+    Messages that land after a turn's reply while its query is still winding down start the next query
+    instead of being dropped.
 
 ## Peers (session-to-session messaging)
 

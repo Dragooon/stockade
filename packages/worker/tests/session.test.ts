@@ -58,4 +58,43 @@ describe("WorkerSession follow-ups", () => {
     ]);
     expect(results[1].correlationId).toMatch(/^followup:/);
   });
+
+  it("starts a new query for messages that arrived after the reply when the query ends without reading them", async () => {
+    // 26 Oct 2026, project_h: the orchestrator released held messages the moment the reply
+    // landed, while the query was still winding down. They were pushed into its channel, the
+    // query ended, and nothing ever answered them.
+    let finishQuery!: () => void;
+    const queryInputs: string[][] = [];
+    mockRun.mockImplementation(async (_req: unknown, channel: ConversationChannel, emit: (ev: WorkerEvent) => void) => {
+      const call = queryInputs.length;
+      queryInputs.push([]);
+      const first = await channel[Symbol.asyncIterator]().next();
+      queryInputs[call].push(first.value.message.content);
+      if (call === 0) {
+        emit({ type: "result", text: "for urvashi", sessionId: "s", stopReason: "end_turn" });
+        await new Promise<void>((r) => (finishQuery = r)); // still winding down; never reads again
+        return;
+      }
+      emit({ type: "result", text: "for shitiz", sessionId: "s", stopReason: "end_turn" });
+    });
+
+    const f = fakeBridge();
+    const session = new WorkerSession();
+    await session.startPersistent({ prompt: "", orchestratorUrl: "http://x", callbackToken: "t", scope: "discord:g:c" }, f.bridge as any);
+    f.send("cid-1", "urvashi asks");
+    await tick();
+    f.send("cid-2", "shitiz one");
+    f.send("cid-3", "shitiz two");
+    await tick();
+    finishQuery();
+    await tick();
+    session.abort();
+
+    expect(queryInputs).toEqual([["urvashi asks"], ["shitiz one\n\nshitiz two"]]);
+    const results = f.published.filter((e) => e.kind === "evt:result");
+    expect(results.map((e) => [e.correlationId, e.text])).toEqual([
+      ["cid-1", "for urvashi"],
+      ["cid-2", "for shitiz"], // the first unanswered message; the bridge coalesces cid-3 into it
+    ]);
+  });
 });

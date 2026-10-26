@@ -495,7 +495,6 @@ const peers = new PeerService({
   inSudo: (scope) => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)),
   runsAsRoot: (scope) => !!sessionManager.get(scope)?.sudo,
   personName: (userId, userPlatform) => resolveUser(userId, userPlatform, config.platform)?.username ?? null,
-  deliveryState: (scope, meta) => bridge.deliveryState(scope, { userId: meta.userId, userPlatform: meta.userPlatform }),
   deliver: async (scope, text, meta) => {
     // A scope in sudo mode takes the message in its sudo session, like a person's message there
     // (expired = everyday again), but only from a sudo session: sendTool checks first, and this
@@ -532,11 +531,6 @@ const peers = new PeerService({
       sudo,
       askApproval: approvalChannel ? askApprovalFor(approvalChannel, meta.agentId) : undefined,
       askQuestions: approvalChannel?.askQuestions,
-      // A message held behind a busy turn is checked again when it's released: if /sudo was
-      // turned on or off meanwhile, it would run in the wrong mode, so the bridge drops it.
-      beforeRun: () => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)) !== sudo
-        ? "its sudo mode changed while it waited"
-        : null,
     });
   },
   // app:/peer: senders only refresh the controllers: the notice text itself isn't shown in the app (v1).
@@ -615,7 +609,6 @@ const controllerSends = new Map<string, Promise<void>>();
  * the reply: the app reads it from the transcript.
  */
 function sendFromController(scope: string, text: string, person: string, userId: string, userPlatform: string): "delivered" | "queued" {
-  const state = bridge.deliveryState(scope, { userId, userPlatform });
   const previous = controllerSends.get(scope) ?? Promise.resolve();
   const next = previous.then(async () => {
     const agentId = peerAgentForScope(scope);
@@ -650,16 +643,14 @@ function sendFromController(scope: string, text: string, person: string, userId:
       sudo,
       askApproval: askApprovalFor(approvalChannel, agentId),
       askQuestions: approvalChannel.askQuestions,
-      beforeRun: () => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)) !== sudo
-        ? "its sudo mode changed while it waited"
-        : null,
     }).catch((err) => console.error(`[controller] turn failed in ${scope.slice(0, 60)}:`, err));
   }).catch((err) => console.error(`[controller] message for ${scope.slice(0, 60)} failed:`, err));
   controllerSends.set(scope, next);
   void next.finally(() => {
     if (controllerSends.get(scope) === next) controllerSends.delete(scope);
   });
-  return state;
+  // It starts a turn, or is injected into the running one (anyone's): never held.
+  return "delivered";
 }
 
 /** A bearer token from its file (at least 32 characters), or null with the reason logged. */

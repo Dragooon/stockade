@@ -118,3 +118,10 @@ The tests pass, Kepler has reviewed the full diff, the deploy follows the runboo
 7. **Step 0** also pins `remoteControlAtStartup: false` and `isolatePeerMachines: true` in the inline settings. The platform instructions name the `[peer:]` header, so agents don't take peer text for platform text.
 8. **Delivery.** Three pull requests, in order: step 0, the identity fix, then peers v1. The v1.1 idle notice comes later.
 9. **Ownership on Mustafar.** The relay is the rootless Podman Quadlet `cc-relay` running as shitiz (~/.config/containers/systemd/cc-relay.container), invisible to madge. Kepler deploys cc-controller's own containers, the Mustafar daemon included, as shitiz over SSH, with firewall changes through shitiz's sudo. Madge owns Stockade's side of the cc-controller link.
+
+## Change, 2026-10-26 (Shitiz)
+
+Decision 1's per-turn identity is withdrawn: "per channel permissions are enough. Go back to the old universal
+turn injection." Every message, peer messages included, is injected into a running turn whoever sent it, and the
+latest sender's identity applies. Local peer delivery is always "delivered"; "queued" stays in the provider
+interface for a remote provider.

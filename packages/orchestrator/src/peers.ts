@@ -216,8 +216,6 @@ export interface PeerDeps {
   runsAsRoot(scope: string): boolean;
   /** Display name for the person (RBAC username), or null for nobody. */
   personName(userId: string, userPlatform: string): string | null;
-  /** Would a message for this person join or start a turn now ("delivered"), or wait ("queued")? */
-  deliveryState(scope: string, meta: PeerDeliveryMeta): "delivered" | "queued";
   /** Hand the wrapped message to the target's session. Resolves with the turn's result. */
   deliver(scope: string, text: string, meta: PeerDeliveryMeta): Promise<ChannelResponse>;
   /** Post into a scope's own chat channel (no-op for scopes without one). */
@@ -398,7 +396,6 @@ export class PeerService implements PeerProvider {
       fromSudo: this.fromSudo(from),
       ...(from.principal && { principal: from.principal.name }),
     };
-    const state = this.deps.deliveryState(entry.scope, meta);
     const person = this.deps.personName(from.userId, from.userPlatform) ?? from.userId;
     const fromLabel = await this.callerLabel(from);
     const tellSender = (text: string) => from.principal
@@ -408,7 +405,7 @@ export class PeerService implements PeerProvider {
         : this.deps.post(from.scope, text);
     this.deps.deliver(entry.scope, wrapped, meta).then(async (result) => {
       if (result.dropped) {
-        // It waited behind another turn and never ran: tell the sender's conversation.
+        // It never ran (the result says why): tell the sender's conversation.
         await tellSender(`Your message to ${entryName(entry)} wasn't delivered: ${result.dropped}.`);
         return;
       }
@@ -423,7 +420,8 @@ export class PeerService implements PeerProvider {
       if (from.principal) this.notify(from.principal.name, text);
       if (from.remote && !from.notice) void this.noticeRemote(from.remote, entry, text, "undelivered");
     });
-    return state;
+    // Local delivery is immediate: it starts a turn, or joins the running one (anyone's).
+    return "delivered";
   }
 
   /** All providers' entries for the caller, newest first, capped. */
@@ -501,7 +499,7 @@ export class PeerService implements PeerProvider {
     if (caller.principal) return this.sendAsPrincipal(caller, caller.principal, target, wrapped, message);
     if (caller.scope.startsWith("api:")) this.noteInbound(target.scope, caller);
     const state = await this.send(target, wrapped, caller);
-    return `${state}: ${entryName(target)}${state === "queued" ? " (it's busy with someone else's turn; your message starts its own turn when that ends)" : ""}`;
+    return `${state}: ${entryName(target)}`;
   }
 
   /**
@@ -801,7 +799,7 @@ export class PeerService implements PeerProvider {
       pairings.touch(principal.name, target.scope);
       this.noteInbound(target.scope, caller);
       const state = await this.send(target, wrapped, caller);
-      return `${state}: ${entryName(target)}${state === "queued" ? " (it's busy with someone else's turn; your message starts its own turn when that ends)" : ""}`;
+      return `${state}: ${entryName(target)}`;
     }
 
     // A new pairing: hold the message and ask.
