@@ -23,10 +23,10 @@ import {
   type RemoteLink,
 } from "../src/peers.js";
 import { SudoRegistry } from "../src/sudo.js";
-import { PeerPairings, PAIRING_DENY_MS } from "../src/peer-pairings.js";
+import { PeerPairings, PAIRING_DENY_MS, PAIRING_IDLE_MS } from "../src/peer-pairings.js";
 import Database from "better-sqlite3";
 import type { PeerEntry, PeerPrincipal } from "../src/peers.js";
-import type { ChannelResponse } from "../src/types.js";
+import type { ApprovalDecision, ChannelResponse } from "../src/types.js";
 
 // ── A small world: two people, their channels, one shared channel, one private thread ──
 
@@ -630,7 +630,7 @@ describe("principals", () => {
 
   /** Kepler may run main only; asks are answered by `answer` (default: allow). */
   function principalWorld(overrides: Partial<PeerDeps> = {}, preApproved: string[] = []) {
-    let answer: (allowed: boolean | null) => void = () => {};
+    let answer: (decision: ApprovalDecision | null) => void = () => {};
     const asks: Array<{ target: PeerEntry; preview: string }> = [];
     const bound = new Map<string, { agentId: string; person: string; origin: string }>();
     let clock = NOW;
@@ -655,7 +655,7 @@ describe("principals", () => {
     });
     return {
       ...w, asks, bound, pairings,
-      answer: async (allowed: boolean | null) => { answer(allowed); await settle(); await settle(); },
+      answer: async (decision: ApprovalDecision | null) => { answer(decision); await settle(); await settle(); },
       advance: (ms: number) => { clock += ms; w.advance(ms); },
     };
   }
@@ -676,7 +676,7 @@ describe("principals", () => {
     expect(deliveries).toHaveLength(0);
     expect(await service.sendTool(kepler(), peerRef(GENERAL), "again")).toBe(`Error: an earlier message to #general [${peerRef(GENERAL)}] is waiting for alice's approval`);
 
-    await answer(true);
+    await answer("allow");
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0].text.split("\n")[0]).toBe(`[peer: from Kepler [${KREF}] · agent kepler · on behalf of kepler · host MacBook]`);
     expect(deliveries[0].meta).toEqual({ agentId: "main", userId: "kepler", userPlatform: "api", hops: 1, fromSudo: false, principal: "kepler" });
@@ -690,16 +690,27 @@ describe("principals", () => {
     expect(asks).toHaveLength(1);
   });
 
-  it("a denied (or unanswered) pairing refuses the pair for 24 hours", async () => {
+  it("a denied pairing refuses the pair for 24 hours", async () => {
     const { service, deliveries, answer, advance, asks } = principalWorld();
     await service.sendTool(kepler(), peerRef(GENERAL), "hi");
-    await answer(false);
+    await answer("deny");
     expect(deliveries).toHaveLength(0);
-    expect(service.drainInbox("kepler")[0].text).toBe(`alice didn't allow messages to #general [${peerRef(GENERAL)}] (denied or unanswered): refused for 24 hours.`);
+    expect(service.drainInbox("kepler")[0].text).toBe(`alice denied messages to #general [${peerRef(GENERAL)}]: refused for 24 hours.`);
     expect(await service.sendTool(kepler(), peerRef(GENERAL), "please")).toBe(
       `Error: alice denied messages to #general [${peerRef(GENERAL)}] until ${new Date(NOW + PAIRING_DENY_MS).toISOString()}`);
     advance(PAIRING_DENY_MS);
     expect(await service.sendTool(kepler(), peerRef(GENERAL), "a day later")).toMatch(/^held: /);
+    expect(asks).toHaveLength(2);
+  });
+
+  it("an unanswered pairing leaves no record: undelivered, and the next message asks again", async () => {
+    const { service, deliveries, answer, asks, pairings } = principalWorld();
+    await service.sendTool(kepler(), peerRef(GENERAL), "hi");
+    await answer("unanswered");
+    expect(deliveries).toHaveLength(0);
+    expect(service.drainInbox("kepler")[0].text).toBe(`Your message to #general [${peerRef(GENERAL)}] wasn't delivered: alice didn't answer in time.`);
+    expect(pairings.state("kepler", GENERAL)).toEqual({ kind: "new" });
+    expect(await service.sendTool(kepler(), peerRef(GENERAL), "hi again")).toMatch(/^held: /);
     expect(asks).toHaveLength(2);
   });
 
@@ -709,6 +720,29 @@ describe("principals", () => {
     await answer(null);
     expect(service.drainInbox("kepler")[0].text).toMatch(/there's nowhere to ask alice about it/);
     expect(await service.sendTool(kepler(), peerRef(GENERAL), "hi")).toMatch(/^held: /);
+    expect(asks).toHaveLength(2);
+  });
+
+  it("lists its person's conversations with it, and a revoke makes the next message ask again", async () => {
+    const { service, answer, asks } = principalWorld({ principal: (name) => (name === "kepler" ? KEPLER : null) }, [ALICE_ROOM]);
+    await service.sendTool(kepler(), peerRef(GENERAL), "hi");
+    await answer("allow");
+    await service.sendTool(kepler(), peerRef(ALICE_ROOM), "pre-approved, not listed");
+    const list = await service.conversations("alice");
+    expect(list).toEqual([{
+      id: expect.stringMatching(/^[0-9a-f]{16}$/),
+      peer: { host: "principal", hostLabel: "MacBook", ref: KREF, label: "Kepler" },
+      local: { ref: peerRef(GENERAL), label: "#general" },
+      state: "allowed",
+      since: NOW,
+      until: NOW + PAIRING_IDLE_MS,
+    }]);
+    expect(await service.conversations("bob")).toEqual([]);
+    expect(service.forgetConversation("bob", list[0].id)).toBe(false);
+    expect(service.forgetConversation("alice", "0000000000000000")).toBe(false);
+    expect(service.forgetConversation("alice", list[0].id)).toBe(true);
+    expect(await service.conversations("alice")).toEqual([]);
+    expect(await service.sendTool(kepler(), peerRef(GENERAL), "again")).toMatch(/^held: /);
     expect(asks).toHaveLength(2);
   });
 
@@ -725,7 +759,7 @@ describe("principals", () => {
     expect(await service.sendTool(kepler(), peerRef(ALICE_ROOM), "hi")).toBe(`Error: ${SUDO_TARGET}`);
     await service.sendTool(kepler(), peerRef(GENERAL), "hi");
     sudo.open(GENERAL, "discord:alice");
-    await answer(true);
+    await answer("allow");
     expect(deliveries).toHaveLength(0);
     expect(service.drainInbox("kepler").map((item) => item.text)).toEqual([`Your message to #general [${peerRef(GENERAL)}] wasn't delivered: ${SUDO_TARGET}.`]);
   });
@@ -787,7 +821,7 @@ describe("remote peers (D4)", () => {
 
   function d4World(overrides: Partial<PeerDeps> = {}, remote: Partial<RemotePeerHost> = {}) {
     const { host, calls } = fakeRemote(remote);
-    let answer: (allowed: boolean | null) => void = () => {};
+    let answer: (decision: ApprovalDecision | null) => void = () => {};
     const asks: Array<{ asker: PeerPrincipal; target: PeerEntry; preview: string; request?: string }> = [];
     const bound = new Map<string, { agentId: string; person: string; origin: string }>();
     const dropped: string[] = [];
@@ -813,7 +847,7 @@ describe("remote peers (D4)", () => {
     }, [host]);
     return {
       ...w, host, calls, asks, bound, dropped, pairings,
-      answer: async (allowed: boolean | null) => { answer(allowed); await settle(); await settle(); },
+      answer: async (decision: ApprovalDecision | null) => { answer(decision); await settle(); await settle(); },
       advance: (ms: number) => { clock += ms; w.advance(ms); },
     };
   }
@@ -892,7 +926,7 @@ describe("remote peers (D4)", () => {
     expect(asks[0].asker).toMatchObject({ name: "remote:mac:abcdef", host: "MacBook", forPerson: "alice" });
     expect(await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "again", hops: 1 })).toMatchObject({ status: "refused" });
 
-    await answer(true);
+    await answer("allow");
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0].text.split("\n")[0]).toBe(`[peer: from ${MAC} · agent claude-code · on behalf of alice · host MacBook]`);
     expect(deliveries[0].meta).toEqual({ agentId: "main", userId: "alice", userPlatform: "discord", hops: 1, fromSudo: false });
@@ -906,11 +940,52 @@ describe("remote peers (D4)", () => {
   it("a denied inbound conversation is refused for 24 hours, and the sender hears it", async () => {
     const { service, answer, calls, advance, deliveries } = d4World();
     await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "hi", hops: 1 });
-    await answer(false);
+    await answer("deny");
     expect(deliveries).toHaveLength(0);
     expect(calls[0].args[3]).toBe("denied");
     expect((await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "hi", hops: 1 })).reason).toMatch(/^alice denied this conversation until /);
     advance(PAIRING_DENY_MS + 1);
+    expect(await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "hi", hops: 1 })).toEqual({ status: "awaiting_approval" });
+  });
+
+  it("an unanswered inbound conversation leaves no record: the sender hears undelivered, and may ask again", async () => {
+    const { service, answer, calls, deliveries, asks, pairings } = d4World();
+    await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "hi", hops: 1 });
+    await answer("unanswered");
+    expect(deliveries).toHaveLength(0);
+    expect(calls).toEqual([{ op: "notice", args: [{ ref: peerRef(GENERAL), label: "#general" }, "abcdef", "Your message to #general wasn't delivered: alice didn't answer in time.", "undelivered"] }]);
+    expect(pairings.state("remote:mac:abcdef", GENERAL)).toEqual({ kind: "new" });
+    expect(await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "hi", hops: 1 })).toEqual({ status: "awaiting_approval" });
+    expect(asks).toHaveLength(2);
+  });
+
+  it("an unanswered start drops the session and leaves no record", async () => {
+    const { service, answer, calls, dropped, pairings } = d4World({}, { defaultAgent: "main" });
+    await service.remoteStart(ALICE, { from: FROM, text: "x", hops: 1 });
+    await answer("unanswered");
+    expect(dropped).toEqual(["peer:000000000000"]);
+    expect(calls[0].args[2]).toBe("The new session wasn't started: alice didn't answer in time.");
+    expect(calls[0].args[3]).toBe("undelivered");
+    expect(pairings.state("remote:mac:abcdef", "#start")).toEqual({ kind: "new" });
+    expect(await service.remoteStart(ALICE, { from: FROM, text: "again", hops: 1 })).toMatchObject({ status: "awaiting_approval" });
+  });
+
+  it("lists a denied inbound conversation with the remote session's label, for the host's person only", async () => {
+    const { service, answer } = d4World();
+    await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "hi", hops: 1 });
+    await answer("deny");
+    const list = await service.conversations("alice");
+    expect(list).toEqual([{
+      id: expect.stringMatching(/^[0-9a-f]{16}$/),
+      peer: { host: "mac", hostLabel: "MacBook", ref: "abcdef", label: "App Debugging" },
+      local: { ref: peerRef(GENERAL), label: "#general" },
+      state: "denied",
+      since: NOW,
+      until: NOW + PAIRING_DENY_MS,
+    }]);
+    expect(await service.conversations("bob")).toEqual([]);
+    // Revoking a deny lifts it: the next message asks again.
+    expect(service.forgetConversation("alice", list[0].id)).toBe(true);
     expect(await service.remoteInbound(ALICE, { from: FROM, to: peerRef(GENERAL), text: "hi", hops: 1 })).toEqual({ status: "awaiting_approval" });
   });
 
@@ -942,7 +1017,7 @@ describe("remote peers (D4)", () => {
     expect(held).toMatchObject({ status: "awaiting_approval", label: "peer session 000000000000" });
     expect([...bound]).toEqual([["peer:000000000000", { agentId: "main", person: "alice", origin: "peer" }]]);
     expect(asks[0].request).toBe("MacBook session 'App Debugging' wants to start a new session on Mustafar (agent main). Allow?");
-    await answer(false);
+    await answer("deny");
     expect(dropped).toEqual(["peer:000000000000"]);
     expect(deliveries).toHaveLength(0);
     expect(calls[0].args[3]).toBe("denied");
@@ -952,7 +1027,7 @@ describe("remote peers (D4)", () => {
   it("an allowed start runs the message and covers that sender's next starts", async () => {
     const { service, answer, deliveries, calls, asks } = d4World({}, { defaultAgent: "main" });
     const held = await service.remoteStart(ALICE, { from: FROM, text: "first", hops: 1 });
-    await answer(true);
+    await answer("allow");
     expect(deliveries.map((d) => d.scope)).toEqual(["peer:000000000000"]);
     expect(calls[0].args[3]).toBe("allowed");
     expect(held.ref).toBe(peerRef("peer:000000000000"));

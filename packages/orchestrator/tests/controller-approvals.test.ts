@@ -53,6 +53,21 @@ describe("ControllerApprovals: app approvals", () => {
     expect(events.at(-1)).toMatchObject({ type: "decision", behaviour: "deny" });
   });
 
+  it("decision() tells an explicit deny apart from the timeout", async () => {
+    vi.useFakeTimers();
+    const { approvals } = hub({ timeoutMs: 1000 });
+    const denied = approvals.decision("app:shitiz:a1", "peer_conversation", {});
+    approvals.decide("a1", "deny");
+    expect(await denied).toBe("deny");
+    const allowed = approvals.channel("app:shitiz:a1").askDecision!("peer_conversation", {});
+    approvals.decide("a2", "allow");
+    expect(await allowed).toBe("allow");
+    const unanswered = approvals.decision("app:shitiz:a1", "peer_conversation", {});
+    vi.advanceTimersByTime(1000);
+    expect(await unanswered).toBe("unanswered");
+    expect(approvals.list()).toEqual([]);
+  });
+
   it("channel(scope) asks in that scope and passes the review and agent", async () => {
     const { approvals } = hub();
     const asked = approvals.channel("app:shitiz:a1").askUser("Bash", { command: "ls" }, { risk: "high", summary: "s" }, "main");
@@ -164,6 +179,15 @@ describe("ControllerApprovals: questions (d3b-6)", () => {
     answer(null);
     expect(await asked).toBeNull();
     expect(events.at(-1)).toMatchObject({ type: "decision", behaviour: "deny" });
+  });
+
+  it("a mirror's askDecision passes the channel's decision, or maps askUser when the channel can't tell", async () => {
+    const { approvals, events } = hub();
+    const telling: ApprovalChannel = { askUser: async () => false, askDecision: async () => "unanswered", notifyAutoApproved: async () => {} };
+    expect(await approvals.mirror(telling, "discord:g:general", "discord").askDecision!("peer_conversation", {})).toBe("unanswered");
+    expect(events.map((e) => [e.type, e.type === "decision" ? e.behaviour : null])).toEqual([["approval", null], ["decision", "deny"]]);
+    const plain: ApprovalChannel = { askUser: async () => true, notifyAutoApproved: async () => {} };
+    expect(await approvals.mirror(plain, "terminal:x", "terminal").askDecision!("peer_conversation", {})).toBe("allow");
   });
 
   it("a mirror leaves out askQuestions when the channel has none", () => {

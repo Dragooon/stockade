@@ -133,6 +133,8 @@ export interface ControllerDeps {
   approvals?: ControllerApprovals;
   /** Does P hold `approve`? Without it P sees approvals but can't decide them. */
   canApprove?: () => boolean;
+  /** The person a principal (by RBAC name) works for, or null for anyone else. Its rows count as theirs for the raw view. */
+  principalFor?: (name: string) => string | null;
   /** Sudo mode, when Stockade has it: P's `sudo` permission, and the /sudo toggle (true = now on). */
   sudo?: { canSudo: () => boolean; toggle: (scope: string) => Promise<boolean> };
 }
@@ -154,7 +156,7 @@ function isAgentRow(row: Participant): boolean {
 export class ControllerService {
   private listeners = new Set<(event: ControllerEvent) => void>();
   /** scope → how many records of its current session subscribers have been sent. */
-  private followed = new Map<string, { claudeSessionId: string; count: number }>();
+  private followed = new Map<string, { claudeSessionId: string; count: number; raw: boolean }>();
   /** scope → the running transcript check, so two checks never send a record twice. */
   private following = new Map<string, Promise<void>>();
   private followTimer: ReturnType<typeof setInterval> | null = null;
@@ -307,6 +309,10 @@ export class ControllerService {
     if (!approval || !(await this.listed(approval.scope))) {
       throw new ControllerError(404, "not_found", "This approval was already answered");
     }
+    // App-decided approvals live in app:/peer: scopes: only the person the scope is bound to decides them.
+    if (!approval.answerIn && this.deps.binding(approval.scope)?.person !== this.deps.person) {
+      throw new ControllerError(404, "not_found", "This approval was already answered");
+    }
     if (approval.answerIn) {
       throw new ControllerError(403, "read_only", `This approval is answered in ${approval.answerIn === "discord" ? "Discord" : "the terminal"}.`);
     }
@@ -350,10 +356,15 @@ export class ControllerService {
    * app: scope counts as P's before anyone has written in it.
    */
   private readable(scope: string, records: TranscriptRecord[]): TranscriptRecord[] {
+    return this.rawFor(scope) ? withRecordIds(records) : projectTranscript(records);
+  }
+
+  /** Does P get the raw form? A principal working for P (Kepler) counts as P; anyone else doesn't. */
+  private rawFor(scope: string): boolean {
+    const person = this.deps.person;
     const participants = this.deps.participants(scope);
-    const onlyP = participants.every((row) => row.person === this.deps.person) &&
+    return participants.every((row) => row.person === person || this.deps.principalFor?.(row.person) === person) &&
       (participants.length > 0 || this.deps.binding(scope)?.origin === "app");
-    return onlyP ? withRecordIds(records) : projectTranscript(records);
   }
 
   /** Send subscribers the records added to a visible scope's transcript since the last check. */
@@ -375,15 +386,18 @@ export class ControllerService {
     if (!claudeSessionId) {
       // No Claude session yet (a new app session's first turn is starting): its first
       // session's records all count as new.
-      this.followed.set(scope, { claudeSessionId: "", count: 0 });
+      this.followed.set(scope, { claudeSessionId: "", count: 0, raw: this.rawFor(scope) });
       return;
     }
+    const raw = this.rawFor(scope);
     const records = this.readable(scope, await this.deps.transcript(scope));
     const seen = this.followed.get(scope);
     // First sight of a scope: what's already there was served by GET transcript. A rotated
-    // scope's new session is sent from its first record.
-    const from = !seen ? records.length : seen.claudeSessionId === claudeSessionId ? seen.count : 0;
-    this.followed.set(scope, { claudeSessionId, count: records.length });
+    // scope's new session is sent from its first record. A form change (a second person joined)
+    // counts as first sight too: the two forms' counts don't line up, so the app re-reads the
+    // transcript when the row's participants change.
+    const from = !seen || seen.raw !== raw ? records.length : seen.claudeSessionId === claudeSessionId ? seen.count : 0;
+    this.followed.set(scope, { claudeSessionId, count: records.length, raw });
     for (let index = from; index < records.length; index++) {
       const event: ControllerEvent = {
         type: "transcript",
@@ -413,7 +427,8 @@ export class ControllerService {
     const status = this.deps.status(scope);
     const id = controllerSessionId(scope);
     const origin = originOf(scope);
-    const writable = origin === "app" || (origin === "peer" && !scope.startsWith("api:"));
+    // Writable: an app: or peer: scope bound to P (membership already requires that; this keeps it explicit).
+    const writable = (origin === "app" || (origin === "peer" && !scope.startsWith("api:"))) && binding?.person === this.deps.person;
     // Busy: now. Otherwise when its last turn ended; after a restart, its latest participation
     // or binding time.
     const lastActive = status === "busy" ? this.deps.now() : Math.max(

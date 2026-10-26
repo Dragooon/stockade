@@ -55,6 +55,23 @@ describe("HttpRemotePeerHost", () => {
     await expect(h.message(FROM, "123abc", "hi", 1)).rejects.toThrow("unexpected answer");
   });
 
+  it("keeps what it sends within the daemon's limits, and refuses refs the daemon wouldn't take", async () => {
+    const { h, requests } = host(() => ({ body: { status: "delivered" } }));
+    const long = "thread '" + "x".repeat(200) + "' in #general";
+    await h.message({ ...FROM, label: long, agent: "a".repeat(80), onBehalfOf: "p".repeat(80) }, "123abc", "hi", 1);
+    await h.notice({ ref: "abcdef", label: long }, "123abc", "n".repeat(3000), "allowed");
+    const sent = requests.map((r) => JSON.parse(r.init.body as string));
+    expect(sent[0].from.label).toHaveLength(120);
+    expect(sent[0].from.label.endsWith("…")).toBe(true);
+    expect(sent[0].from.agent).toHaveLength(60);
+    expect(sent[0].from.onBehalfOf).toHaveLength(60);
+    expect(sent[1].from.label).toHaveLength(120);
+    expect(sent[1].text).toHaveLength(2000);
+    await expect(h.message({ ...FROM, ref: "ABC DEF" }, "123abc", "hi", 1)).rejects.toThrow(/from.ref/);
+    await expect(h.notice({ ref: "abcdef", label: "x" }, "mac:123abc", "hi")).rejects.toThrow(/`to`/);
+    expect(requests).toHaveLength(2);
+  });
+
   it("turns an error status into an error", async () => {
     const { h } = host(() => ({ status: 401, body: { error: "unauthorized" } }));
     await expect(h.list()).rejects.toThrow("daemon answered 401 unauthorized");

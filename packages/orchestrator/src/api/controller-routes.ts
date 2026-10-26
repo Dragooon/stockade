@@ -29,6 +29,14 @@
  *                                   session here sent (allowed|denied|undelivered)
  *                                   (`from.host` is a configured peers.remote host id; without
  *                                   peers.remote for the person, these are 404 unsupported)
+ *   GET /controller/peer/conversations
+ *                                 — the person's conversations with principals and other
+ *                                   controllers' sessions (allowed or denied, still in force):
+ *                                   [{id, peer: {host, hostLabel, ref, label}, local: {ref, label},
+ *                                   state: allowed|denied, since, until?}] (ms)
+ *   DELETE /controller/peer/conversations/:id
+ *                                 — revoke one (the next message asks again) → 204, 404 not_found
+ *                                   (both advertised as capability `peer_conversations`)
  *   GET /controller/events        — SSE: `session` (a listed session's state changed),
  *                                   `transcript` (a new record, SSE id = record id),
  *                                   `approval` / `decision` (pending ones replayed on connect),
@@ -52,7 +60,18 @@ export interface ControllerRoutesOptions {
   controller: { id: string; name: string };
   /** D4: other controllers' requests through the daemon, for the token's person (null: not set up for them). */
   peerLink?: (person: string) => PeerLinkHandlers | null;
+  /** The person's peer conversations, to list and revoke (unset: no `peer_conversations` capability). */
+  peerConversations?: PeerConversationHandlers;
 }
+
+/** What /controller/peer/conversations calls. */
+export interface PeerConversationHandlers {
+  list(person: string): Promise<unknown[]>;
+  forget(person: string, id: string): boolean;
+}
+
+/** Advertised in /controller/info when the conversations routes are there. */
+export const PEER_CONVERSATIONS_CAPABILITY = "peer_conversations";
 
 /** What /controller/peer/* calls for one person. */
 export interface PeerLinkHandlers {
@@ -88,7 +107,11 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
 
   app.get("/controller/info", (c) =>
     c.json({
-      controller: { ...options.controller, kind: "stockade", capabilities: serviceOf(c).capabilities() },
+      controller: {
+        ...options.controller,
+        kind: "stockade",
+        capabilities: [...serviceOf(c).capabilities(), ...(options.peerConversations ? [PEER_CONVERSATIONS_CAPABILITY] : [])],
+      },
       person: serviceOf(c).person,
     }));
 
@@ -157,6 +180,17 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
       });
     });
   }
+
+  const conversations = options.peerConversations;
+  app.get("/controller/peer/conversations", async (c) =>
+    conversations ? c.json(await conversations.list(serviceOf(c).person)) : unsupported(c));
+  app.delete("/controller/peer/conversations/:id", (c) => {
+    if (!conversations) return unsupported(c);
+    const person = serviceOf(c).person;
+    if (!conversations.forget(person, c.req.param("id"))) return c.json({ error: "not_found" }, 404);
+    console.log(`[peers] ${person} revoked conversation ${c.req.param("id").slice(0, 16)}`);
+    return c.body(null, 204);
+  });
 
   app.get("/controller/events", (c) => {
     const service = serviceOf(c);

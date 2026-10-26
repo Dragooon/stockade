@@ -14,7 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { ChannelResponse } from "./types.js";
+import type { ApprovalDecision, ChannelResponse } from "./types.js";
 import { isConversationScope } from "./scope-bindings.js";
 import type { PairingStore } from "./peer-pairings.js";
 
@@ -44,6 +44,9 @@ export const PEER_NOTICE_MAX_CHARS = 2_000;
 const REF = /^[0-9a-f]{6}$/;
 /** The pairing "scope" for fresh starts from a remote session: one allow covers its starts for the idle hour. */
 const START_PAIRING = "#start";
+/** A conversation's id in the app: stable for the pairing, opaque. */
+const conversationId = (principal: string, scope: string) =>
+  createHash("sha256").update(`${principal}\u0000${scope}`).digest("hex").slice(0, 16);
 /** Messages kept for a principal until it fetches them. */
 export const PEER_INBOX_CAP = 200;
 
@@ -227,12 +230,14 @@ export interface PeerDeps {
   pairings?: PairingStore;
   /**
    * Ask the principal's person whether it may message this session (a `peer_conversation`
-   * approval in the target's channel or the app): true allowed, false denied or unanswered,
-   * null when there's nowhere to ask.
+   * approval in the target's channel or the app). Only "deny" is stored (refused for 24 h);
+   * "unanswered" leaves no record. null when there's nowhere to ask.
    */
-  askPairing?(principal: PeerPrincipal, target: PeerEntry, preview: string, request?: string): Promise<boolean | null>;
+  askPairing?(principal: PeerPrincipal, target: PeerEntry, preview: string, request?: string): Promise<ApprovalDecision | null>;
   /** Undo createPeerScope for a fresh start that was refused before anything ran in it. */
   dropPeerScope?(scope: string): void;
+  /** A configured principal by name (null once it's gone from config). Needed by conversations. */
+  principal?(name: string): PeerPrincipal | null;
   hostName: string;
   now(): number;
 }
@@ -291,6 +296,20 @@ export interface RemotePeerHost {
   notice(from: { ref: string; label: string }, to: string, text: string, outcome?: RemoteOutcome): Promise<void>;
 }
 
+/**
+ * A conversation with someone outside this controller (a principal, or a session on another
+ * controller) that the person allowed or denied: the app lists them and can revoke one.
+ * Same shape as cc-controller's own list. Times are ms.
+ */
+export interface PeerConversation {
+  id: string;
+  peer: { host: string; hostLabel: string; ref: string; label: string };
+  local: { ref: string; label: string };
+  state: "allowed" | "denied";
+  since: number;
+  until?: number;
+}
+
 /** The local daemon's person, for calls that come in from another controller through it. */
 export interface RemoteLink {
   person: string;
@@ -338,6 +357,8 @@ export class PeerService implements PeerProvider {
   /** sending scope → (`remote:<host>:<ref>`, or `remote:<host>:*` for a start → when it last wrote there): whose notices it takes. */
   private readonly outbound = new Map<string, Map<string, number>>();
   private readonly remotes: Map<string, RemotePeerHost>;
+  /** `remote:<host>:<ref>` → its last-seen session label, for the conversations list. */
+  private readonly remoteLabels = new Map<string, string>();
 
   constructor(private readonly deps: PeerDeps, remotes: RemotePeerHost[] = []) {
     this.remotes = new Map(remotes.map((host) => [host.id, host]));
@@ -583,15 +604,16 @@ export class PeerService implements PeerProvider {
     const remote = caller.remote!;
     const asker = this.remoteAsker(link, remote);
     pairings.begin(caller.scope, target.scope);
-    this.deps.askPairing(asker, target, text.value.slice(0, PEER_PREVIEW_CHARS), `${asker.label} wants to message ${target.label}. Allow?`).then(async (allowed) => {
-      if (allowed === null) {
+    this.deps.askPairing(asker, target, text.value.slice(0, PEER_PREVIEW_CHARS), `${asker.label} wants to message ${target.label}. Allow?`).then(async (decision) => {
+      if (decision === null || decision === "unanswered") {
         pairings.cancel(caller.scope, target.scope);
-        await this.noticeRemote(remote, target, `Your message to ${target.label} wasn't delivered: there's nowhere to ask ${link.person} about it.`, "undelivered");
+        const why = decision === null ? `there's nowhere to ask ${link.person} about it` : `${link.person} didn't answer in time`;
+        await this.noticeRemote(remote, target, `Your message to ${target.label} wasn't delivered: ${why}.`, "undelivered");
         return;
       }
-      pairings.decide(caller.scope, target.scope, allowed);
-      if (!allowed) {
-        await this.noticeRemote(remote, target, `${link.person} didn't allow the conversation with ${target.label} (denied or unanswered): refused for 24 hours.`, "denied");
+      pairings.decide(caller.scope, target.scope, decision === "allow");
+      if (decision === "deny") {
+        await this.noticeRemote(remote, target, `${link.person} denied the conversation with ${target.label}: refused for 24 hours.`, "denied");
         return;
       }
       if (this.deps.inSudo(target.scope)) {
@@ -656,15 +678,16 @@ export class PeerService implements PeerProvider {
     };
     pairings.begin(caller.scope, START_PAIRING);
     this.deps.askPairing(asker, entry, text.value.slice(0, PEER_PREVIEW_CHARS),
-      `${asker.label} wants to start a new session on ${this.deps.hostName} (agent ${agentId}). Allow?`).then(async (allowed) => {
-      if (allowed === null) {
+      `${asker.label} wants to start a new session on ${this.deps.hostName} (agent ${agentId}). Allow?`).then(async (decision) => {
+      if (decision === null || decision === "unanswered") {
         pairings.cancel(caller.scope, START_PAIRING);
-        await refuse(`The new session wasn't started: there's nowhere to ask ${link.person} about it.`, "undelivered");
+        const why = decision === null ? `there's nowhere to ask ${link.person} about it` : `${link.person} didn't answer in time`;
+        await refuse(`The new session wasn't started: ${why}.`, "undelivered");
         return;
       }
-      pairings.decide(caller.scope, START_PAIRING, allowed);
-      if (!allowed) {
-        await refuse(`${link.person} didn't allow a new session on ${this.deps.hostName} (denied or unanswered): refused for 24 hours.`, "denied");
+      pairings.decide(caller.scope, START_PAIRING, decision === "allow");
+      if (decision === "deny") {
+        await refuse(`${link.person} denied new sessions on ${this.deps.hostName}: refused for 24 hours.`, "denied");
         return;
       }
       const state = await run();
@@ -715,6 +738,51 @@ export class PeerService implements PeerProvider {
     return { status: await this.send(target, wrapped, { ...caller, hops: 0, notice: true }) };
   }
 
+  /**
+   * The person's conversations with principals and other controllers' sessions: stored allows
+   * and denies still in force (pre-approved pairs aren't listed: config decides those).
+   */
+  async conversations(person: string): Promise<PeerConversation[]> {
+    const out: PeerConversation[] = [];
+    for (const decision of this.deps.pairings?.decisions?.() ?? []) {
+      const peer = this.conversationPeer(decision.principal, person);
+      if (!peer) continue;
+      const local = decision.scope === START_PAIRING
+        ? { ref: "*", label: "new sessions" }
+        : { ref: peerRef(decision.scope), label: await this.labelFor(decision.scope) };
+      out.push({ id: conversationId(decision.principal, decision.scope), peer, local, state: decision.state, since: decision.since, until: decision.until });
+    }
+    return out;
+  }
+
+  /** Revoke one of the person's conversations by id: the next message asks again. False if it isn't theirs or is gone. */
+  forgetConversation(person: string, id: string): boolean {
+    const pairings = this.deps.pairings;
+    if (!pairings?.decisions || !pairings.revoke) return false;
+    const decision = pairings.decisions().find((d) => conversationId(d.principal, d.scope) === id && this.conversationPeer(d.principal, person));
+    return decision ? pairings.revoke(decision.principal, decision.scope) : false;
+  }
+
+  /** Who a stored pairing is with, if it belongs to this person. */
+  private conversationPeer(key: string, person: string): PeerConversation["peer"] | null {
+    const remote = /^remote:([^:]+):(.+)$/.exec(key);
+    if (remote) {
+      const host = this.remotes.get(remote[1]);
+      if (!host || host.person !== person) return null;
+      return { host: host.id, hostLabel: sanitizePeerLabel(host.label), ref: remote[2], label: this.remoteLabels.get(key) ?? `${host.id}:${remote[2]}` };
+    }
+    const principal = this.deps.principal?.(key);
+    if (!principal || principal.forPerson !== person) return null;
+    return { host: "principal", hostLabel: sanitizePeerLabel(principal.host), ref: peerRef(`principal:${principal.name}`), label: sanitizePeerLabel(principal.label) };
+  }
+
+  private rememberRemoteLabel(key: string, label: string): void {
+    this.remoteLabels.delete(key);
+    this.remoteLabels.set(key, label);
+    // Bounded: the oldest label goes first (the list falls back to host:ref).
+    if (this.remoteLabels.size > 1000) this.remoteLabels.delete(this.remoteLabels.keys().next().value!);
+  }
+
   // ── Internals ──
 
   /**
@@ -740,15 +808,16 @@ export class PeerService implements PeerProvider {
     if (!this.deps.askPairing) return "Error: pairings aren't available here";
     pairings.begin(principal.name, target.scope);
     const preview = message.slice(0, PEER_PREVIEW_CHARS);
-    this.deps.askPairing(principal, target, preview).then(async (allowed) => {
-      if (allowed === null) {
+    this.deps.askPairing(principal, target, preview).then(async (decision) => {
+      if (decision === null || decision === "unanswered") {
         pairings.cancel(principal.name, target.scope);
-        this.notify(principal.name, `Your message to ${entryName(target)} wasn't delivered: there's nowhere to ask ${principal.forPerson} about it.`);
+        const why = decision === null ? `there's nowhere to ask ${principal.forPerson} about it` : `${principal.forPerson} didn't answer in time`;
+        this.notify(principal.name, `Your message to ${entryName(target)} wasn't delivered: ${why}.`);
         return;
       }
-      pairings.decide(principal.name, target.scope, allowed);
-      if (!allowed) {
-        this.notify(principal.name, `${principal.forPerson} didn't allow messages to ${entryName(target)} (denied or unanswered): refused for 24 hours.`);
+      pairings.decide(principal.name, target.scope, decision === "allow");
+      if (decision === "deny") {
+        this.notify(principal.name, `${principal.forPerson} denied messages to ${entryName(target)}: refused for 24 hours.`);
         return;
       }
       // Sudo mode may have started while it waited: a principal never messages a sudo-mode scope.
@@ -774,6 +843,7 @@ export class PeerService implements PeerProvider {
     if (!this.takeRateSlot(caller.scope)) return `Error: rate limit (${PEER_RATE_LIMIT} sends per ${PEER_RATE_WINDOW_MS / 60_000} minutes)`;
     const key = target.scope;
     this.noteOutbound(caller.scope, key);
+    this.rememberRemoteLabel(key, sanitizePeerLabel(target.label));
     let result: RemoteResult;
     try {
       result = await host.message(await this.remoteFrom(caller, person), target.remoteRef!, message, caller.hops + 1);
@@ -872,6 +942,7 @@ export class PeerService implements PeerProvider {
     if (hops > PEER_HOP_LIMIT) return "hop limit";
     const label = sanitizePeerLabel(typeof from.label === "string" ? from.label.slice(0, 200) : "");
     const agent = sanitizePeerLabel(typeof from.agent === "string" && from.agent.trim() ? from.agent.slice(0, 60) : "claude-code");
+    if (label) this.rememberRemoteLabel(`remote:${host.id}:${from.ref}`, label);
     return {
       scope: `remote:${host.id}:${from.ref}`,
       agentId: agent,

@@ -33,6 +33,21 @@ export interface PairingStore {
   cancel(principal: string, scope: string): void;
   /** The pair was used: its idle clock starts again. */
   touch(principal: string, scope: string): void;
+  /** Stored decisions still in force (allows not idle, denies not expired); pre-approved pairs aren't stored. */
+  decisions?(): PairingDecision[];
+  /** Withdraw an allow (or lift a deny) early; false if there was nothing stored. */
+  revoke?(principal: string, scope: string): boolean;
+}
+
+/** A stored decision in force: allowed until idle, or denied until its 24 h end. */
+export interface PairingDecision {
+  principal: string;
+  scope: string;
+  state: "allowed" | "denied";
+  /** When the person decided (ms). */
+  since: number;
+  /** When it lapses unless used again (allowed) or ends (denied), ms. */
+  until: number;
 }
 
 interface Row { state: "allow" | "deny"; decided_ts: number; last_used_ts: number }
@@ -87,7 +102,20 @@ export class PeerPairings implements PairingStore {
       .run(this.now(), principal, scope);
   }
 
-  /** Withdraw an allow (or lift a deny) early; false if there was nothing stored. */
+  decisions(): PairingDecision[] {
+    const now = this.now();
+    const rows = this.db.prepare(`SELECT principal, scope, state, decided_ts, last_used_ts FROM peer_pairings ORDER BY decided_ts DESC`)
+      .all() as Array<Row & { principal: string; scope: string }>;
+    const out: PairingDecision[] = [];
+    for (const row of rows) {
+      if (this.preApproved[row.principal]?.includes(row.scope)) continue;
+      const until = row.state === "allow" ? row.last_used_ts + PAIRING_IDLE_MS : row.decided_ts + PAIRING_DENY_MS;
+      if (until <= now) continue;
+      out.push({ principal: row.principal, scope: row.scope, state: row.state === "allow" ? "allowed" : "denied", since: row.decided_ts, until });
+    }
+    return out;
+  }
+
   revoke(principal: string, scope: string): boolean {
     return this.db.prepare(`DELETE FROM peer_pairings WHERE principal = ? AND scope = ?`).run(principal, scope).changes > 0;
   }

@@ -277,6 +277,9 @@ export type QuestionAnswers = Record<string, string> | "declined" | null;
 /** Ask the user the agent's questions (AskUserQuestion) in the channel. */
 export type AskQuestionsFn = (questions: AskQuestion[], agentId?: string) => Promise<QuestionAnswers>;
 
+/** How a person answered an approval: an explicit allow or deny, or no answer in time. */
+export type ApprovalDecision = "allow" | "deny" | "unanswered";
+
 export interface ApprovalChannel {
   /**
    * Present a tool invocation for user approval.
@@ -290,6 +293,17 @@ export interface ApprovalChannel {
     review?: GatekeeperReview,
     agentId?: string,
   ) => Promise<boolean>;
+
+  /**
+   * askUser, telling an explicit deny apart from no answer (timeout, or the ask couldn't be
+   * shown). Channels that can't tell report "deny" for both, like askUser.
+   */
+  askDecision?: (
+    tool: string,
+    input: Record<string, unknown>,
+    review?: GatekeeperReview,
+    agentId?: string,
+  ) => Promise<ApprovalDecision>;
 
   /**
    * Notify the channel about a tool invocation that was auto-approved

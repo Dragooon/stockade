@@ -355,6 +355,22 @@ describe("ControllerService: transcripts (§5)", () => {
     expect(JSON.stringify(served)).not.toMatch(/PRIVATE KEY|secret|ssh|sidechain/);
   });
 
+  it("counts a principal working for P as P (raw), but not one working for someone else", async () => {
+    const PEER = "peer:00000000000a";
+    const forShitiz = world({ principalFor: (name) => (name === "kepler" ? "shitiz" : null) });
+    bindScope(forShitiz.db, { scope: PEER, agentId: "main", person: "shitiz", origin: "kepler" });
+    recordParticipant(forShitiz.db, PEER, "kepler", "api");
+    recordParticipant(forShitiz.db, PEER, "shitiz", "app");
+    forShitiz.transcripts.set(PEER, records);
+    expect(await forShitiz.service.transcript(controllerSessionId(PEER))).toHaveLength(records.length);
+
+    const forOther = world({ principalFor: (name) => (name === "kepler" ? "urvashi" : null) });
+    bindScope(forOther.db, { scope: PEER, agentId: "main", person: "shitiz", origin: "kepler" });
+    recordParticipant(forOther.db, PEER, "kepler", "api");
+    forOther.transcripts.set(PEER, records);
+    expect((await forOther.service.transcript(controllerSessionId(PEER))).map((r) => r.uuid)).toEqual(["u1", "a1", "a2"]);
+  });
+
   it("pages by after and limit, from the start when after is unknown", async () => {
     const w = world();
     bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
@@ -467,6 +483,30 @@ describe("ControllerService: live transcript events", () => {
     w.transcripts.set(APP, [user("u1", "streamed"), user("u2", "after")]);
     await new Promise((r) => setTimeout(r, 40));
     expect(transcriptEvents(events)).toHaveLength(1);
+  });
+
+  it("starts counting afresh when the form changes (a second person joins), never repeating or skipping by a mismatched count", async () => {
+    const w = world();
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    recordParticipant(w.db, APP, "shitiz", "app");
+    w.claudeIds.set(APP, "c1");
+    const events: ControllerEvent[] = [];
+    w.service.subscribe((event) => events.push(event));
+    const records: TranscriptRecord[] = [
+      { type: "summary", summary: "no uuid" },
+      user("u1", "hello"),
+      assistant("a1", [{ type: "tool_use", id: "t1", name: "Bash", input: {} }]),
+      user("u2", [{ type: "tool_result", tool_use_id: "t1", content: "out" }]),
+      assistant("a2", [{ type: "text", text: "done" }]),
+    ];
+    w.transcripts.set(APP, records);
+    await w.service.notify(APP); // first sight: raw, 5 records
+    recordParticipant(w.db, APP, "urvashi", "discord");
+    w.transcripts.set(APP, [...records, assistant("a9", [{ type: "text", text: "after" }])]);
+    await w.service.notify(APP); // projected now (3 records): a raw count of 5 would skip a9 and a10
+    w.transcripts.set(APP, [...records, assistant("a9", [{ type: "text", text: "after" }]), assistant("a10", [{ type: "text", text: "next" }])]);
+    await w.service.notify(APP);
+    expect(transcriptEvents(events).map((e) => e.recordId)).toEqual(["a10"]);
   });
 
   it("projects live records too when the session isn't only P's, and skips scopes P can't see", async () => {
@@ -597,6 +637,43 @@ describe("controller routes: peer link (D4)", () => {
   });
 });
 
+describe("controller routes: peer conversations", () => {
+  const TOKEN = "t".repeat(40);
+  const call = (hono: Hono, method: string, path: string) =>
+    hono.request(path, { method, headers: { authorization: `Bearer ${TOKEN}` } });
+
+  it("lists and revokes the token's person's conversations, and advertises the capability", async () => {
+    const seen: string[] = [];
+    const hono = new Hono();
+    mountControllerRoutes(hono, {
+      services: new Map([[TOKEN, world().service]]),
+      controller: { id: "mustafar", name: "Mustafar" },
+      peerConversations: {
+        list: async (person) => { seen.push(`list ${person}`); return [{ id: "c1" }]; },
+        forget: (person, id) => { seen.push(`forget ${person} ${id}`); return id === "c1"; },
+      },
+    });
+    expect((await (await call(hono, "GET", "/controller/info")).json()).controller.capabilities).toContain("peer_conversations");
+    expect(await (await call(hono, "GET", "/controller/peer/conversations")).json()).toEqual([{ id: "c1" }]);
+    const gone = await call(hono, "DELETE", "/controller/peer/conversations/c1");
+    expect(gone.status).toBe(204);
+    expect(await gone.text()).toBe("");
+    const missing = await call(hono, "DELETE", "/controller/peer/conversations/c2");
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "not_found" });
+    expect(seen).toEqual(["list shitiz", "forget shitiz c1", "forget shitiz c2"]);
+    expect((await hono.request("/controller/peer/conversations")).status).toBe(401);
+  });
+
+  it("without them: 404 unsupported, and no capability", async () => {
+    const hono = new Hono();
+    mountControllerRoutes(hono, { services: new Map([[TOKEN, world().service]]), controller: { id: "mustafar", name: "Mustafar" } });
+    expect((await (await call(hono, "GET", "/controller/info")).json()).controller.capabilities).not.toContain("peer_conversations");
+    expect((await call(hono, "GET", "/controller/peer/conversations")).status).toBe(404);
+    expect((await call(hono, "DELETE", "/controller/peer/conversations/c1")).status).toBe(404);
+  });
+});
+
 describe("ControllerService: approvals (§6)", () => {
   function approvalWorld(canApprove = true) {
     let next = 0;
@@ -617,6 +694,20 @@ describe("ControllerService: approvals (§6)", () => {
       answer: (approved: boolean) => answer(approved),
     };
   };
+
+  it("a peer: scope bound to someone else is neither listed, writable nor decidable, even with P's row in it", async () => {
+    const w = approvalWorld();
+    const THEIRS = "peer:0123456789ab";
+    bindScope(w.db, { scope: THEIRS, agentId: "main", person: "urvashi", origin: "peer" });
+    recordParticipant(w.db, THEIRS, "shitiz", "api");
+    void w.approvals.ask(THEIRS, "Bash", {});
+    await w.settled();
+    expect(await w.service.find(controllerSessionId(THEIRS))).toBeNull();
+    await expect(w.service.send(controllerSessionId(THEIRS), "hi")).rejects.toMatchObject({ status: 404 });
+    await expect(w.service.decide("ap1", { behaviour: "allow" })).rejects.toMatchObject({ status: 404, code: "not_found" });
+    expect(w.approvals.get("ap1")).not.toBeNull();
+    expect(w.events).toEqual([]);
+  });
 
   it("forwards approvals and decisions in P's listed scopes only, in order", async () => {
     const w = approvalWorld();

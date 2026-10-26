@@ -16,6 +16,33 @@ import type { RemoteFrom, RemoteListing, RemoteOutcome, RemotePeerHost, RemoteRe
 export const REMOTE_TIMEOUT_MS = 5_000;
 export const REMOTE_LIST_CACHE_MS = 10_000;
 const STATUSES: readonly RemoteStatus[] = ["delivered", "queued", "awaiting_approval", "started", "refused"];
+/** The daemon's peer API limits (cc-controller peers.js): longer fields are a 400. */
+export const REMOTE_LABEL_MAX = 120;
+export const REMOTE_NAME_MAX = 60;
+export const REMOTE_NOTICE_MAX = 2000;
+const REMOTE_REF = /^[0-9a-z-]{1,32}$/;
+
+/** Cut to the daemon's limit, with an ellipsis when cut; never empty. */
+function clamp(value: string, max: number, fallback: string): string {
+  const text = value.trim() || fallback;
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/** The sender as the daemon's peer API takes it: refs it accepts, labels and names within its limits. */
+function wireFrom<T extends { ref: string; label: string; agent?: string; onBehalfOf?: string }>(from: T): T {
+  if (!REMOTE_REF.test(from.ref)) throw new Error("from.ref isn't a ref the daemon accepts");
+  return {
+    ...from,
+    label: clamp(from.label, REMOTE_LABEL_MAX, "session"),
+    ...(from.agent !== undefined && { agent: clamp(from.agent, REMOTE_NAME_MAX, "agent") }),
+    ...(from.onBehalfOf !== undefined && { onBehalfOf: clamp(from.onBehalfOf, REMOTE_NAME_MAX, "someone") }),
+  };
+}
+
+function wireTo(to: string): string {
+  if (!REMOTE_REF.test(to)) throw new Error("`to` isn't a ref the daemon accepts");
+  return to;
+}
 
 /** The token goes only to loopback over http; anything else needs https. */
 export function remoteUrlAllowed(url: string): boolean {
@@ -69,16 +96,16 @@ export class HttpRemotePeerHost implements RemotePeerHost {
   }
 
   async message(from: RemoteFrom, to: string, text: string, hops: number): Promise<RemoteResult> {
-    return this.result(await this.call("POST", "message", { from, to, text, hops }));
+    return this.result(await this.call("POST", "message", { from: wireFrom(from), to: wireTo(to), text, hops }));
   }
 
   async start(from: RemoteFrom, agent: string | undefined, text: string, hops: number): Promise<RemoteResult> {
     this.cache = null;
-    return this.result(await this.call("POST", "start", { from, ...(agent && { agent }), text, hops }));
+    return this.result(await this.call("POST", "start", { from: wireFrom(from), ...(agent && { agent }), text, hops }));
   }
 
   async notice(from: { ref: string; label: string }, to: string, text: string, outcome?: RemoteOutcome): Promise<void> {
-    await this.call("POST", "notice", { from, to, text, ...(outcome && { outcome }) });
+    await this.call("POST", "notice", { from: wireFrom(from), to: wireTo(to), text: clamp(text, REMOTE_NOTICE_MAX, "(no text)"), ...(outcome && { outcome }) });
   }
 
   private result(body: unknown): RemoteResult {

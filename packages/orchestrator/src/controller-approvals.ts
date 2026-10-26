@@ -16,7 +16,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { GatekeeperReview } from "./gatekeeper.js";
-import type { ApprovalChannel, AskQuestion, QuestionAnswers } from "./types.js";
+import type { ApprovalChannel, ApprovalDecision, AskQuestion, QuestionAnswers } from "./types.js";
 
 /** Same as Discord's approval timeout: unanswered means denied. */
 export const CONTROLLER_APPROVAL_TIMEOUT_MS = 10 * 60_000;
@@ -94,6 +94,12 @@ export class ControllerApprovals {
     return this.wait(this.raise(scope, tool, input, extras, null)).then(({ behaviour }) => behaviour === "allow");
   }
 
+  /** Like ask, telling an explicit deny apart from the timeout. */
+  decision(scope: string, tool: string, input: Record<string, unknown>, extras: { agentId?: string; review?: GatekeeperReview } = {}): Promise<ApprovalDecision> {
+    return this.wait(this.raise(scope, tool, input, extras, null)).then(({ behaviour, timedOut }) =>
+      timedOut ? "unanswered" : behaviour === "allow" ? "allow" : "deny");
+  }
+
   /** Questions the app answers: the answers, "declined" (Skip), or null at the timeout. */
   askQuestions(scope: string, questions: AskQuestion[], agentId?: string): Promise<QuestionAnswers> {
     const approval = this.raise(scope, "AskUserQuestion", { questions }, { agentId }, null, questions);
@@ -119,6 +125,7 @@ export class ControllerApprovals {
   channel(scope: string): ApprovalChannel {
     return {
       askUser: (tool, input, review, agentId) => this.ask(scope, tool, input, { agentId, review }),
+      askDecision: (tool, input, review, agentId) => this.decision(scope, tool, input, { agentId, review }),
       notifyAutoApproved: async () => {},
       askQuestions: (questions, agentId) => this.askQuestions(scope, questions, agentId),
     };
@@ -138,6 +145,20 @@ export class ControllerApprovals {
           return approved;
         } finally {
           this.settle(approval.id, approved ? "allow" : "deny");
+        }
+      },
+      askDecision: async (tool, input, review, agentId) => {
+        const approval = this.raise(scope, tool, input, { agentId, review }, answerIn);
+        this.pending.set(approval.id, { approval });
+        this.emit({ type: "approval", approval });
+        let decision: ApprovalDecision = "unanswered";
+        try {
+          decision = inner.askDecision
+            ? await inner.askDecision(tool, input, review, agentId)
+            : (await inner.askUser(tool, input, review, agentId)) ? "allow" : "deny";
+          return decision;
+        } finally {
+          this.settle(approval.id, decision === "allow" ? "allow" : "deny");
         }
       },
       ...(inner.askQuestions ? {

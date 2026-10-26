@@ -70,4 +70,18 @@ describe("PeerPairings", () => {
     expect(again.state("kepler", "discord:g:1")).toEqual({ kind: "allowed" });
     expect(again.state("kepler", "discord:g:2")).toEqual({ kind: "new" });
   });
+  it("decisions() lists stored allows and denies still in force, newest first, never pre-approved pairs", () => {
+    const { pairings, advance } = store({ kepler: ["discord:g:9"] });
+    const start = 1_800_000_000_000;
+    pairings.decide("kepler", "discord:g:1", true);
+    advance(1000);
+    pairings.decide("remote:mac:abcdef", "discord:g:2", false);
+    pairings.decide("kepler", "discord:g:9", true);
+    expect(pairings.decisions()).toEqual([
+      { principal: "remote:mac:abcdef", scope: "discord:g:2", state: "denied", since: start + 1000, until: start + 1000 + PAIRING_DENY_MS },
+      { principal: "kepler", scope: "discord:g:1", state: "allowed", since: start, until: start + PAIRING_IDLE_MS },
+    ]);
+    advance(PAIRING_IDLE_MS);
+    expect(pairings.decisions().map((d) => d.scope)).toEqual(["discord:g:2"]);
+  });
 });

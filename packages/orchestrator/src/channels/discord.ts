@@ -27,7 +27,7 @@ import {
   type ChatInputCommandInteraction,
 } from "discord.js";
 import { discordScope, discordThreadScope } from "./scope.js";
-import type { ChannelMessage, ChannelAttachment, ChannelFile, ChannelResponse, PlatformConfig, AgentsConfig, ApprovalChannel, AskQuestion } from "../types.js";
+import type { ChannelMessage, ChannelAttachment, ChannelFile, ChannelResponse, PlatformConfig, AgentsConfig, ApprovalChannel, ApprovalDecision, AskQuestion } from "../types.js";
 import type { GatekeeperReview, RiskLevel } from "../gatekeeper.js";
 
 type DiscordConfig = NonNullable<PlatformConfig["channels"]["discord"]>;
@@ -980,72 +980,74 @@ export class DiscordAdapter {
    * Times out after ASK_TIMEOUT_MS → deny.
    */
   private createApprovalChannel(channel: TextBasedChannel, senderId: string, agentId?: string): ApprovalChannel {
-    return {
-      askUser: async (tool, input, review?, aid?) => {
-        const agent = aid ?? agentId;
+    const askDecision = async (tool: string, input: Record<string, unknown>, review?: GatekeeperReview, aid?: string): Promise<ApprovalDecision> => {
+      const agent = aid ?? agentId;
+      try {
+        const ch = channel as any;
+        const embed = review
+          ? buildGatedApprovalEmbed(tool, input, review, ASK_TIMEOUT_MS, agent)
+          : buildApprovalEmbed(tool, input, ASK_TIMEOUT_MS, agent);
+        const row = buildApprovalButtons();
+
+        const approvers = this.opts.approvers;
+        const canApprove = (id: string) => approvers ? approvers.canApprove(id) : id === senderId;
+        const ping = canApprove(senderId) ? [senderId] : approvers?.mentionIds() ?? [senderId];
+        const approvalMsg = await ch.send({
+          content: ping.map((id) => `<@${id}>`).join(" "),
+          embeds: [embed],
+          components: [row],
+        });
+
+        const interaction = await approvalMsg.awaitMessageComponent({
+          componentType: ComponentType.Button,
+          filter: (i: any) => {
+            if (canApprove(i.user.id)) return true;
+            i.reply({ content: "You can't approve this.", flags: MessageFlags.Ephemeral }).catch(() => {});
+            return false;
+          },
+          time: ASK_TIMEOUT_MS,
+        });
+
+        const approved = interaction.customId === "approve";
+
+        const resultEmbed = review
+          ? buildGatedApprovalResultEmbed(tool, input, review, approved, agent)
+          : buildApprovalResultEmbed(tool, input, approved, agent);
+        await interaction.update({
+          content: null,
+          embeds: [resultEmbed],
+          components: [],
+        });
+
+        return approved ? "allow" : "deny";
+      } catch {
+        // Timeout or send failure: no answer (askUser denies)
         try {
           const ch = channel as any;
-          const embed = review
-            ? buildGatedApprovalEmbed(tool, input, review, ASK_TIMEOUT_MS, agent)
-            : buildApprovalEmbed(tool, input, ASK_TIMEOUT_MS, agent);
-          const row = buildApprovalButtons();
-
-          const approvers = this.opts.approvers;
-          const canApprove = (id: string) => approvers ? approvers.canApprove(id) : id === senderId;
-          const ping = canApprove(senderId) ? [senderId] : approvers?.mentionIds() ?? [senderId];
-          const approvalMsg = await ch.send({
-            content: ping.map((id) => `<@${id}>`).join(" "),
-            embeds: [embed],
-            components: [row],
-          });
-
-          const interaction = await approvalMsg.awaitMessageComponent({
-            componentType: ComponentType.Button,
-            filter: (i: any) => {
-              if (canApprove(i.user.id)) return true;
-              i.reply({ content: "You can't approve this.", flags: MessageFlags.Ephemeral }).catch(() => {});
-              return false;
-            },
-            time: ASK_TIMEOUT_MS,
-          });
-
-          const approved = interaction.customId === "approve";
-
-          const resultEmbed = review
-            ? buildGatedApprovalResultEmbed(tool, input, review, approved, agent)
-            : buildApprovalResultEmbed(tool, input, approved, agent);
-          await interaction.update({
-            content: null,
-            embeds: [resultEmbed],
-            components: [],
-          });
-
-          return approved;
-        } catch {
-          // Timeout or send failure → deny
-          try {
-            const ch = channel as any;
-            const messages = await ch.messages.fetch({ limit: 5 });
-            const approvalMsg = messages.find((m: any) =>
-              m.author.id === ch.client.user?.id &&
-              m.embeds[0]?.title?.includes("Approval Required")
-            );
-            if (approvalMsg) {
-              const resultEmbed = review
-                ? buildGatedApprovalResultEmbed(tool, input, review, false, agent)
-                : buildApprovalResultEmbed(tool, input, false, agent);
-              await approvalMsg.edit({
-                content: null,
-                embeds: [resultEmbed],
-                components: [],
-              });
-            }
-          } catch {
-            // Best effort
+          const messages = await ch.messages.fetch({ limit: 5 });
+          const approvalMsg = messages.find((m: any) =>
+            m.author.id === ch.client.user?.id &&
+            m.embeds[0]?.title?.includes("Approval Required")
+          );
+          if (approvalMsg) {
+            const resultEmbed = review
+              ? buildGatedApprovalResultEmbed(tool, input, review, false, agent)
+              : buildApprovalResultEmbed(tool, input, false, agent);
+            await approvalMsg.edit({
+              content: null,
+              embeds: [resultEmbed],
+              components: [],
+            });
           }
-          return false;
+        } catch {
+          // Best effort
         }
-      },
+        return "unanswered";
+      }
+    };
+    return {
+      askUser: async (tool, input, review?, aid?) => (await askDecision(tool, input, review, aid)) === "allow",
+      askDecision,
 
       // AskUserQuestion: one message per question, buttons (single choice) or a menu
       // (multi-select), plus "Other…" for a typed answer. The asker or an approver answers.

@@ -554,6 +554,7 @@ const peers = new PeerService({
     if (scope.startsWith("peer:") && !sessionManager.get(scope)) unbindScope(db, scope);
   },
   pairings: peerPairings,
+  principal: (name) => [...principalCallers.values()].find((caller) => caller.principal?.name === name)?.principal ?? null,
   // A principal's first message to a session: peer_conversation, asked where the session's
   // approvals go (the app for app:/peer:, the channel for Discord, mirrored read-only in the app).
   askPairing: async (principal, target, preview, request) => {
@@ -564,12 +565,12 @@ const peers = new PeerService({
       to: target.label,
       message: preview,
     };
-    if (appDecidedScope(target.scope)) return controllerApprovals.ask(target.scope, "peer_conversation", input, { agentId: principal.name });
+    if (appDecidedScope(target.scope)) return controllerApprovals.decision(target.scope, "peer_conversation", input, { agentId: principal.name });
     if (!target.scope.startsWith("discord:") || !discordAdapter) return null;
     const discordId = config.platform.rbac.users[principal.forPerson]?.identities.discord;
     const channel = await discordAdapter.approvalChannelForScope(target.scope, discordId, principal.name);
     if (!channel) return null;
-    return controllerApprovals.mirror(channel, target.scope, "discord").askUser("peer_conversation", input, undefined, principal.name);
+    return controllerApprovals.mirror(channel, target.scope, "discord").askDecision!("peer_conversation", input, undefined, principal.name);
   },
   hostName: hostname().charAt(0).toUpperCase() + hostname().slice(1),
   now: () => Date.now(),
@@ -691,6 +692,7 @@ for (const entry of config.platform.controller?.tokens ?? []) {
   controllerServices.set(token, new ControllerService({
     person: entry.person,
     peerSessions: config.platform.controller?.peer_sessions ?? true,
+    principalFor: (name) => (config.platform.peers?.principals ?? []).find((principal) => principal.name === name)?.for ?? null,
     participation: (person) => personParticipation(db, person),
     participants: (scope) => scopeParticipants(db, scope),
     boundScopes: (person) => scopesBoundTo(db, person),
@@ -811,6 +813,10 @@ const stopCallbackServer = startCallbackServer(
           start: (body) => peers.remoteStart(link, body),
           notice: (body) => peers.remoteNotice(link, body),
         };
+      },
+      peerConversations: {
+        list: (person) => peers.conversations(person),
+        forget: (person, id) => peers.forgetConversation(person, id),
       },
     });
     mountPeerPrincipalRoutes(app, { callers: principalCallers, peers });
