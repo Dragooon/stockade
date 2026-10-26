@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { ControllerApprovals, type ApprovalHubEvent } from "../src/controller-approvals.js";
-import type { ApprovalChannel } from "../src/types.js";
+import { ControllerApprovals, answersError, type ApprovalHubEvent } from "../src/controller-approvals.js";
+import type { ApprovalChannel, AskQuestion } from "../src/types.js";
 
 function hub(options: ConstructorParameters<typeof ControllerApprovals>[0] = {}) {
   let next = 0;
@@ -25,6 +25,7 @@ describe("ControllerApprovals: app approvals", () => {
       agentId: "main",
       review: { risk: "medium", summary: "deletes build" },
       answerIn: null,
+      questions: null,
     }]);
     expect(approvals.decide("a1", "allow")).toBe("decided");
     expect(await asked).toBe(true);
@@ -96,7 +97,7 @@ describe("ControllerApprovals: mirrored channel approvals", () => {
     expect(inner.askUser).toHaveBeenCalledWith("Bash", { command: "ls" }, undefined, "main");
   });
 
-  it("settles as deny when the channel throws, and keeps the channel's other callbacks", async () => {
+  it("settles as deny when the channel throws, and keeps the channel's other callbacks (askQuestions mirrored)", async () => {
     const { approvals, events } = hub();
     const inner: ApprovalChannel = {
       askUser: async () => { throw new Error("discord down"); },
@@ -108,6 +109,80 @@ describe("ControllerApprovals: mirrored channel approvals", () => {
     expect(approvals.list()).toEqual([]);
     expect(events.at(-1)).toMatchObject({ type: "decision", behaviour: "deny" });
     expect(mirrored.notifyAutoApproved).toBe(inner.notifyAutoApproved);
-    expect(mirrored.askQuestions).toBe(inner.askQuestions);
+    expect(mirrored.askQuestions).toBeTypeOf("function");
+  });
+});
+
+const QUESTIONS: AskQuestion[] = [
+  { question: "Which branch?", header: "Branch", options: [{ label: "main" }, { label: "dev" }], multiSelect: false },
+  { question: "Which checks?", header: "Checks", options: [{ label: "lint" }, { label: "tests", preview: "pnpm test" }], multiSelect: true },
+];
+
+describe("ControllerApprovals: questions (d3b-6)", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("raises an AskUserQuestion approval with the questions and resolves to the answers", async () => {
+    const { approvals, events } = hub();
+    const asked = approvals.channel("app:shitiz:a1").askQuestions!(QUESTIONS, "main");
+    expect(approvals.get("a1")).toMatchObject({ tool: "AskUserQuestion", input: { questions: QUESTIONS }, questions: QUESTIONS, agentId: "main", answerIn: null });
+    const answers = { "Which branch?": "main", "Which checks?": "lint, tests" };
+    expect(approvals.decide("a1", "allow", answers)).toBe("decided");
+    expect(await asked).toEqual(answers);
+    expect(events.at(-1)).toMatchObject({ type: "decision", behaviour: "allow" });
+  });
+
+  it("refuses an allow without fitting answers and keeps waiting", async () => {
+    const { approvals } = hub();
+    void approvals.askQuestions("app:shitiz:a1", QUESTIONS);
+    expect(approvals.decide("a1", "allow")).toBe("invalid_answers");
+    expect(approvals.decide("a1", "allow", { "Which branch?": "main" })).toBe("invalid_answers");
+    expect(approvals.list()).toHaveLength(1);
+  });
+
+  it("deny is a decline, the timeout is no answer", async () => {
+    const { approvals } = hub({ timeoutMs: 1000 });
+    const declined = approvals.askQuestions("app:shitiz:a1", QUESTIONS);
+    approvals.decide("a1", "deny");
+    expect(await declined).toBe("declined");
+    vi.useFakeTimers();
+    const unanswered = approvals.askQuestions("app:shitiz:a1", QUESTIONS);
+    vi.advanceTimersByTime(1000);
+    expect(await unanswered).toBeNull();
+  });
+
+  it("mirrors a channel's questions read-only and settles with its answer", async () => {
+    const { approvals, events } = hub();
+    let answer!: (answers: Record<string, string> | null) => void;
+    const inner: ApprovalChannel = {
+      askUser: async () => false,
+      notifyAutoApproved: async () => {},
+      askQuestions: () => new Promise((resolve) => { answer = resolve; }),
+    };
+    const asked = approvals.mirror(inner, "discord:g:general", "discord").askQuestions!(QUESTIONS);
+    expect(approvals.get("a1")).toMatchObject({ answerIn: "discord", questions: QUESTIONS });
+    expect(approvals.decide("a1", "allow", { "Which branch?": "x", "Which checks?": "y" })).toBe("read_only");
+    answer(null);
+    expect(await asked).toBeNull();
+    expect(events.at(-1)).toMatchObject({ type: "decision", behaviour: "deny" });
+  });
+
+  it("a mirror leaves out askQuestions when the channel has none", () => {
+    const { approvals } = hub();
+    expect(approvals.mirror({ askUser: async () => true, notifyAutoApproved: async () => {} }, "terminal:x", "terminal").askQuestions).toBeUndefined();
+  });
+});
+
+describe("answersError", () => {
+  it("wants one non-empty answer per exact question text, at most 2000 characters, nothing extra", () => {
+    const ok = { "Which branch?": "main", "Which checks?": "lint" };
+    expect(answersError(QUESTIONS, ok)).toBeNull();
+    expect(answersError(QUESTIONS, null)).toMatch(/object/);
+    expect(answersError(QUESTIONS, ["main"])).toMatch(/object/);
+    expect(answersError(QUESTIONS, { ...ok, "Extra?": "x" })).toMatch(/no question/);
+    expect(answersError(QUESTIONS, { "Which branch?": "main" })).toMatch(/needs an answer/);
+    expect(answersError(QUESTIONS, { ...ok, "Which checks?": "  " })).toMatch(/needs an answer/);
+    expect(answersError(QUESTIONS, { ...ok, "Which checks?": 3 })).toMatch(/needs an answer/);
+    expect(answersError(QUESTIONS, { ...ok, "Which checks?": "x".repeat(2001) })).toMatch(/2000/);
+    expect(answersError(QUESTIONS, { ...ok, "Which checks?": "x".repeat(2000) })).toBeNull();
   });
 });

@@ -119,7 +119,8 @@ export function startCallbackServer(
         return c.json({ approved: false, reason: "Can't ask questions here (no chat channel for this run). Decide yourself or say what you need in your reply." });
       }
       const answers = await ctx.askQuestions(questions, ctx.agentId);
-      console.log(`[canusetool] AskUserQuestion (${ctx.agentId}): ${answers ? "answered" : "no answer"}`);
+      console.log(`[canusetool] AskUserQuestion (${ctx.agentId}): ${answers === "declined" ? "declined" : answers ? "answered" : "no answer"}`);
+      if (answers === "declined") return c.json({ approved: false, reason: "The user declined to answer" });
       if (!answers) return c.json({ approved: false, reason: "Nobody answered in time." });
       return c.json({ approved: true, updatedInput: { ...tool_input, answers } });
     }

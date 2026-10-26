@@ -242,16 +242,19 @@ export type AskApprovalFn = (
 export interface AskQuestion {
   question: string;
   header: string;
-  options: Array<{ label: string; description?: string }>;
+  options: Array<{ label: string; description?: string; preview?: string }>;
   multiSelect: boolean;
 }
 
 /**
- * Ask the user the agent's questions (AskUserQuestion) in the channel. Resolves to
- * { [question text]: answer } (multi-select answers comma-separated), or null when
- * nobody answered in time.
+ * The outcome of AskUserQuestion: { [question text]: answer } (multi-select answers
+ * comma-separated), "declined" when the person chose not to answer, or null when nobody
+ * answered in time.
  */
-export type AskQuestionsFn = (questions: AskQuestion[], agentId?: string) => Promise<Record<string, string> | null>;
+export type QuestionAnswers = Record<string, string> | "declined" | null;
+
+/** Ask the user the agent's questions (AskUserQuestion) in the channel. */
+export type AskQuestionsFn = (questions: AskQuestion[], agentId?: string) => Promise<QuestionAnswers>;
 
 export interface ApprovalChannel {
   /**

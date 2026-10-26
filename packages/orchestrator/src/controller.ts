@@ -12,14 +12,16 @@
  * Read (§5): raw records when every participant is P, otherwise the text-only projection.
  * Written (§4, §7): messages into writable (app:/peer:) scopes only, and new app: scopes.
  * Approvals (§6): those in listed scopes reach the app; only app:/peer: ones are decided there.
+ * AskUserQuestion questions are approvals with `questions`, answered with `answers`.
  */
 
 import { createHash } from "node:crypto";
 import type { Participant } from "./participants.js";
 import type { ScopeBinding } from "./scope-bindings.js";
 import { projectTranscript, transcriptRecordId, withRecordIds, type TranscriptRecord } from "./controller-transcript.js";
-import type { ApprovalBehaviour, ApprovalHubEvent, ControllerApproval, ControllerApprovals } from "./controller-approvals.js";
+import { answersError, type ApprovalBehaviour, type ApprovalHubEvent, type ControllerApproval, type ControllerApprovals } from "./controller-approvals.js";
 import type { GatekeeperReview } from "./gatekeeper.js";
+import type { AskQuestion } from "./types.js";
 
 export type ControllerSessionStatus = "busy" | "idle" | "closed";
 export type ControllerOrigin = "discord" | "app" | "peer" | "terminal";
@@ -52,7 +54,7 @@ export interface ControllerAgent {
 }
 
 /** Capabilities the Stockade source advertises; grows as D3b units land (d3b-5/6/7). */
-export const CONTROLLER_CAPABILITIES = ["list", "transcript", "send", "new_session", "decide"] as const;
+export const CONTROLLER_CAPABILITIES = ["list", "transcript", "send", "new_session", "decide", "questions"] as const;
 
 export type ControllerEvent =
   /** A visible session's state changed (turn started or ended, session opened or closed). */
@@ -71,6 +73,8 @@ export type ControllerEvent =
     agentId: string | null;
     review: GatekeeperReview | null;
     answerIn: "discord" | "terminal" | null;
+    /** AskUserQuestion only: the questions (absent for tool approvals). */
+    questions?: AskQuestion[];
   }
   /** That approval was answered (anywhere) or timed out. */
   | { type: "decision"; id: string; sessionId: string; scope: string; behaviour: ApprovalBehaviour };
@@ -264,8 +268,12 @@ export class ControllerService {
     return visible.filter((approval) => this.deps.approvals?.get(approval.id)).map(approvalEvent);
   }
 
-  /** POST approvals/:id: P allows or denies an app:/peer: approval. */
-  async decide(id: string, body: { behaviour?: unknown; behavior?: unknown }): Promise<{ decided: true }> {
+  /**
+   * POST approvals/:id: P allows or denies an app:/peer: approval, or answers (allow + answers)
+   * or declines (deny) its questions. Answering questions doesn't need `approve`: it's P's
+   * own conversation, as the asker answers in Discord.
+   */
+  async decide(id: string, body: { behaviour?: unknown; behavior?: unknown; answers?: unknown }): Promise<{ decided: true }> {
     const approval = this.deps.approvals?.get(id);
     if (!approval || !(await this.listed(approval.scope))) {
       throw new ControllerError(404, "not_found", "This approval was already answered");
@@ -277,10 +285,20 @@ export class ControllerService {
     if (behaviour !== "allow" && behaviour !== "deny") {
       throw new ControllerError(400, "invalid_behaviour", "behaviour must be allow or deny");
     }
-    if (!this.deps.canApprove?.()) throw new ControllerError(403, "not_approver", "You can't approve actions here.");
-    const result = this.deps.approvals!.decide(id, behaviour);
+    let answers: Record<string, string> | undefined;
+    if (approval.questions) {
+      if (behaviour === "allow") {
+        const problem = answersError(approval.questions, body.answers);
+        if (problem) throw new ControllerError(400, "invalid_answers", problem);
+        answers = body.answers as Record<string, string>;
+      }
+    } else if (!this.deps.canApprove?.()) {
+      throw new ControllerError(403, "not_approver", "You can't approve actions here.");
+    }
+    const result = this.deps.approvals!.decide(id, behaviour, answers);
     if (result === "not_found") throw new ControllerError(404, "not_found", "This approval was already answered");
     if (result === "read_only") throw new ControllerError(403, "read_only");
+    if (result === "invalid_answers") throw new ControllerError(400, "invalid_answers");
     return { decided: true };
   }
 
@@ -430,6 +448,7 @@ function approvalEvent(approval: ControllerApproval): ControllerEvent {
     agentId: approval.agentId,
     review: approval.review,
     answerIn: approval.answerIn,
+    ...(approval.questions ? { questions: approval.questions } : {}),
   };
 }
 

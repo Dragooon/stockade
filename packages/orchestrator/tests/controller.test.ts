@@ -257,7 +257,7 @@ describe("controller routes", () => {
     const app = server(new Map([[TOKEN, w.service]]));
 
     expect(await (await get(app, "/controller/info", TOKEN)).json()).toEqual({
-      controller: { id: "mustafar", name: "Mustafar", kind: "stockade", capabilities: ["list", "transcript", "send", "new_session", "decide"] },
+      controller: { id: "mustafar", name: "Mustafar", kind: "stockade", capabilities: ["list", "transcript", "send", "new_session", "decide", "questions"] },
       person: "shitiz",
     });
     const sessions = await (await get(app, "/controller/sessions", TOKEN)).json() as Array<{ id: string; scope: string }>;
@@ -692,5 +692,42 @@ describe("controller routes: d3b-5", () => {
     expect(again.status).toBe(404);
     abort.abort();
     await reader.cancel().catch(() => {});
+  });
+});
+
+describe("ControllerService: questions (d3b-6)", () => {
+  const QUESTIONS = [
+    { question: "Which branch?", header: "Branch", options: [{ label: "main" }, { label: "dev" }], multiSelect: false },
+  ];
+
+  it("sends the questions with the approval, takes answers without approve, and validates them", async () => {
+    let next = 0;
+    const approvals = new ControllerApprovals({ newId: () => `q${++next}` });
+    const w = world({ approvals, canApprove: () => false });
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    const events: ControllerEvent[] = [];
+    w.service.subscribe((event) => events.push(event));
+    const asked = approvals.askQuestions(APP, QUESTIONS, "main");
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(events[0]).toMatchObject({ type: "approval", id: "q1", tool: "AskUserQuestion", questions: QUESTIONS, input: { questions: QUESTIONS } });
+
+    await expect(w.service.decide("q1", { behaviour: "allow" })).rejects.toMatchObject({ status: 400, code: "invalid_answers" });
+    await expect(w.service.decide("q1", { behaviour: "allow", answers: { "Other?": "x" } })).rejects.toMatchObject({ status: 400, code: "invalid_answers" });
+    expect(await w.service.decide("q1", { behaviour: "allow", answers: { "Which branch?": "dev" } })).toEqual({ decided: true });
+    expect(await asked).toEqual({ "Which branch?": "dev" });
+
+    const skipped = approvals.askQuestions(APP, QUESTIONS);
+    expect(await w.service.decide("q2", { behaviour: "deny" })).toEqual({ decided: true });
+    expect(await skipped).toBe("declined");
+  });
+
+  it("tool approvals carry no questions field", async () => {
+    const approvals = new ControllerApprovals({ newId: () => "a1" });
+    const w = world({ approvals });
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    void approvals.ask(APP, "Bash", {});
+    const [event] = await w.service.pendingApprovals();
+    expect(event).not.toHaveProperty("questions");
+    approvals.decide("a1", "deny");
   });
 });

@@ -148,18 +148,21 @@ function personCanApprove(person: string): boolean {
   return !!user && user.roles.some((role) => config.platform.rbac.roles[role]?.permissions.includes("approve"));
 }
 /**
- * Approvals for an app:/peer: scope: they wait for its person in the app. A scope with no person,
- * or one whose person can't approve, has every escalated action denied straight away.
+ * Approvals and questions for an app:/peer: scope: they wait for its person in the app. A scope
+ * with no person, or one whose person can't approve, has every escalated action denied straight
+ * away; its person still answers the agent's questions (no person: nobody can be asked).
  */
 function controllerApprovalChannel(scope: string): ApprovalChannel {
   const person = getScopeBinding(db, scope)?.person;
-  if (person && personCanApprove(person)) return controllerApprovals.channel(scope);
+  const channel = controllerApprovals.channel(scope);
+  if (person && personCanApprove(person)) return channel;
   return {
     askUser: async (tool) => {
       console.warn(`[controller] ${tool} denied in ${scope.slice(0, 60)}: ${person ?? "nobody"} can't approve it`);
       return false;
     },
     notifyAutoApproved: async () => {},
+    ...(person ? { askQuestions: channel.askQuestions } : {}),
   };
 }
 /** Scopes whose approvals the app decides. */
@@ -544,6 +547,7 @@ function sendFromController(scope: string, text: string, person: string, userId:
     const sudoNote = sudoNotes.get(scope);
     sudoNotes.delete(scope);
     noteParticipant(scope, person, "app");
+    const approvalChannel = controllerApprovalChannel(scope);
     const isFresh = !sessionManager.get(scope) && !getSessionId(db, scope);
     const header = isFresh ? `${buildSessionStartHeader({ locationLabel: await describeScope(scope) }, scope, agentId)}\n` : "";
     // Only the platform writes [sender:/[platform:/[peer: lines: neutralise look-alikes in what people type.
@@ -552,7 +556,8 @@ function sendFromController(scope: string, text: string, person: string, userId:
       userId,
       userPlatform,
       sudo,
-      askApproval: askApprovalFor(controllerApprovalChannel(scope), agentId),
+      askApproval: askApprovalFor(approvalChannel, agentId),
+      askQuestions: approvalChannel.askQuestions,
       beforeRun: () => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)) !== sudo
         ? "its sudo mode changed while it waited"
         : null,
@@ -807,7 +812,7 @@ async function handleMessage(
   return bridge.sendAndWait(enqueueScope, `${header}${sudoNote ? `${sudoNote}\n` : ""}[${senderTag}]\n${escapePeerText(msg.content)}`, {
     userId: msg.userId,
     userPlatform: msg.platform,
-    askQuestions: approvalChannel?.askQuestions,
+    askQuestions: mirrored?.askQuestions,
     sudo,
     askApproval,
     attachments: msg.attachments,
