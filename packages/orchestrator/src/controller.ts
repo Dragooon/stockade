@@ -68,6 +68,8 @@ export interface ControllerDeps {
   agentForScope: (scope: string) => string | null;
   describe: (scope: string) => Promise<string>;
   status: (scope: string) => ControllerSessionStatus;
+  /** When the scope's last turn ended (epoch ms), if known since startup. */
+  lastTurnEnded: (scope: string) => number | null;
   inSudo: (scope: string) => boolean;
   claudeSessionId: (scope: string) => string | null;
   /** Agents P may talk to, from config. */
@@ -135,23 +137,28 @@ export class ControllerService {
   private async row(scope: string): Promise<ControllerSession | null> {
     const membership = await this.membership(scope);
     if (!membership || (membership === "cross" && !this.deps.peerSessions)) return null;
+    const label = await this.deps.describe(scope);
+    // No awaits from here on: the state is read right before the row is returned, so when two
+    // notifies for one scope race, the event emitted last carries the latest state.
     const binding = this.deps.binding(scope);
     const participants = this.deps.participants(scope);
     const status = this.deps.status(scope);
     const id = controllerSessionId(scope);
     const origin = originOf(scope);
     const writable = origin === "app" || (origin === "peer" && !scope.startsWith("api:"));
-    let lastActive = Math.max(
+    // Busy: now. Otherwise when its last turn ended; after a restart, its latest participation
+    // or binding time.
+    const lastActive = status === "busy" ? this.deps.now() : Math.max(
       0,
+      this.deps.lastTurnEnded(scope) ?? 0,
       ...participants.map((row) => Date.parse(row.lastTs) || 0),
       binding ? Date.parse(binding.createdTs) || 0 : 0,
     );
-    if (status !== "closed") lastActive = Math.max(lastActive, this.deps.now());
     return {
       id,
       ref: id.slice(0, 6),
       scope,
-      label: await this.deps.describe(scope),
+      label,
       agentId: this.deps.agentForScope(scope),
       status,
       lastActive,

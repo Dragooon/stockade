@@ -79,6 +79,8 @@ export class OrchestratorBridge {
   private readonly turnIdentity = new Map<string, string>();
   /** scope → messages from someone other than the running turn's person, in arrival order. */
   private readonly held = new Map<string, HeldMessage[]>();
+  /** scope → when its last turn ended (epoch ms, since this process started). */
+  private readonly turnEnded = new Map<string, number>();
   /** A scope's turn started or ended (controller status events). */
   onTurnChange?: (scope: string) => void;
   /** Posts a follow-up (a result nobody is waiting on) to the scope's channel. */
@@ -146,6 +148,11 @@ export class OrchestratorBridge {
     return (this.inFlight.get(scope) ?? 0) > 0;
   }
 
+  /** When the scope's last turn ended (epoch ms), or null if none has since startup. */
+  lastTurnEnded(scope: string): number | null {
+    return this.turnEnded.get(scope) ?? null;
+  }
+
   /** Would a message for this person go to the worker now ("delivered") or wait for the running turn ("queued")? */
   deliveryState(scope: string, meta: Record<string, unknown>): "delivered" | "queued" {
     return this.isTurnRunning(scope) && this.turnIdentity.get(scope) !== identityOf(meta) ? "queued" : "delivered";
@@ -160,6 +167,7 @@ export class OrchestratorBridge {
     }
     this.inFlight.delete(scope);
     this.turnIdentity.delete(scope);
+    this.turnEnded.set(scope, Date.now());
     this.onTurnChange?.(scope);
     // A held message can carry a beforeRun check from its sender (peer delivery re-checks the
     // target's sudo mode): it ran when the message was queued, and things may have changed

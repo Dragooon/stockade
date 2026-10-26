@@ -22,6 +22,7 @@ function world(overrides: Partial<ControllerDeps> = {}) {
   initScopeBindingsTable(db);
   const live = new Map<string, "busy" | "idle">();
   const sudo = new Set<string>();
+  const turnEnded = new Map<string, number>();
   const service = new ControllerService({
     person: "shitiz",
     peerSessions: true,
@@ -33,13 +34,14 @@ function world(overrides: Partial<ControllerDeps> = {}) {
     agentForScope: (scope) => getScopeBinding(db, scope)?.agentId ?? "main",
     describe: async (scope) => `label of ${scope}`,
     status: (scope) => live.get(scope) ?? "closed",
+    lastTurnEnded: (scope) => turnEnded.get(scope) ?? null,
     inSudo: (scope) => sudo.has(scope),
     claudeSessionId: (scope) => (scope === DISCORD ? "claude-1" : null),
     agents: () => [{ id: "main", name: "Madge" }],
     now: () => NOW,
     ...overrides,
   });
-  return { db, service, live, sudo };
+  return { db, service, live, sudo, turnEnded };
 }
 
 describe("ControllerService: what the app lists", () => {
@@ -78,7 +80,7 @@ describe("ControllerService: what the app lists", () => {
       label: `label of ${DISCORD}`,
       agentId: "main",
       status: "idle",
-      lastActive: NOW,
+      lastActive: Date.parse("2026-10-26T10:00:00.000Z"), // idle: P's latest message, not "now"
       sudo: true,
       claudeSessionId: "claude-1",
       origin: "discord",
@@ -158,6 +160,53 @@ describe("ControllerService: events", () => {
     unsubscribe();
     await w.service.notify(DISCORD);
     expect(events).toHaveLength(1);
+  });
+
+  it("emits the latest state last when two notifies race (the first one's describe resolves last)", async () => {
+    const pending: Array<() => void> = [];
+    const w = world({ describe: (scope) => new Promise((resolve) => pending.push(() => resolve(`label of ${scope}`))) });
+    recordParticipant(w.db, DISCORD, "shitiz", "discord");
+    const events: ControllerEvent[] = [];
+    w.service.subscribe((event) => events.push(event));
+    w.live.set(DISCORD, "busy");
+    const busyNotify = w.service.notify(DISCORD);
+    await new Promise((r) => setTimeout(r, 0));
+    w.live.set(DISCORD, "idle");
+    const idleNotify = w.service.notify(DISCORD);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(pending).toHaveLength(2);
+    pending[1](); // the idle notify's describe resolves first …
+    await idleNotify;
+    pending[0](); // … the busy one's last
+    await busyNotify;
+    expect(events.map((e) => e.session.status)).toEqual(["idle", "idle"]);
+  });
+});
+
+describe("ControllerService: lastActive", () => {
+  const at = (iso: string) => Date.parse(iso);
+
+  it("is now while busy, when the last turn ended once idle or closed, and the stored times after a restart", async () => {
+    const w = world();
+    recordParticipant(w.db, DISCORD, "shitiz", "discord", "live", "2026-10-26T10:00:00.000Z");
+    const lastActive = async () => (await w.service.sessions())[0].lastActive;
+
+    w.live.set(DISCORD, "busy");
+    expect(await lastActive()).toBe(NOW);
+    w.live.set(DISCORD, "idle");
+    expect(await lastActive()).toBe(at("2026-10-26T10:00:00.000Z")); // no turn ended since startup
+    w.turnEnded.set(DISCORD, at("2026-10-26T11:30:00.000Z"));
+    expect(await lastActive()).toBe(at("2026-10-26T11:30:00.000Z"));
+    w.live.delete(DISCORD);
+    expect(await lastActive()).toBe(at("2026-10-26T11:30:00.000Z"));
+  });
+
+  it("sorts an idle session below one that ran more recently", async () => {
+    const w = world();
+    recordParticipant(w.db, DISCORD, "shitiz", "discord", "live", "2026-10-26T09:00:00.000Z");
+    recordParticipant(w.db, OTHERS, "shitiz", "discord", "live", "2026-10-26T11:00:00.000Z");
+    w.live.set(DISCORD, "idle");
+    expect((await w.service.sessions()).map((s) => s.scope)).toEqual([OTHERS, DISCORD]);
   });
 });
 

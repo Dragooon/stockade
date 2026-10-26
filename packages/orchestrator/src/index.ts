@@ -478,6 +478,7 @@ for (const entry of config.platform.controller?.tokens ?? []) {
     agentForScope: peerAgentForScope,
     describe: describeScope,
     status: (scope) => (bridge.isTurnRunning(scope) ? "busy" : sessionManager.get(scope) ? "idle" : "closed"),
+    lastTurnEnded: (scope) => bridge.lastTurnEnded(scope),
     inSudo: (scope) => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)),
     claudeSessionId: (scope) => getSessionId(db, scope),
     agents: () => Object.entries(config.agents.agents)
