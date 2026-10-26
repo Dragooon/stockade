@@ -486,10 +486,24 @@ you're working for, and you don't wait for an answer: the receiver replies with 
     (args) => peersCall("send", args),
   );
 
+  const peersStartTool = tool(
+    "start",
+    `Start a fresh session for the person you're working for, with your message as its first turn. Use it only when
+no existing session fits (check mcp__peers__list first); at most 5 per hour. It's an ordinary session of that
+person, visible to them, and it runs with their access: the reply comes back as a send, not as this tool's result.
+Returns the new session's "label [ref]" for mcp__peers__send.`,
+    {
+      message: z.string().describe("The first message (at most 8000 characters)"),
+      agent: z.string().optional().describe("Agent id to run it (default: your own agent)"),
+      host: z.string().optional().describe("Host to start it on (default and, for now, only: this one)"),
+    },
+    (args) => peersCall("start", args),
+  );
+
   const peersMcpServer = createSdkMcpServer({
     name: "peers",
     version: "1.0.0",
-    tools: [peersListTool, peersSendTool],
+    tools: [peersListTool, peersSendTool, peersStartTool],
   });
 
   // ── Build query options ──

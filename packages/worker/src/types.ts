@@ -25,7 +25,7 @@ export const WorkerSessionRequestSchema = z.object({
   orchestratorUrl: z.string(),
   callbackToken: z.string(),
   sdkSettings: z.record(z.string(), z.unknown()).optional(),
-  /** Offer mcp__peers__list/send (session-to-session messaging). The orchestrator decides. */
+  /** Offer mcp__peers__list/send/start (session-to-session messaging). The orchestrator decides. */
   peers: z.boolean().optional(),
   /** When true: subscribe to Redis for messages, publish events to Redis. */
   redisMode: z.boolean().optional(),
@@ -52,7 +52,7 @@ export interface WorkerSessionRequest {
   orchestratorUrl: string;
   callbackToken: string;
   sdkSettings?: Record<string, unknown>;
-  /** Offer mcp__peers__list/send (session-to-session messaging). The orchestrator decides. */
+  /** Offer mcp__peers__list/send/start (session-to-session messaging). The orchestrator decides. */
   peers?: boolean;
   /** When true: subscribe to Redis for messages, publish events to Redis. */
   redisMode?: boolean;

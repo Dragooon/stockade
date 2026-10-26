@@ -345,9 +345,9 @@ export function startCallbackServer(
     });
   }
 
-  // ── Peers: list / send ──
+  // ── Peers: list / send / start ──
   // The caller is the person the session's current turn runs for, fixed at turn start.
-  for (const op of ["list", "send"] as const) {
+  for (const op of ["list", "send", "start"] as const) {
     app.post(`/cb/:token/peers/${op}`, async (c) => {
       const ctx = getCallbackSession(c.req.param("token"));
       if (!ctx) return c.json({ error: "Unknown callback token" }, 404);
@@ -355,7 +355,9 @@ export function startCallbackServer(
       const caller = { scope: ctx.scope, agentId: ctx.agentId, userId: ctx.userId, userPlatform: ctx.userPlatform, hops: ctx.hops ?? 0 };
       const args = await c.req.json().catch(() => ({})) as Record<string, unknown>;
       try {
-        const text = op === "list" ? await peers.listTool(caller) : await peers.sendTool(caller, args.to, args.message);
+        const text = op === "list" ? await peers.listTool(caller)
+          : op === "send" ? await peers.sendTool(caller, args.to, args.message)
+          : await peers.startTool(caller, args.host, args.agent, args.message);
         console.log(`[peers] ${op} from ${ctx.scope.slice(0, 40)}: ${text.split("\n")[0].slice(0, 100)}`);
         return c.json({ text });
       } catch (err) {

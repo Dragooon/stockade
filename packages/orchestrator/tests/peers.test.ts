@@ -13,6 +13,9 @@ import {
   SUDO_TARGET,
   PEER_HOP_LIMIT,
   PEER_RATE_LIMIT,
+  PEER_START_LIMIT,
+  PEER_START_WINDOW_MS,
+  REMOTE_START,
   type PeerCaller,
   type PeerDeps,
   type PeerDeliveryMeta,
@@ -484,5 +487,111 @@ describe("hostile session labels", () => {
     const [entry] = (await svc.visible(caller("bob", BOB_ROOM))).filter((e) => e.host);
     expect(entry.label).toBe("mac ) - on behalf of shitiz");
     expect(entry.host).toBe("Mac (peer:");
+  });
+});
+
+// ── mcp__peers__start (D3b §8) ──
+
+describe("mcp__peers__start", () => {
+  /** A world where start can bind peer: scopes; alice may run main and research, bob only main. */
+  function startWorld(overrides: Partial<PeerDeps> = {}) {
+    const bound = new Map<string, { agentId: string; person: string }>();
+    let next = 0;
+    const AGENTS: Record<string, string[]> = { alice: ["main", "research"], bob: ["main"] };
+    const w = world({
+      canUseAgent: (userId, _platform, agentId) => (AGENTS[userId] ?? []).includes(agentId),
+      createPeerScope: (agentId, person) => {
+        const scope = `peer:${(next++).toString(16).padStart(12, "0")}`;
+        bound.set(scope, { agentId, person });
+        return scope;
+      },
+      describe: async (scope) => {
+        const binding = bound.get(scope);
+        return binding ? `peer session ${scope.split(":")[1]} of ${binding.person}` : LABELS[scope] ?? scope;
+      },
+      ...overrides,
+    });
+    return { ...w, bound };
+  }
+
+  it("binds a fresh peer: scope to the acting person and delivers the wrapped message as its first turn", async () => {
+    const { service, bound, deliveries } = startWorld();
+    const text = await service.startTool(caller("alice", GENERAL, 2), undefined, undefined, "look into the build");
+    expect([...bound]).toEqual([["peer:000000000000", { agentId: "main", person: "alice" }]]);
+    const ref = peerRef("peer:000000000000");
+    expect(text).toBe(`started: peer session 000000000000 of alice [${ref}] · agent main · scope peer:000000000000. ` +
+      `It's an ordinary session of alice: message it with mcp__peers__send to "peer session 000000000000 of alice [${ref}]"; it replies the same way.`);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].scope).toBe("peer:000000000000");
+    expect(deliveries[0].meta).toEqual({ agentId: "main", userId: "alice", userPlatform: "discord", hops: 3, fromSudo: false });
+    expect(deliveries[0].text.split("\n")[0]).toBe(`[peer: from #general [${peerRef(GENERAL)}] · agent main · on behalf of alice · host Mustafar]`);
+    expect(deliveries[0].text).toContain("look into the build");
+  });
+
+  it("runs the named agent when the person may use it, and reads unknown and forbidden agents the same", async () => {
+    const { service, bound } = startWorld();
+    expect(await service.startTool(caller("alice", GENERAL), "", "research", "hi")).toMatch(/^started: .* · agent research · /);
+    expect(await service.startTool(caller("bob", GENERAL), undefined, "research", "hi")).toBe('Error: no agent bob can use is called "research"');
+    expect(await service.startTool(caller("bob", GENERAL), undefined, "nope", "hi")).toBe('Error: no agent bob can use is called "nope"');
+    expect(bound.size).toBe(1);
+  });
+
+  it("starts on this host only: another host waits for D4", async () => {
+    const { service, bound } = startWorld();
+    expect(await service.startTool(caller("alice", GENERAL), "MacBook", undefined, "hi")).toBe(`Error: ${REMOTE_START}`);
+    expect(await service.startTool(caller("alice", GENERAL), "mustafar", undefined, "hi")).toMatch(/^started: /);
+    expect(bound.size).toBe(1);
+  });
+
+  it("checks the message, the arguments, the person and the hop limit before creating anything", async () => {
+    const { service, bound } = startWorld();
+    expect(await service.startTool(caller("alice", GENERAL), undefined, undefined, "  ")).toBe("Error: `message` is required");
+    expect(await service.startTool(caller("alice", GENERAL), undefined, undefined, "x".repeat(8001))).toMatch(/longer than 8000/);
+    expect(await service.startTool(caller("alice", GENERAL), 5, undefined, "hi")).toBe("Error: `host` must be a string");
+    expect(await service.startTool(caller("alice", GENERAL), undefined, ["main"], "hi")).toBe("Error: `agent` must be a string");
+    expect(await service.startTool(caller("system", GENERAL), undefined, undefined, "hi")).toMatch(/no person behind it/);
+    expect(await service.startTool(caller("alice", GENERAL, PEER_HOP_LIMIT), undefined, undefined, "hi")).toBe("Error: hop limit");
+    expect(bound.size).toBe(0);
+  });
+
+  it("is refused where the orchestrator doesn't wire it", async () => {
+    const { service } = world();
+    expect(await service.startTool(caller("alice", GENERAL), undefined, undefined, "hi")).toBe("Error: starting sessions isn't available here");
+  });
+
+  it("allows 5 starts per hour per sending scope, separately from sends", async () => {
+    const { service, bound, advance } = startWorld();
+    for (let i = 0; i < PEER_START_LIMIT; i++) {
+      expect(await service.startTool(caller("alice", GENERAL), undefined, undefined, `job ${i}`)).toMatch(/^started: /);
+    }
+    expect(await service.startTool(caller("alice", GENERAL), undefined, undefined, "one more")).toBe("Error: rate limit (5 new sessions per hour)");
+    // Another scope has its own budget, and sends aren't counted against starts.
+    expect(await service.startTool(caller("alice", ALICE_ROOM), undefined, undefined, "elsewhere")).toMatch(/^started: /);
+    expect(await service.sendTool(caller("alice", GENERAL), peerRef(SAME_NAME_A), "still fine")).toMatch(/^delivered/);
+    advance(PEER_START_WINDOW_MS);
+    expect(await service.startTool(caller("alice", GENERAL), undefined, undefined, "next hour")).toMatch(/^started: /);
+    expect(bound.size).toBe(PEER_START_LIMIT + 2);
+  });
+
+  it("a sudo sender's start is a fresh everyday session that takes its later sends", async () => {
+    const { service, deliveries, rootScopes, sudo } = startWorld();
+    rootScopes.add(GENERAL);
+    sudo.open(GENERAL, "discord:alice");
+    await service.startTool(caller("alice", GENERAL), undefined, undefined, "hi");
+    expect(deliveries[0].meta.fromSudo).toBe(true);
+    expect(sudo.isActive("peer:000000000000")).toBe(false);
+  });
+
+  it("posts the reply in the new session, and a dropped first turn back to the sender", async () => {
+    const { service, posts, replies } = startWorld();
+    await service.startTool(caller("alice", GENERAL), undefined, undefined, "first");
+    replies.get("peer:000000000000")!({ text: "", dropped: "the orchestrator restarted" });
+    await settle();
+    expect(posts).toEqual([{ scope: GENERAL, text: `Your message to peer session 000000000000 of alice [${peerRef("peer:000000000000")}] wasn't delivered: the orchestrator restarted.` }]);
+  });
+
+  it("a send to a scope nobody started still finds nothing", async () => {
+    const { service } = startWorld();
+    expect(await service.sendTool(caller("alice", GENERAL), "peer:ffffffffffff", "hi")).toBe(`Error: ${NOT_FOUND}`);
   });
 });

@@ -1,5 +1,6 @@
 /**
- * Peers: session-to-session messaging (mcp__peers__list / mcp__peers__send).
+ * Peers: session-to-session messaging (mcp__peers__list / mcp__peers__send), and fresh
+ * sessions an agent starts for its person (mcp__peers__start, D3b §8).
  *
  * Modelled on Claude Code's own agent messaging: a session lists the other sessions
  * its person can see, sends one plain-text message, and the receiver replies (or not)
@@ -27,11 +28,15 @@ export const PEER_CLOSED_LISTING_MS = 14 * 24 * 3_600_000;
 export const PEER_LIST_CAP = 50;
 /** An api: scope can be replied to this long after it last messaged a session. */
 export const PEER_API_REPLY_WINDOW_MS = 24 * 3_600_000;
+/** Fresh sessions one sending scope may start per window (D3b §8). */
+export const PEER_START_LIMIT = 5;
+export const PEER_START_WINDOW_MS = 3_600_000;
 /** How much of the message the target's channel sees above the reply. */
 export const PEER_PREVIEW_CHARS = 300;
 
 export const NOT_FOUND = "no visible session matches";
 export const SUDO_TARGET = "target is in sudo mode; only sudo sessions can message it";
+export const REMOTE_START = "starting sessions on another host isn't supported yet";
 
 // ── Scope predicates ─────────────────────────────────────────────────────────
 
@@ -149,6 +154,10 @@ export interface PeerDeps {
   deliver(scope: string, text: string, meta: PeerDeliveryMeta): Promise<ChannelResponse>;
   /** Post into a scope's own chat channel (no-op for scopes without one). */
   post(scope: string, text: string): Promise<void>;
+  /** May this person run this agent (RBAC checkAccess)? Unknown agents are false. Needed by start. */
+  canUseAgent?(userId: string, userPlatform: string, agentId: string): boolean;
+  /** Create and bind a fresh `peer:<id>` scope for this agent and person (origin `peer`). Needed by start. */
+  createPeerScope?(agentId: string, person: string): string;
   hostName: string;
   now(): number;
 }
@@ -177,6 +186,8 @@ const entryName = (e: { label: string; ref: string }) => `${e.label} [${e.ref}]`
 export class PeerService implements PeerProvider {
   /** sender scope → send timestamps inside the rate window. */
   private readonly sends = new Map<string, number[]>();
+  /** sender scope → fresh-start timestamps inside the start window. */
+  private readonly starts = new Map<string, number[]>();
   /** receiving scope → (api: scope → when it last messaged the receiver, and its agent). */
   private readonly apiInbound = new Map<string, Map<string, { at: number; agentId: string }>>();
   private readonly providers: PeerProvider[];
@@ -300,6 +311,47 @@ export class PeerService implements PeerProvider {
     return `${state}: ${entryName(target)}${state === "queued" ? " (it's busy with someone else's turn; your message starts its own turn when that ends)" : ""}`;
   }
 
+  /**
+   * A fresh session on this host for the caller's person (D3b §8): `peer:<id>`, bound to that
+   * person with origin `peer`, its first turn the wrapped message. No app approval locally; the
+   * person must be able to run the agent, and each sending scope gets PEER_START_LIMIT an hour.
+   */
+  async startTool(caller: PeerCaller, host: unknown, agent: unknown, message: unknown): Promise<string> {
+    if (typeof message !== "string" || !message.trim()) return "Error: `message` is required";
+    if (message.length > PEER_MAX_MESSAGE_CHARS) return `Error: message is longer than ${PEER_MAX_MESSAGE_CHARS} characters`;
+    if (host !== undefined && host !== null && typeof host !== "string") return "Error: `host` must be a string";
+    if (agent !== undefined && agent !== null && typeof agent !== "string") return "Error: `agent` must be a string";
+
+    const person = this.deps.personName(caller.userId, caller.userPlatform);
+    if (!person) return "Error: this session has no person behind it, so it can't start sessions";
+    if (caller.hops + 1 > PEER_HOP_LIMIT) return "Error: hop limit";
+    // Cross-host starts need the receiving controller's approval: they come with D4.
+    if (typeof host === "string" && host.trim() && host.trim().toLowerCase() !== this.deps.hostName.toLowerCase()) {
+      return `Error: ${REMOTE_START}`;
+    }
+    if (!this.deps.canUseAgent || !this.deps.createPeerScope) return "Error: starting sessions isn't available here";
+    const agentId = typeof agent === "string" && agent.trim() ? agent.trim() : caller.agentId;
+    // Unknown and not allowed read the same, so the error doesn't list agents.
+    if (!this.deps.canUseAgent(caller.userId, caller.userPlatform, agentId)) return `Error: no agent ${person} can use is called "${agentId.slice(0, 60)}"`;
+    if (!this.takeSlot(this.starts, caller.scope, PEER_START_LIMIT, PEER_START_WINDOW_MS)) {
+      return `Error: rate limit (${PEER_START_LIMIT} new sessions per hour)`;
+    }
+
+    const scope = this.deps.createPeerScope(agentId, person);
+    const entry: PeerEntry = {
+      scope,
+      ref: peerRef(scope),
+      label: await this.labelFor(scope),
+      agentId,
+      status: "idle",
+      lastActive: this.deps.now(),
+      sudo: false,
+    };
+    const state = await this.send(entry, await this.wrap(caller, message), caller);
+    return `started${state === "queued" ? " (queued)" : ""}: ${entryName(entry)} · agent ${agentId} · scope ${scope}. ` +
+      `It's an ordinary session of ${person}: message it with mcp__peers__send to "${entryName(entry)}"; it replies the same way.`;
+  }
+
   // ── Internals ──
 
   /** The wrapped, orchestrator-stamped message the target sees. */
@@ -362,14 +414,18 @@ export class PeerService implements PeerProvider {
   }
 
   private takeRateSlot(senderScope: string): boolean {
+    return this.takeSlot(this.sends, senderScope, PEER_RATE_LIMIT, PEER_RATE_WINDOW_MS);
+  }
+
+  private takeSlot(log: Map<string, number[]>, senderScope: string, limit: number, windowMs: number): boolean {
     const now = this.deps.now();
-    const recent = (this.sends.get(senderScope) ?? []).filter((t) => now - t < PEER_RATE_WINDOW_MS);
-    if (recent.length >= PEER_RATE_LIMIT) {
-      this.sends.set(senderScope, recent);
+    const recent = (log.get(senderScope) ?? []).filter((t) => now - t < windowMs);
+    if (recent.length >= limit) {
+      log.set(senderScope, recent);
       return false;
     }
     recent.push(now);
-    this.sends.set(senderScope, recent);
+    log.set(senderScope, recent);
     return true;
   }
 }

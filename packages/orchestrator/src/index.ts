@@ -508,6 +508,14 @@ const peers = new PeerService({
   },
   // app:/peer: senders only refresh the controllers: the notice text itself isn't shown in the app (v1).
   post: (scope, text) => sendToChannel(scope, text),
+  // mcp__peers__start (D3b §8): a fresh peer:<id> scope for the acting person.
+  canUseAgent: (userId, userPlatform, agentId) =>
+    !!config.agents.agents[agentId] && checkAccess(userId, userPlatform, agentId, config.platform),
+  createPeerScope: (agentId, person) => {
+    const scope = `peer:${randomBytes(6).toString("hex")}`;
+    bindScope(db, { scope, agentId, person, origin: "peer" });
+    return scope;
+  },
   hostName: hostname().charAt(0).toUpperCase() + hostname().slice(1),
   now: () => Date.now(),
 });
