@@ -132,6 +132,14 @@ describe("ControllerService: what the app lists", () => {
     expect(app.lastActive).toBe(Date.parse("2026-10-26T11:50:00.000Z")); // lastActive still counts agent activity
   });
 
+  it("lastUserMessageAt ignores a later message from another person", async () => {
+    recordParticipant(w.db, DISCORD, "urvashi", "discord", "live", "2026-10-26T12:00:00.000Z");
+    const sessions = await w.service.sessions();
+    const discord = sessions.find((s) => s.scope === DISCORD)!;
+    expect(discord.lastUserMessageAt).toBe("2026-10-26T10:00:00.000Z"); // shitiz's own last message
+    expect(discord.lastActive).toBe(Date.parse("2026-10-26T12:00:00.000Z")); // activity still counts everyone
+  });
+
   it("sorts by latest activity", async () => {
     w.live.set(DISCORD, "busy");
     expect((await w.service.sessions()).map((s) => s.scope)).toEqual([DISCORD, APP]);

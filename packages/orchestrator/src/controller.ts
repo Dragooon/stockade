@@ -39,7 +39,7 @@ export interface ControllerSession {
   status: ControllerSessionStatus;
   /** Epoch ms of the latest activity Stockade knows of. */
   lastActive: number;
-  /** ISO time of the last message a person sent here (Discord, terminal or the app); null if none known. */
+  /** ISO time of the last message P (this controller's person) sent here (Discord, terminal or the app); null if none known. */
   lastUserMessageAt: string | null;
   sudo: boolean;
   /** The scope's current Claude session, so a client sees /new or a rotation. */
@@ -532,7 +532,7 @@ export class ControllerService {
       agentId: this.deps.agentForScope(scope),
       status,
       lastActive,
-      lastUserMessageAt: lastPersonMessageAt(participants),
+      lastUserMessageAt: lastPersonMessageAt(participants, this.deps.person),
       sudo: this.deps.inSudo(scope),
       claudeSessionId: this.deps.claudeSessionId(scope),
       origin,
@@ -593,10 +593,16 @@ function checkedText(text: unknown): string {
 /** Participation platforms where an agent acted for the person (a peer message, Kepler or a /dispatch). */
 const AGENT_PARTICIPATION_PLATFORMS = new Set(["peer", "api"]);
 
-/** The latest lastTs among rows where the person wrote it themselves, as ISO; null if there are none. */
-function lastPersonMessageAt(participants: Participant[]): string | null {
+/**
+ * The latest lastTs among rows this person wrote themselves, as ISO; null if there are none.
+ * Other people's rows don't count (Urvashi writing in a thread doesn't move Shitiz's time), and
+ * neither do rows an agent wrote for the person. The Mac side counts only the owner's own prompts
+ * the same way, so both hosts sort alike in one Recents list.
+ */
+function lastPersonMessageAt(participants: Participant[], person: string): string | null {
   let latestMs: number | null = null;
   for (const row of participants) {
+    if (row.person !== person) continue;
     if (AGENT_PARTICIPATION_PLATFORMS.has(row.platform)) continue;
     const rowMs = Date.parse(row.lastTs);
     if (Number.isNaN(rowMs)) continue;
