@@ -108,7 +108,9 @@ group `shitiz`, mode 0640). Not the `/dispatch` token. No tokens configured = ev
   terminal scope they've written in that they can still view; `app:`/`peer:` scopes bound to them; with
   `controller.peer_sessions` (default true) also scopes a peer message or a /dispatch acted for them
   (`api:kepler`, `peer:` scopes Kepler or an agent started). Never `#sched:` or `api:<agent>:<uuid>`. Each has
-  `id` (12 hex of sha256(scope)), `ref`, `label`, `agentId`, `status`, `lastActive`, `sudo`,
+  `id` (12 hex of sha256(scope)), `ref`, `label`, `agentId`, `status`, `lastActive`, `lastUserMessageAt` (ISO
+  time of the last message a person sent there, from Discord, a terminal or the app; not peer, Kepler or
+  /dispatch messages acting for them; null if none known), `sudo`,
   `claudeSessionId`, `origin`, `startedBy`, `participants`, `writable` (only `app:`/`peer:`) and
   `readOnlyReason` (`discord`, `terminal`, `agent`).
 - `GET /controller/agents`: `[{id, name}]` the person may use (`name` = the agent's config `name`, else its id).

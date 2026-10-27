@@ -39,6 +39,8 @@ export interface ControllerSession {
   status: ControllerSessionStatus;
   /** Epoch ms of the latest activity Stockade knows of. */
   lastActive: number;
+  /** ISO time of the last message a person sent here (Discord, terminal or the app); null if none known. */
+  lastUserMessageAt: string | null;
   sudo: boolean;
   /** The scope's current Claude session, so a client sees /new or a rotation. */
   claudeSessionId: string | null;
@@ -530,6 +532,7 @@ export class ControllerService {
       agentId: this.deps.agentForScope(scope),
       status,
       lastActive,
+      lastUserMessageAt: lastPersonMessageAt(participants),
       sudo: this.deps.inSudo(scope),
       claudeSessionId: this.deps.claudeSessionId(scope),
       origin,
@@ -585,6 +588,21 @@ function checkedText(text: unknown): string {
   if (typeof text !== "string" || !text.trim()) throw new ControllerError(400, "text_required", "text is required");
   if (text.length > CONTROLLER_MESSAGE_MAX_CHARS) throw new ControllerError(400, "text_too_long", "text is too long");
   return text;
+}
+
+/** Participation platforms where an agent acted for the person (a peer message, Kepler or a /dispatch). */
+const AGENT_PARTICIPATION_PLATFORMS = new Set(["peer", "api"]);
+
+/** The latest lastTs among rows where the person wrote it themselves, as ISO; null if there are none. */
+function lastPersonMessageAt(participants: Participant[]): string | null {
+  let latestMs: number | null = null;
+  for (const row of participants) {
+    if (AGENT_PARTICIPATION_PLATFORMS.has(row.platform)) continue;
+    const rowMs = Date.parse(row.lastTs);
+    if (Number.isNaN(rowMs)) continue;
+    if (latestMs === null || rowMs > latestMs) latestMs = rowMs;
+  }
+  return latestMs === null ? null : new Date(latestMs).toISOString();
 }
 
 function originOf(scope: string): ControllerOrigin {

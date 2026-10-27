@@ -119,6 +119,19 @@ describe("ControllerService: what the app lists", () => {
     });
   });
 
+  it("lastUserMessageAt is the latest message a person sent, never an agent acting for them", async () => {
+    let sessions = await w.service.sessions();
+    expect(sessions.find((s) => s.scope === DISCORD)?.lastUserMessageAt).toBe("2026-10-26T10:00:00.000Z");
+    expect(sessions.find((s) => s.scope === APP)?.lastUserMessageAt).toBeNull(); // bound, nobody wrote yet
+    recordParticipant(w.db, APP, "shitiz", "app", "live", "2026-10-26T11:30:00.000Z");
+    recordParticipant(w.db, APP, "shitiz", "peer", "live", "2026-10-26T11:40:00.000Z");
+    recordParticipant(w.db, APP, "shitiz", "api", "live", "2026-10-26T11:50:00.000Z");
+    sessions = await w.service.sessions();
+    const app = sessions.find((s) => s.scope === APP)!;
+    expect(app.lastUserMessageAt).toBe("2026-10-26T11:30:00.000Z");
+    expect(app.lastActive).toBe(Date.parse("2026-10-26T11:50:00.000Z")); // lastActive still counts agent activity
+  });
+
   it("sorts by latest activity", async () => {
     w.live.set(DISCORD, "busy");
     expect((await w.service.sessions()).map((s) => s.scope)).toEqual([DISCORD, APP]);
