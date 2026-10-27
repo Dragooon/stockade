@@ -94,6 +94,13 @@ export const TRANSCRIPT_MAX_LIMIT = 1000;
 /** How often a busy session's transcript is checked for new records while an app is connected. */
 export const TRANSCRIPT_FOLLOW_MS = 1000;
 export const CONTROLLER_MESSAGE_MAX_CHARS = 100_000;
+/**
+ * How long GET sessions waits on visibility checks and labels (Discord lookups, slow while its
+ * caches are cold after a restart). Rows still resolving then are sent later as `session` events.
+ */
+export const SESSIONS_LIST_BUDGET_MS = 300;
+
+const TIMED_OUT = Symbol("timed out");
 
 export interface ControllerDeps {
   /** P: the config username the token is bound to. */
@@ -111,6 +118,10 @@ export interface ControllerDeps {
   canView: (scope: string, agentId: string) => Promise<boolean>;
   agentForScope: (scope: string) => string | null;
   describe: (scope: string) => Promise<string>;
+  /** The label shown while describe is still resolving (default: the scope), e.g. `<#channel>`. */
+  fallbackLabel?: (scope: string) => string;
+  /** GET sessions' wait for slow lookups (default SESSIONS_LIST_BUDGET_MS). */
+  listBudgetMs?: number;
   status: (scope: string) => ControllerSessionStatus;
   /** When the scope's last turn ended (epoch ms), if known since startup. */
   lastTurnEnded: (scope: string) => number | null;
@@ -162,6 +173,8 @@ export class ControllerService {
   private followTimer: ReturnType<typeof setInterval> | null = null;
   /** Approval events in hub order, so a decision never overtakes its approval. */
   private approvalQueue: Promise<void> = Promise.resolve();
+  /** Scopes a list left unresolved at its deadline, still resolving in the background. */
+  private resolvingLater = new Set<string>();
 
   constructor(private readonly deps: ControllerDeps) {
     deps.approvals?.subscribe((event) => {
@@ -178,20 +191,41 @@ export class ControllerService {
     return this.deps.person;
   }
 
-  /** Every session listed for P, latest activity first. */
+  /**
+   * Every session listed for P, latest activity first, within the list budget: it never waits on
+   * Discord longer than that. A row whose label is still resolving then is sent with the fallback
+   * label; a scope whose visibility is still being checked is left out (listing it unchecked could
+   * show a channel P can no longer view). Either is sent as a `session` event once resolved, the
+   * row only if its label changed.
+   */
   async sessions(): Promise<ControllerSession[]> {
-    const scopes = new Set<string>();
-    for (const row of this.deps.participation(this.deps.person)) scopes.add(row.scope);
-    for (const binding of this.deps.boundScopes(this.deps.person)) scopes.add(binding.scope);
-    const rows = await Promise.all([...scopes].map((scope) => this.row(scope)));
-    return rows
-      .filter((row): row is ControllerSession => row !== null)
-      .sort((a, b) => b.lastActive - a.lastActive);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), this.deps.listBudgetMs ?? SESSIONS_LIST_BUDGET_MS);
+    });
+    try {
+      const rows = await Promise.all(this.candidateScopes().map((scope) => this.listRow(scope, deadline)));
+      return rows
+        .filter((row): row is ControllerSession => row !== null)
+        .sort((a, b) => b.lastActive - a.lastActive);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
-  /** One listed session by its id, or null if P can't see it. */
+  /** One listed session by its id, or null if P can't see it. Waits for its lookups: no budget. */
   async find(id: string): Promise<ControllerSession | null> {
-    return (await this.sessions()).find((session) => session.id === id) ?? null;
+    const scope = this.candidateScopes().find((candidate) => controllerSessionId(candidate) === id);
+    return scope ? this.row(scope) : null;
+  }
+
+  /**
+   * Resolve every row in full, with no budget, so the lookups behind them (Discord's channel and
+   * member caches) are warm before the app's first list. Returns how many rows are listed.
+   */
+  async warm(): Promise<number> {
+    const rows = await Promise.all(this.candidateScopes().map((scope) => this.row(scope)));
+    return rows.filter((row) => row !== null).length;
   }
 
   agents(): ControllerAgent[] {
@@ -416,11 +450,62 @@ export class ControllerService {
     return !!membership && (membership === "own" || this.deps.peerSessions);
   }
 
+  /** Scopes that may be listed for P: those P took part in, and those bound to P. */
+  private candidateScopes(): string[] {
+    const scopes = new Set<string>();
+    for (const row of this.deps.participation(this.deps.person)) scopes.add(row.scope);
+    for (const binding of this.deps.boundScopes(this.deps.person)) scopes.add(binding.scope);
+    return [...scopes];
+  }
+
   /** The session as P sees it, or null when it isn't listed for P. */
   private async row(scope: string): Promise<ControllerSession | null> {
     if (!(await this.listed(scope))) return null;
-    const label = await this.deps.describe(scope);
-    // No awaits from here on: the state is read right before the row is returned, so when two
+    return this.build(scope, await this.deps.describe(scope));
+  }
+
+  /** row() for the list: whatever isn't resolved by the deadline is finished in the background. */
+  private async listRow(scope: string, deadline: Promise<typeof TIMED_OUT>): Promise<ControllerSession | null> {
+    const listed = this.listed(scope);
+    const visible = await Promise.race([listed, deadline]);
+    if (visible === TIMED_OUT) {
+      this.resolveLater(scope, listed.then((yes) => (yes ? this.deps.describe(scope) : null)), null);
+      return null;
+    }
+    if (!visible) return null;
+    const described = this.deps.describe(scope);
+    const label = await Promise.race([described, deadline]);
+    if (label !== TIMED_OUT) return this.build(scope, label);
+    const fallback = this.deps.fallbackLabel?.(scope) ?? scope;
+    this.resolveLater(scope, described, fallback);
+    return this.build(scope, fallback);
+  }
+
+  /**
+   * Finish a lookup a list gave up on. The label is null when the scope turned out not to be
+   * listed; `sent` is the label the list showed, or null when it left the row out. Subscribers
+   * get the row when it's new to them or its label changed.
+   */
+  private resolveLater(scope: string, label: Promise<string | null>, sent: string | null): void {
+    if (this.resolvingLater.has(scope)) {
+      void label.catch(() => {}); // the first list's lookup sends the event
+      return;
+    }
+    this.resolvingLater.add(scope);
+    void label
+      .then(async (resolved) => {
+        if (resolved === null || resolved === sent || this.listeners.size === 0) return;
+        const session = await this.row(scope); // fast now: the lookups above warmed the caches
+        if (!session) return;
+        for (const listener of this.listeners) listener({ type: "session", session });
+      })
+      .catch((err) => console.error(`[controller] background lookup failed for ${scope.slice(0, 60)}:`, err))
+      .finally(() => this.resolvingLater.delete(scope));
+  }
+
+  /** The row with this label. Synchronous, so it reads the latest state. */
+  private build(scope: string, label: string): ControllerSession {
+    // No awaits in here: the state is read right before the row is returned, so when two
     // notifies for one scope race, the event emitted last carries the latest state.
     const binding = this.deps.binding(scope);
     const participants = this.deps.participants(scope);

@@ -41,6 +41,14 @@ const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25 MB
 /** How long a channel view-permission check is cached (session history access). */
 const VIEW_CACHE_MS = 5 * 60_000;
 
+/** A discord scope's label without asking Discord: `<#channel>`, or `thread <id> in <#channel>`. */
+export function discordFallbackLabel(scope: string): string {
+  const parts = scope.split("#")[0].split(":");
+  if (parts[0] !== "discord" || parts.length < 3) return scope;
+  const threadId = parts.length >= 4 && /^\d+$/.test(parts[3]) ? parts[3] : undefined;
+  return threadId ? `thread ${threadId} in <#${parts[2]}>` : `<#${parts[2]}>`;
+}
+
 /** A thread started from an existing message, dispatched as the thread's first prompt. */
 interface ThreadStart {
   thread: AnyThreadChannel;
@@ -238,6 +246,12 @@ export class DiscordAdapter {
     });
 
     await this.client.login(this.config.token);
+  }
+
+  /** Resolves once the gateway is ready (guilds and channels cached). */
+  whenReady(): Promise<void> {
+    if (this.client.isReady()) return Promise.resolve();
+    return new Promise((resolve) => this.client.once("clientReady", () => resolve()));
   }
 
   async stop(): Promise<void> {
@@ -928,10 +942,8 @@ export class DiscordAdapter {
   async describeScope(scope: string): Promise<string> {
     const parts = scope.split("#")[0].split(":");
     if (parts[0] !== "discord" || parts.length < 3) return scope;
-    const threadId = parts.length >= 4 && /^\d+$/.test(parts[3]) ? parts[3] : undefined;
     const channel = await this.scopeChannel(parts);
-    if (channel) return this.describeChannel(channel).label;
-    return threadId ? `thread ${threadId} in <#${parts[2]}>` : `<#${parts[2]}>`;
+    return channel ? this.describeChannel(channel).label : discordFallbackLabel(scope);
   }
 
   /**

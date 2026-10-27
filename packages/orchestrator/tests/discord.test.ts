@@ -56,7 +56,7 @@ vi.mock("discord.js", () => {
   };
 });
 
-const { DiscordAdapter } = await import("../src/channels/discord.js");
+const { DiscordAdapter, discordFallbackLabel } = await import("../src/channels/discord.js");
 
 type DiscordConfig = NonNullable<PlatformConfig["channels"]["discord"]>;
 
@@ -538,5 +538,15 @@ describe("Discord slash commands", () => {
         flags: expect.any(Number),
       })
     );
+  });
+});
+
+describe("discordFallbackLabel", () => {
+  it("labels a channel, a thread, and an old per-user scope without asking Discord", () => {
+    expect(discordFallbackLabel("discord:1:2")).toBe("<#2>");
+    expect(discordFallbackLabel("discord:1:2:3")).toBe("thread 3 in <#2>");
+    expect(discordFallbackLabel("discord:1:2:3#sched:t1")).toBe("thread 3 in <#2>");
+    expect(discordFallbackLabel("discord:1:2:agent:main")).toBe("<#2>");
+    expect(discordFallbackLabel("app:shitiz:a1")).toBe("app:shitiz:a1");
   });
 });

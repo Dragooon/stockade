@@ -928,3 +928,101 @@ describe("ControllerService: /sudo from the app (§9)", () => {
     expect(readOnly.status).toBe(403);
   });
 });
+
+describe("ControllerService: list budget (Discord lookups cold after a restart)", () => {
+  /** A lookup like Discord's: the first call per scope takes `ms` (REST), later ones are cached. */
+  function cold<T>(ms: number, answer: (scope: string) => T, slow: (scope: string) => boolean = (scope) => scope.startsWith("discord:")) {
+    const warm = new Set<string>();
+    return async (scope: string): Promise<T> => {
+      if (slow(scope) && !warm.has(scope)) {
+        await new Promise((r) => setTimeout(r, ms));
+        warm.add(scope);
+      }
+      return answer(scope);
+    };
+  }
+  const fallbackLabel = (scope: string) => `<#${scope.split(":")[2]}>`;
+
+  function seeded(overrides: Partial<ControllerDeps>) {
+    const w = world({ fallbackLabel, listBudgetMs: 50, ...overrides });
+    recordParticipant(w.db, DISCORD, "shitiz", "discord", "live", "2026-10-26T10:00:00.000Z");
+    recordParticipant(w.db, HIDDEN, "shitiz", "discord", "live", "2026-10-26T10:00:00.000Z");
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" }, "2026-10-26T11:00:00.000Z");
+    return w;
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 300));
+
+  it("a cold list returns within the budget, with fallback labels for labels still resolving", async () => {
+    const w = seeded({ describe: cold(250, (scope) => `label of ${scope}`) });
+    const started = Date.now();
+    const rows = await w.service.sessions();
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(rows.map((row) => [row.scope, row.label])).toEqual([
+      [APP, `label of ${APP}`],
+      [DISCORD, "<#general>"],
+    ]);
+  });
+
+  it("the default budget is about 300 ms, however long Discord takes", async () => {
+    const w = seeded({ listBudgetMs: undefined, describe: (scope) => (scope.startsWith("discord:") ? new Promise(() => {}) : Promise.resolve(`label of ${scope}`)) });
+    const started = Date.now();
+    const rows = await w.service.sessions();
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(290);
+    expect(elapsed).toBeLessThan(450);
+    expect(rows.find((row) => row.scope === DISCORD)?.label).toBe("<#general>");
+  });
+
+  it("later sends the real labels as session events, once per changed row", async () => {
+    const w = seeded({ describe: cold(150, (scope) => `label of ${scope}`) });
+    const events: ControllerEvent[] = [];
+    w.service.subscribe((event) => events.push(event));
+    await w.service.sessions();
+    await w.service.sessions(); // a second cold list doesn't send the row twice
+    expect(events).toEqual([]);
+    await settle();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "session", session: { scope: DISCORD, label: `label of ${DISCORD}`, writable: false } });
+    expect((await w.service.sessions()).find((row) => row.scope === DISCORD)?.label).toBe(`label of ${DISCORD}`);
+  });
+
+  it("leaves out a scope whose visibility is still being checked, and sends it once it's allowed (never a hidden one)", async () => {
+    const w = seeded({ canView: cold(150, (scope) => scope !== HIDDEN) });
+    const events: ControllerEvent[] = [];
+    w.service.subscribe((event) => events.push(event));
+    const started = Date.now();
+    expect((await w.service.sessions()).map((row) => row.scope)).toEqual([APP]);
+    expect(Date.now() - started).toBeLessThan(200);
+    await settle();
+    expect(events.map((event) => event.type === "session" && [event.session.scope, event.session.label])).toEqual([
+      [DISCORD, `label of ${DISCORD}`],
+    ]);
+  });
+
+  it("a warm list is unchanged: the same rows as with no budget, and no events", async () => {
+    const w = seeded({});
+    const events: ControllerEvent[] = [];
+    w.service.subscribe((event) => events.push(event));
+    const unbounded = seeded({ listBudgetMs: 60_000 });
+    expect(await w.service.sessions()).toEqual(await unbounded.service.sessions());
+    expect((await w.service.sessions()).map((row) => row.label)).toEqual([`label of ${APP}`, `label of ${DISCORD}`]);
+    await settle();
+    expect(events).toEqual([]);
+  });
+
+  it("warm() resolves every row with no budget, so the next list has real labels and sends nothing", async () => {
+    const w = seeded({ describe: cold(150, (scope) => `label of ${scope}`), canView: cold(100, (scope) => scope !== HIDDEN) });
+    const events: ControllerEvent[] = [];
+    w.service.subscribe((event) => events.push(event));
+    expect(await w.service.warm()).toBe(2);
+    expect((await w.service.sessions()).map((row) => row.label)).toEqual([`label of ${APP}`, `label of ${DISCORD}`]);
+    await settle();
+    expect(events).toEqual([]);
+  });
+
+  it("find (transcript, send, sudo) waits for the row instead of the budget", async () => {
+    const w = seeded({ describe: cold(150, (scope) => `label of ${scope}`), canView: cold(100, (scope) => scope !== HIDDEN) });
+    expect(await w.service.find(controllerSessionId(DISCORD))).toMatchObject({ scope: DISCORD, label: `label of ${DISCORD}` });
+    expect(await w.service.find(controllerSessionId(HIDDEN))).toBeNull();
+  });
+});

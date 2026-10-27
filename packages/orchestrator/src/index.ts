@@ -35,7 +35,7 @@ import {
 } from "./session-history.js";
 import type { DispatchContext } from "./dispatcher.js";
 import { TerminalAdapter } from "./channels/terminal.js";
-import { DiscordAdapter } from "./channels/discord.js";
+import { DiscordAdapter, discordFallbackLabel } from "./channels/discord.js";
 import { ContainerManager, DockerClient } from "./containers/index.js";
 import { HostWorkerManager } from "./workers/host.js";
 import { startCallbackServer, CALLBACK_PORT } from "./api/server.js";
@@ -141,6 +141,15 @@ const controllerServices = new Map<string, ControllerService>();
 function notifyControllers(scope: string): void {
   for (const service of controllerServices.values()) {
     service.notify(scope).catch((err) => console.error(`[controller] notify failed for ${scope.slice(0, 60)}:`, err));
+  }
+}
+/** Resolve each controller's sessions list in full once, so the app's first list after a restart has real labels. */
+function warmControllers(): void {
+  for (const service of controllerServices.values()) {
+    const started = Date.now();
+    service.warm()
+      .then((listed) => console.log(`[controller] warmed ${service.person}'s sessions list: ${listed} rows in ${Date.now() - started} ms`))
+      .catch((err) => console.error(`[controller] warm-up failed for ${service.person}:`, err));
   }
 }
 /** Approvals the app sees (D3b §6): app:/peer: ones wait here, Discord/terminal ones are mirrored. */
@@ -691,6 +700,7 @@ for (const entry of config.platform.controller?.tokens ?? []) {
     canView: (scope, agentId) => userCanViewScope({ agentId, userId, userPlatform, scope }, scope),
     agentForScope: peerAgentForScope,
     describe: describeScope,
+    fallbackLabel: discordFallbackLabel,
     status: (scope) => (bridge.isTurnRunning(scope) ? "busy" : sessionManager.get(scope) ? "idle" : "closed"),
     lastTurnEnded: (scope) => bridge.lastTurnEnded(scope),
     inSudo: (scope) => sudoRegistry.isActive(scope, () => sudoNotes.set(scope, SUDO_TIMEOUT_NOTE)),
@@ -1072,6 +1082,8 @@ if (config.platform.channels.discord?.enabled) {
   });
   await adapter.start();
   discordAdapter = adapter;
+  // The controller lists' visibility checks and labels are Discord lookups: warm them now, not on the app's first list.
+  void adapter.whenReady().then(warmControllers);
   channelSenders.set("discord", (scope, text, files?) => adapter.send(scope, text, files));
   console.log("Discord channel started");
 }
