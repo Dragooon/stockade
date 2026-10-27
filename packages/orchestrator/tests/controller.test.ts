@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { initParticipantsTable, recordParticipant, personParticipation, scopeParticipants } from "../src/participants.js";
@@ -588,6 +588,31 @@ describe("controller routes: d3b-4", () => {
     expect(forbidden.status).toBe(403);
     expect(await forbidden.json()).toMatchObject({ error: "agent_forbidden" });
     expect(w.sent.map((s) => s.text)).toEqual(["hello", "Check the build"]);
+  });
+
+  it("logs one line per failed request: route, status, code, ids; never the text or token", async () => {
+    const w = world();
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    const hono = app(w.service);
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      await call(hono, "POST", "/controller/sessions", { agentId: "kleya", text: "secret words" });
+      await call(hono, "POST", `/controller/sessions/${controllerSessionId(DISCORD)}/message`, { text: "secret words" });
+      await call(hono, "POST", "/controller/sessions", "{nope");
+      await hono.request("/controller/sessions", { headers: { authorization: "Bearer wrong-token-value" } });
+      await call(hono, "POST", `/controller/sessions/${controllerSessionId(APP)}/message`, { text: "fine" });
+    } finally {
+      spy.mockRestore();
+    }
+    const failures = lines.filter((line) => line.startsWith("[controller]"));
+    expect(failures).toEqual([
+      "[controller] POST /controller/sessions → 403 agent_forbidden (person=shitiz agent=kleya)",
+      `[controller] POST /controller/sessions/:id/message → 404 not_found (person=shitiz id=${controllerSessionId(DISCORD)})`,
+      "[controller] POST /controller/sessions → 400 invalid_json (person=shitiz)",
+      "[controller] GET /controller/sessions → 401 unauthorized",
+    ]);
+    expect(lines.join("\n")).not.toMatch(/secret words|wrong-token-value|t{40}/);
   });
 
   it("streams transcript events with the record id as the SSE id", async () => {

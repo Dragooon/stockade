@@ -117,6 +117,8 @@ group `shitiz`, mode 0640). Not the `/dispatch` token. No tokens configured = ev
 - `GET /controller/events`: SSE. `session` events (the full session) when a listed session's turn starts or
   ends, or its session opens or closes; a `: ping` comment every 20 s.
 - Anything else under `/controller/` answers 404 `{"error":"unsupported"}`.
+- Every failed controller request logs one journal line: `[controller] <METHOD> <route> → <status> <code>
+  (person=… id=… agent=…)` (401s, refusals as `{error}`, and 500s). Never message text or tokens.
 
 ### Other controllers (D4)
 

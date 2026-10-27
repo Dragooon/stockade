@@ -99,7 +99,10 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
   app.use("/controller/*", async (c, next) => {
     if (tokens.length === 0) return c.json({ error: "not_found" }, 404);
     const service = authorise(c);
-    if (!service) return c.json({ error: "unauthorized" }, 401);
+    if (!service) {
+      console.log(`[controller] ${c.req.method} ${c.req.path} → 401 unauthorized`);
+      return c.json({ error: "unauthorized" }, 401);
+    }
     c.set("controller" as never, service as never);
     await next();
   });
@@ -124,12 +127,36 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
 
   app.get("/controller/agents", (c) => c.json(serviceOf(c).agents()));
 
+  /**
+   * One log line per failed request: route, status, error code, the :id / agent id when the
+   * request has them. Never message text or tokens.
+   */
+  const logFailure = async (c: Context, status: number | string, code: string) => {
+    const sessionId = c.req.param("id"); // a session id, or an approval id on approvals/:id
+    let agentId: unknown;
+    try {
+      agentId = c.req.method === "POST" ? (await c.req.json())?.agentId : undefined;
+    } catch {
+      agentId = undefined;
+    }
+    const details = [
+      `person=${serviceOf(c)?.person ?? "?"}`,
+      sessionId ? `id=${sessionId.slice(0, 16)}` : null,
+      typeof agentId === "string" ? `agent=${agentId.slice(0, 40)}` : null,
+    ].filter(Boolean).join(" ");
+    console.log(`[controller] ${c.req.method} ${c.req.routePath} → ${status} ${code} (${details})`);
+  };
+
   /** Run a service call, turning a ControllerError into its status and `{error: code}`. */
   const answer = async (c: Context, run: () => Promise<unknown>) => {
     try {
       return c.json(await run() as object);
     } catch (err) {
-      if (err instanceof ControllerError) return c.json({ error: err.code, message: err.message }, err.status);
+      if (err instanceof ControllerError) {
+        await logFailure(c, err.status, err.code);
+        return c.json({ error: err.code, message: err.message }, err.status);
+      }
+      await logFailure(c, 500, err instanceof Error ? err.name : "error");
       throw err;
     }
   };
