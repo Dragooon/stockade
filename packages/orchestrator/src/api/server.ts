@@ -40,6 +40,7 @@ import type { TaskStore, ScheduleType, ContextMode } from "../scheduler/types.js
 import type { ChannelFile } from "../types.js";
 import type { SessionHistoryService } from "../session-history.js";
 import { canUsePeers, type PeerService } from "../peers.js";
+import { mountBusyRoutes } from "./busy-routes.js";
 
 export const CALLBACK_PORT = 7420;
 
@@ -369,6 +370,7 @@ export function startCallbackServer(
   // ── Direct dispatch (testing / scripting) ──
   // Acts as any user, so it needs STOCKADE_API_TOKEN (disabled without one).
   const apiToken = process.env.STOCKADE_API_TOKEN;
+  mountBusyRoutes(app, { apiToken, busyScopes: bridge ? () => bridge.busyScopes() : null });
   app.post("/dispatch", async (c) => {
     if (!bridge) return c.json({ error: "Redis bridge not initialized" }, 503);
     const got = Buffer.from(c.req.header("authorization") ?? "");

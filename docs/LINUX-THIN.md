@@ -95,6 +95,12 @@ owners via sudo), so there is only ever one copy; a failed hand-over errors out 
 copy. Trade-off accepted by the owner (25 Oct 2026): context flows both ways (root output stays in the
 conversation; earlier everyday context reaches the root session).
 
+## Busy scopes (deploy runners)
+
+`GET /dispatch/busy` on 127.0.0.1:7420, with the `/dispatch` token (`STOCKADE_API_TOKEN`, file
+`.stockade/api-token`): `{busy: [scope, …]}`, the scopes with a turn running. A deploy runner waits until it's
+empty (capped at 2 minutes) before `systemctl stop stockade`, so a restart doesn't cut someone's turn.
+
 ## Controller API (the cc-controller app, D3b)
 
 Loopback routes under `/controller/` on the callback server (127.0.0.1:7420), for the cc-controller daemon
