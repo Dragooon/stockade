@@ -285,6 +285,29 @@ describe("runAgentSession", () => {
     });
   });
 
+  it("closes the CLI when the session closes mid-turn, and emits no result", async () => {
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    const close = vi.fn(() => release());
+    mockQuery.mockReturnValue({
+      close,
+      async *[Symbol.asyncIterator]() {
+        yield { session_id: "s" };
+        yield { type: "assistant", message: { usage: { input_tokens: 10, output_tokens: 3 }, content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] } };
+        await released;
+      },
+    });
+    const channel = new ConversationChannel();
+    channel.push("go");
+    const events: any[] = [];
+    const done = runAgentSession(BASE_REQUEST, channel, (ev) => events.push(ev));
+    await new Promise((r) => setTimeout(r, 20));
+    channel.close();
+    await done;
+    expect(close).toHaveBeenCalledOnce();
+    expect(events.filter((e) => e.type === "result")).toEqual([]);
+  });
+
   describe("no_reply", () => {
     const usage = { input_tokens: 10, output_tokens: 5 };
     const noReply = (text?: string) => ({

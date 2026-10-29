@@ -644,7 +644,7 @@ Returns the new session's "label [ref]" for mcp__peers__send.`,
     if (stopping) return;
     stopping = true;
     clearTimeout(waitTimer);
-    console.log(`[worker] follow-up wait over (${why}): closing the CLI`);
+    console.log(`[worker] closing the CLI (${why})`);
     (q as any).close?.();
   };
   // Idle after the reply: wait for live tasks, but not forever (a server started in
@@ -656,7 +656,14 @@ Returns the new session's "label [ref]" for mcp__peers__send.`,
     const why = liveTasks > 0 ? `${liveTasks} task(s) still running after ${ms / 60_000} min` : "no tasks left";
     waitTimer = setTimeout(() => stop(why), ms);
   };
-  channel.onClose(() => { if (replied) stop("session closed"); });
+  // Closed mid-turn means the session was deleted (/sudo switch, /new, idle close): its
+  // callback token is gone, so every further tool call would be denied as "Unknown callback
+  // token". Stop the turn now instead of letting it run on as a zombie.
+  let aborted = false;
+  channel.onClose(() => {
+    if (!replied) aborted = true;
+    stop(replied ? "session closed" : "session closed mid-turn");
+  });
 
   try {
     for await (const message of q) {
@@ -789,7 +796,7 @@ Returns the new session's "label [ref]" for mcp__peers__send.`,
     clearTimeout(waitTimer);
   }
 
-  if (!replied) {
+  if (!replied && !aborted) {
     emit({ type: "result", text: "", sessionId: sdkSessionId, stopReason: "unknown", files: pendingFiles.splice(0) });
   }
 }
