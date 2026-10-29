@@ -8,8 +8,16 @@
  *   GET /controller/sessions/:id/transcript?after=&limit=
  *                                 — the session's current transcript records, oldest first
  *                                   (raw when only the person is in it, else text-only)
- *   POST /controller/sessions/:id/message {text}
- *                                 — write as the person (403 read_only outside app:/peer:)
+ *   POST /controller/sessions/:id/message {text, files?}
+ *                                 — write as the person (403 read_only outside app:/peer:);
+ *                                   files: ids from POST files, single use (400 unknown_file),
+ *                                   at most 10 (400 too_many_files); with files text may be empty
+ *   POST /controller/sessions/:id/files  (capability `files`)
+ *                                 — body: the raw bytes; Content-Type: the file's type,
+ *                                   X-Filename: its percent-encoded name
+ *                                   → {file: {id, name, bytes, mime}}; 404 not_found, 403 read_only,
+ *                                   400 empty_file, 413 too_large (> 25 MB) / quota (20 files or
+ *                                   200 MB waiting); unsent files expire after 24 h
  *   POST /controller/sessions {agentId, text}
  *                                 — start a new app:<person>:<id> session, returns its row
  *   POST /controller/sessions/:id/sudo {task?}
@@ -50,6 +58,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { ControllerError, type ControllerEvent, type ControllerService } from "../controller.js";
+import { CONTROLLER_FILE_MAX_BYTES } from "../controller-files.js";
 
 export const CONTROLLER_PING_MS = 20_000;
 
@@ -135,7 +144,8 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
     const sessionId = c.req.param("id"); // a session id, or an approval id on approvals/:id
     let agentId: unknown;
     try {
-      agentId = c.req.method === "POST" ? (await c.req.json())?.agentId : undefined;
+      // Uploads are raw bytes, not JSON.
+      agentId = c.req.method === "POST" && !c.req.routePath.endsWith("/files") ? (await c.req.json())?.agentId : undefined;
     } catch {
       agentId = undefined;
     }
@@ -160,6 +170,27 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
       throw err;
     }
   };
+  /** The raw request body, 413 too_large past `limit` bytes (checked as it streams, not only by Content-Length). */
+  const cappedBody = async (c: Context, limit: number): Promise<Buffer> => {
+    const declared = Number(c.req.header("Content-Length"));
+    if (Number.isFinite(declared) && declared > limit) throw new ControllerError(413, "too_large", "The file is larger than 25 MB.");
+    const stream = c.req.raw.body;
+    if (!stream) return Buffer.alloc(0);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const reader = stream.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel().catch(() => undefined);
+        throw new ControllerError(413, "too_large", "The file is larger than 25 MB.");
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks, total);
+  };
   const jsonBody = async (c: Context): Promise<Record<string, unknown>> => {
     try {
       const value = await c.req.json();
@@ -179,7 +210,17 @@ export function mountControllerRoutes(app: Hono, options: ControllerRoutesOption
     }));
 
   app.post("/controller/sessions/:id/message", (c) =>
-    answer(c, async () => serviceOf(c).send(c.req.param("id"), (await jsonBody(c)).text)));
+    answer(c, async () => {
+      const body = await jsonBody(c);
+      return serviceOf(c).send(c.req.param("id"), body.text, body.files);
+    }));
+
+  app.post("/controller/sessions/:id/files", (c) =>
+    answer(c, async () => serviceOf(c).upload(c.req.param("id"), {
+      name: c.req.header("X-Filename") ?? null,
+      mime: c.req.header("Content-Type") ?? null,
+      data: await cappedBody(c, CONTROLLER_FILE_MAX_BYTES),
+    })));
 
   app.post("/controller/sessions", (c) =>
     answer(c, async () => serviceOf(c).createSession(await jsonBody(c))));

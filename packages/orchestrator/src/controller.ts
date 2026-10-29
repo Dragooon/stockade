@@ -22,7 +22,8 @@ import type { ScopeBinding } from "./scope-bindings.js";
 import { projectTranscript, transcriptRecordId, withRecordIds, type TranscriptRecord } from "./controller-transcript.js";
 import { answersError, type ApprovalBehaviour, type ApprovalHubEvent, type ControllerApproval, type ControllerApprovals } from "./controller-approvals.js";
 import type { GatekeeperReview } from "./gatekeeper.js";
-import type { AskQuestion } from "./types.js";
+import type { AskQuestion, ChannelAttachment } from "./types.js";
+import { CONTROLLER_MESSAGE_MAX_FILES, type ControllerFile, type ControllerFileStore } from "./controller-files.js";
 
 export type ControllerSessionStatus = "busy" | "idle" | "closed";
 export type ControllerOrigin = "discord" | "app" | "peer" | "terminal";
@@ -60,6 +61,8 @@ export interface ControllerAgent {
 export const CONTROLLER_CAPABILITIES = ["list", "transcript", "send", "new_session", "decide", "questions"] as const;
 /** Advertised too when Stockade has sudo mode (an agent with a sudo_user). */
 export const CONTROLLER_SUDO_CAPABILITY = "sudo";
+/** Advertised when the service has a file store: uploads (POST sessions/:id/files) and messages with files. */
+export const CONTROLLER_FILES_CAPABILITY = "files";
 
 export type ControllerEvent =
   /** A visible session's state changed (turn started or ended, session opened or closed). */
@@ -86,7 +89,7 @@ export type ControllerEvent =
 
 /** A refusal the routes turn into an HTTP status and `{error: code}`. */
 export class ControllerError extends Error {
-  constructor(readonly status: 400 | 403 | 404, readonly code: string, message: string = code) {
+  constructor(readonly status: 400 | 403 | 404 | 413, readonly code: string, message: string = code) {
     super(message);
   }
 }
@@ -136,8 +139,11 @@ export interface ControllerDeps {
   transcript: (scope: string) => Promise<TranscriptRecord[]>;
   /** Scopes with a turn running right now. */
   busyScopes: () => string[];
-  /** Start (or join) a turn in the scope as P, without waiting for it. Queued = held behind someone else's turn. */
-  send: (scope: string, text: string) => "delivered" | "queued";
+  /**
+   * Start (or join) a turn in the scope as P, without waiting for it. Queued = held behind someone
+   * else's turn. Attachments go to the agent like Discord ones (saved, listed in the prompt).
+   */
+  send: (scope: string, text: string, attachments?: ChannelAttachment[]) => "delivered" | "queued";
   /** Bind a new `app:<P>:<id>` scope to the agent and return it. */
   createAppScope: (agentId: string) => string;
   /** Transcript polling interval for live sessions (default TRANSCRIPT_FOLLOW_MS). */
@@ -150,6 +156,8 @@ export interface ControllerDeps {
   principalFor?: (name: string) => string | null;
   /** Sudo mode, when Stockade has it: P's `sudo` permission, and the /sudo toggle (true = now on). */
   sudo?: { canSudo: () => boolean; toggle: (scope: string) => Promise<boolean> };
+  /** Staged uploads (capability `files`); without it uploads are 404 unsupported. */
+  files?: ControllerFileStore;
 }
 
 const API_UUID_SCOPE = /^api:[^:]+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -235,7 +243,11 @@ export class ControllerService {
   }
 
   capabilities(): string[] {
-    return [...CONTROLLER_CAPABILITIES, ...(this.deps.sudo ? [CONTROLLER_SUDO_CAPABILITY] : [])];
+    return [
+      ...CONTROLLER_CAPABILITIES,
+      ...(this.deps.sudo ? [CONTROLLER_SUDO_CAPABILITY] : []),
+      ...(this.deps.files ? [CONTROLLER_FILES_CAPABILITY] : []),
+    ];
   }
 
   subscribe(listener: (event: ControllerEvent) => void): () => void {
@@ -280,14 +292,35 @@ export class ControllerService {
     return records.slice(start, start + limit);
   }
 
-  /** POST message: P writes in a writable scope (§4). Read-only scopes get 403 read_only. */
-  async send(id: string, text: unknown): Promise<{ delivered: true; queued: boolean }> {
+  /**
+   * POST message: P writes in a writable scope (§4). Read-only scopes get 403 read_only.
+   * `files` are ids from upload(), taken (single use) and sent with the text; with files the
+   * text may be empty.
+   */
+  async send(id: string, text: unknown, files?: unknown): Promise<{ delivered: true; queued: boolean }> {
     const session = await this.find(id);
     if (!session) throw new ControllerError(404, "not_found");
     if (!session.writable) throw new ControllerError(403, "read_only", "This session is read-only here.");
-    const message = checkedText(text);
-    const state = this.deps.send(session.scope, message);
+    const fileIds = checkedFileIds(files);
+    if (fileIds.length > 0 && !this.deps.files) throw new ControllerError(404, "unsupported", "Files aren't supported here");
+    const noText = text === undefined || text === null || (typeof text === "string" && !text.trim());
+    const message = fileIds.length > 0 && noText ? "" : checkedText(text);
+    const attachments = fileIds.length > 0 ? this.deps.files!.take(this.person, session.scope, fileIds) : undefined;
+    const state = this.deps.send(session.scope, message, attachments);
     return { delivered: true, queued: state === "queued" };
+  }
+
+  /**
+   * POST sessions/:id/files: stage a file P will send in a writable scope. 404 not_found /
+   * unsupported, 403 read_only, 400 empty_file, 413 too_large / quota.
+   */
+  async upload(id: string, upload: { name: string | null; mime: string | null; data: Buffer }): Promise<{ file: ControllerFile }> {
+    const store = this.deps.files;
+    if (!store) throw new ControllerError(404, "unsupported", "Files aren't supported here");
+    const session = await this.find(id);
+    if (!session) throw new ControllerError(404, "not_found");
+    if (!session.writable) throw new ControllerError(403, "read_only", "This session is read-only here.");
+    return { file: store.stage(this.person, session.scope, upload) };
   }
 
   /**
@@ -582,6 +615,16 @@ function approvalEvent(approval: ControllerApproval): ControllerEvent {
     answerIn: approval.answerIn,
     ...(approval.questions ? { questions: approval.questions } : {}),
   };
+}
+
+/** A message's `files`: absent, or an array of up to CONTROLLER_MESSAGE_MAX_FILES id strings. */
+function checkedFileIds(files: unknown): string[] {
+  if (files === undefined || files === null) return [];
+  if (!Array.isArray(files) || files.some((id) => typeof id !== "string" || !id)) {
+    throw new ControllerError(400, "invalid_files", "files must be an array of file ids");
+  }
+  if (files.length > CONTROLLER_MESSAGE_MAX_FILES) throw new ControllerError(400, "too_many_files", "A message can carry at most 10 files.");
+  return files as string[];
 }
 
 function checkedText(text: unknown): string {

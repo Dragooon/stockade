@@ -90,7 +90,7 @@ const RESIZE_SCRIPT = [
 ].join("\n");
 
 /** Shrink any image exceeding 2000px on either dimension (Anthropic multi-image limit). */
-function resizeImageIfNeeded(buf: Buffer, mime: string): Buffer {
+export function resizeImageIfNeeded(buf: Buffer, mime: string): Buffer {
   if (!mime.startsWith("image/")) return buf;
   const result = spawnSync("python3", ["-c", RESIZE_SCRIPT], {
     input: buf,

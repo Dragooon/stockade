@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { initParticipantsTable, recordParticipant, personParticipation, scopeParticipants } from "../src/participants.js";
@@ -7,6 +10,8 @@ import { ControllerService, controllerSessionId, type ControllerDeps, type Contr
 import type { TranscriptRecord } from "../src/controller-transcript.js";
 import { mountControllerRoutes } from "../src/api/controller-routes.js";
 import { ControllerApprovals } from "../src/controller-approvals.js";
+import { CONTROLLER_FILE_MAX_BYTES, ControllerFileStore } from "../src/controller-files.js";
+import type { ChannelAttachment } from "../src/types.js";
 
 const NOW = Date.parse("2026-10-26T12:00:00.000Z");
 const DISCORD = "discord:g:general";
@@ -1070,5 +1075,135 @@ describe("ControllerService: list budget (Discord lookups cold after a restart)"
     const w = seeded({ describe: cold(150, (scope) => `label of ${scope}`), canView: cold(100, (scope) => scope !== HIDDEN) });
     expect(await w.service.find(controllerSessionId(DISCORD))).toMatchObject({ scope: DISCORD, label: `label of ${DISCORD}` });
     expect(await w.service.find(controllerSessionId(HIDDEN))).toBeNull();
+  });
+});
+
+describe("controller files (capability `files`)", () => {
+  const TOKEN = "t".repeat(40);
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "controller-files-routes-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /** A world with a file store, recording what each send carried. */
+  function filesWorld(overrides: Partial<ControllerDeps> = {}) {
+    const files = new ControllerFileStore({ dir: join(root, "uploads") });
+    const carried: Array<{ scope: string; text: string; attachments?: ChannelAttachment[] }> = [];
+    const w = world({
+      files,
+      send: (scope, text, attachments) => {
+        carried.push({ scope, text, ...(attachments ? { attachments } : {}) });
+        return "delivered";
+      },
+      ...overrides,
+    });
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    recordParticipant(w.db, DISCORD, "shitiz", "discord");
+    const hono = new Hono();
+    mountControllerRoutes(hono, { services: new Map([[TOKEN, w.service]]), controller: { id: "mustafar", name: "Mustafar" } });
+    return { ...w, files, carried, hono };
+  }
+  const uploadTo = (hono: Hono, id: string, body: BodyInit, headers: Record<string, string> = {}) =>
+    hono.request(`/controller/sessions/${id}/files`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "image/png", "x-filename": "photo%20one.png", ...headers },
+      body,
+      ...(body instanceof ReadableStream ? { duplex: "half" } : {}),
+    } as RequestInit);
+  const message = (hono: Hono, id: string, body: unknown) =>
+    hono.request(`/controller/sessions/${id}/message`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("advertises `files` only with a file store", async () => {
+    expect(world().service.capabilities()).not.toContain("files");
+    expect(filesWorld().service.capabilities()).toContain("files");
+  });
+
+  it("uploads, then sends the file with the message as an attachment, once", async () => {
+    const w = filesWorld();
+    const res = await uploadTo(w.hono, controllerSessionId(APP), Buffer.from("png bytes"));
+    expect(res.status).toBe(200);
+    const { file } = await res.json() as { file: { id: string } };
+    expect(file).toEqual({ id: expect.any(String), name: "photo one.png", bytes: 9, mime: "image/png" });
+
+    const sent = await message(w.hono, controllerSessionId(APP), { text: "look", files: [file.id] });
+    expect(sent.status).toBe(200);
+    expect(w.carried).toEqual([{
+      scope: APP,
+      text: "look",
+      attachments: [{ filename: "photo one.png", contentType: "image/png", data: Buffer.from("png bytes").toString("base64"), size: 9 }],
+    }]);
+
+    const again = await message(w.hono, controllerSessionId(APP), { text: "again", files: [file.id] });
+    expect(again.status).toBe(400);
+    expect(await again.json()).toMatchObject({ error: "unknown_file" });
+    expect(w.carried).toHaveLength(1);
+  });
+
+  it("lets a message with files have no text, or blank text", async () => {
+    const w = filesWorld();
+    for (const text of [undefined, "", "   "]) {
+      const file = w.files.stage("shitiz", APP, { name: "a.txt", mime: "text/plain", data: Buffer.from("a") });
+      expect(await w.service.send(controllerSessionId(APP), text, [file.id])).toEqual({ delivered: true, queued: false });
+    }
+    expect(w.carried.map((entry) => [entry.text, entry.attachments?.length])).toEqual([["", 1], ["", 1], ["", 1]]);
+    await expect(w.service.send(controllerSessionId(APP), "", [])).rejects.toMatchObject({ status: 400, code: "text_required" });
+  });
+
+  it("refuses bad file lists without sending", async () => {
+    const w = filesWorld();
+    const ids = Array.from({ length: 11 }, (_, index) =>
+      w.files.stage("shitiz", APP, { name: `${index}`, mime: "text/plain", data: Buffer.from("x") }).id);
+    await expect(w.service.send(controllerSessionId(APP), "hi", "abc")).rejects.toMatchObject({ status: 400, code: "invalid_files" });
+    await expect(w.service.send(controllerSessionId(APP), "hi", [1])).rejects.toMatchObject({ status: 400, code: "invalid_files" });
+    await expect(w.service.send(controllerSessionId(APP), "hi", ids)).rejects.toMatchObject({ status: 400, code: "too_many_files" });
+    await expect(w.service.send(controllerSessionId(APP), "hi", ["nope"])).rejects.toMatchObject({ status: 400, code: "unknown_file" });
+    expect(w.carried).toEqual([]);
+    expect(w.files.pendingCount("shitiz")).toBe(11);
+  });
+
+  it("refuses uploads to read-only and unknown sessions, and empty or oversized bodies", async () => {
+    const w = filesWorld();
+    const readOnly = await uploadTo(w.hono, controllerSessionId(DISCORD), Buffer.from("x"));
+    expect(readOnly.status).toBe(403);
+    expect(await readOnly.json()).toMatchObject({ error: "read_only" });
+    expect((await uploadTo(w.hono, "000000000000", Buffer.from("x"))).status).toBe(404);
+    const empty = await uploadTo(w.hono, controllerSessionId(APP), Buffer.alloc(0));
+    expect(empty.status).toBe(400);
+    expect(await empty.json()).toMatchObject({ error: "empty_file" });
+
+    const declared = await uploadTo(w.hono, controllerSessionId(APP), Buffer.from("x"), { "content-length": String(CONTROLLER_FILE_MAX_BYTES + 1) });
+    expect(declared.status).toBe(413);
+    expect(await declared.json()).toMatchObject({ error: "too_large" });
+
+    // No Content-Length: the cap is enforced while the body streams in.
+    const chunk = new Uint8Array(1024 * 1024);
+    let left = 26;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (left-- > 0) controller.enqueue(chunk);
+        else controller.close();
+      },
+    });
+    const streamed = await uploadTo(w.hono, controllerSessionId(APP), stream);
+    expect(streamed.status).toBe(413);
+    expect(await streamed.json()).toMatchObject({ error: "too_large" });
+    expect(w.files.pendingCount("shitiz")).toBe(0);
+  });
+
+  it("is 404 unsupported without a file store, for uploads and for messages with files", async () => {
+    const w = world();
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    await expect(w.service.upload(controllerSessionId(APP), { name: "a", mime: "text/plain", data: Buffer.from("a") }))
+      .rejects.toMatchObject({ status: 404, code: "unsupported" });
+    await expect(w.service.send(controllerSessionId(APP), "hi", ["abc"])).rejects.toMatchObject({ status: 404, code: "unsupported" });
+    expect(await w.service.send(controllerSessionId(APP), "hi", [])).toEqual({ delivered: true, queued: false });
   });
 });

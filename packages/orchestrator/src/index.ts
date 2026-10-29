@@ -21,6 +21,7 @@ import {
 } from "./participants.js";
 import { initScopeBindingsTable, getScopeBinding, isBoundScope, scopesBoundTo, bindScope, unbindScope } from "./scope-bindings.js";
 import { ControllerService } from "./controller.js";
+import { ControllerFileStore } from "./controller-files.js";
 import { TranscriptReader } from "./controller-transcript.js";
 import { ControllerApprovals } from "./controller-approvals.js";
 import { mountControllerRoutes } from "./api/controller-routes.js";
@@ -35,7 +36,7 @@ import {
 } from "./session-history.js";
 import type { DispatchContext } from "./dispatcher.js";
 import { TerminalAdapter } from "./channels/terminal.js";
-import { DiscordAdapter, discordFallbackLabel } from "./channels/discord.js";
+import { DiscordAdapter, discordFallbackLabel, resizeImageIfNeeded } from "./channels/discord.js";
 import { ContainerManager, DockerClient } from "./containers/index.js";
 import { HostWorkerManager } from "./workers/host.js";
 import { startCallbackServer, CALLBACK_PORT } from "./api/server.js";
@@ -47,7 +48,7 @@ import {
   initSchedulerTables,
 } from "./scheduler/index.js";
 import type { ScheduledTask } from "./scheduler/types.js";
-import type { ChannelMessage, AskApprovalFn, ApprovalChannel, ChannelResponse, ChannelFile } from "./types.js";
+import type { ChannelMessage, AskApprovalFn, ApprovalChannel, ChannelResponse, ChannelFile, ChannelAttachment } from "./types.js";
 import { buildGatedAskApproval, resolveEffectivePermissions } from "./gatekeeper.js";
 // import { watchConfigFiles } from "./watch.js"; // Hot-reload disabled
 import { ensurePlatformSkillsDir, migrateSyncedCopies } from "./skills.js";
@@ -617,7 +618,14 @@ const controllerSends = new Map<string, Promise<void>>();
  * message in a channel (sudo mode, session-start header, sender tag), and nobody waits for
  * the reply: the app reads it from the transcript.
  */
-function sendFromController(scope: string, text: string, person: string, userId: string, userPlatform: string): "delivered" | "queued" {
+function sendFromController(
+  scope: string,
+  text: string,
+  person: string,
+  userId: string,
+  userPlatform: string,
+  attachments?: ChannelAttachment[],
+): "delivered" | "queued" {
   const previous = controllerSends.get(scope) ?? Promise.resolve();
   const next = previous.then(async () => {
     const agentId = peerAgentForScope(scope);
@@ -652,6 +660,7 @@ function sendFromController(scope: string, text: string, person: string, userId:
       sudo,
       askApproval: askApprovalFor(approvalChannel, agentId),
       askQuestions: approvalChannel.askQuestions,
+      ...(attachments?.length ? { attachments } : {}),
     }).catch((err) => console.error(`[controller] turn failed in ${scope.slice(0, 60)}:`, err));
   }).catch((err) => console.error(`[controller] message for ${scope.slice(0, 60)} failed:`, err));
   controllerSends.set(scope, next);
@@ -678,6 +687,13 @@ function readTokenFile(file: string, what: string): string | null {
   }
   return token;
 }
+
+// Files the app uploads before sending them (capability `files`), shared by every token's service.
+const controllerFiles = new ControllerFileStore({
+  dir: resolve(paths.data_dir, "controller-uploads"),
+  prepare: resizeImageIfNeeded,
+});
+setInterval(() => controllerFiles.sweep(), 60 * 60 * 1000).unref();
 
 for (const entry of config.platform.controller?.tokens ?? []) {
   const user = config.platform.rbac.users[entry.person];
@@ -716,7 +732,8 @@ for (const entry of config.platform.controller?.tokens ?? []) {
       return path ? controllerTranscripts.read(path) : [];
     },
     busyScopes: () => bridge.busyScopes(),
-    send: (scope, text) => sendFromController(scope, text, entry.person, userId, userPlatform),
+    send: (scope, text, attachments) => sendFromController(scope, text, entry.person, userId, userPlatform, attachments),
+    files: controllerFiles,
     approvals: controllerApprovals,
     canApprove: () => hasPermission(userId, userPlatform, "approve", config.platform),
     ...(sudoEnabled ? {
