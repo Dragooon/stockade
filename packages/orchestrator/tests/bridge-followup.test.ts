@@ -96,6 +96,39 @@ describe("OrchestratorBridge follow-ups", () => {
       expect(published[1].text).toBe("[sender: a]\nfirst\n\n[sender: a]\nsecond");
     });
 
+    it("tells a peer its everyday turn was cut off by a switch to root, and never moves its text there", async () => {
+      const { bridge, published } = await startWithSession();
+      const reply = bridge.sendAndWait("app:a", "[platform: sudo mode is on here]\n[peer: from x]\n<cross-session-message from=\"x\">\nhi\n</cross-session-message>", {});
+      await nextTick();
+      await bridge.closeSession("app:a", "sudo_on");
+      expect((await reply).dropped).toMatch(/cut its turn off/);
+      expect(bridge.hasInterrupted("app:a")).toBe(false);
+      void bridge.sendAndWait("app:a", "[sender: a]\nroot", { sudo: true });
+      await nextTick();
+      expect(published[1].text).toBe("[sender: a]\nroot");
+    });
+
+    it("keeps a peer's text when a session switches to everyday", async () => {
+      const { bridge } = await startWithSession();
+      void bridge.sendAndWait("app:a", "[peer: from x]\nhi", {});
+      await nextTick();
+      await bridge.closeSession("app:a", "sudo_off");
+      expect(bridge.hasInterrupted("app:a")).toBe(true);
+    });
+
+    it("counts a background task as running work until it ends", async () => {
+      const { bridge, published, onEvent } = await startWithSession();
+      void bridge.sendAndWait("app:a", "hello", {});
+      await nextTick();
+      onEvent("app:a", { kind: "evt:tasks", scope: "app:a", correlationId: "c", live: 1, timestamp: "" });
+      onEvent("app:a", { ...result("Done"), scope: "app:a", correlationId: published[0].correlationId });
+      await nextTick();
+      expect(bridge.isTurnRunning("app:a")).toBe(false);
+      expect(bridge.hasRunningWork("app:a")).toBe(true);
+      onEvent("app:a", { kind: "evt:tasks", scope: "app:a", correlationId: "c", live: 0, timestamp: "" });
+      expect(bridge.hasRunningWork("app:a")).toBe(false);
+    });
+
     it("leaves other closes alone", async () => {
       const { bridge } = await startWithSession();
       void bridge.sendAndWait("app:a", "hello", {});

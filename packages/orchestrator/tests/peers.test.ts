@@ -10,7 +10,6 @@ import {
   isConversationScope,
   canUsePeers,
   NOT_FOUND,
-  SUDO_TARGET,
   PEER_HOP_LIMIT,
   PEER_RATE_LIMIT,
   PEER_START_LIMIT,
@@ -354,11 +353,12 @@ describe("acting person", () => {
 // ── Guards ──
 
 describe("guards", () => {
-  it("refuses an everyday sender into a target in sudo mode", async () => {
+  it("delivers from an everyday sender into a target in sudo mode, marked as not from sudo", async () => {
     const { service, sudo, deliveries } = world();
     sudo.open(SAME_NAME_A, "shitiz");
-    expect(await service.sendTool(caller("alice", GENERAL), peerRef(SAME_NAME_A), "hi")).toBe(`Error: ${SUDO_TARGET}`);
-    expect(deliveries).toEqual([]);
+    expect(await service.sendTool(caller("alice", GENERAL), peerRef(SAME_NAME_A), "hi")).toMatch(/^delivered/);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].meta.fromSudo).toBe(false);
   });
 
   it("delivers from a sudo session into a target in sudo mode, marked as from sudo", async () => {
@@ -752,15 +752,15 @@ describe("principals", () => {
     expect(asks).toHaveLength(0);
   });
 
-  it("is never in sudo mode: refused by a sudo-mode scope, including one that went sudo while it waited", async () => {
+  it("is never in sudo mode: its message runs everyday in a sudo-mode scope, including one that went sudo while it waited", async () => {
     const { service, sudo, deliveries, answer } = principalWorld({ runsAsRoot: () => true }, [ALICE_ROOM]);
     sudo.open(ALICE_ROOM, "discord:alice");
-    expect(await service.sendTool(kepler(), peerRef(ALICE_ROOM), "hi")).toBe(`Error: ${SUDO_TARGET}`);
+    await service.sendTool(kepler(), peerRef(ALICE_ROOM), "hi");
+    expect(deliveries.map((delivery) => delivery.meta.fromSudo)).toEqual([false]);
     await service.sendTool(kepler(), peerRef(GENERAL), "hi");
     sudo.open(GENERAL, "discord:alice");
     await answer("allow");
-    expect(deliveries).toHaveLength(0);
-    expect(service.drainInbox("kepler").map((item) => item.text)).toEqual([`Your message to #general [${peerRef(GENERAL)}] wasn't delivered: ${SUDO_TARGET}.`]);
+    expect(deliveries.map((delivery) => delivery.meta.fromSudo)).toEqual([false, false]);
   });
 
   it("must be able to use the target's agent itself", async () => {
@@ -1002,9 +1002,9 @@ describe("remote peers (D4)", () => {
     expect((await send({ text: "x".repeat(8001) })).reason).toBe("message is longer than 8000 characters");
     expect((await send({ to: peerRef(BOB_ROOM) })).reason).toBe(NOT_FOUND);
     expect((await send({ to: "#general" })).reason).toBe(NOT_FOUND);
-    sudo.open(GENERAL, "alice");
-    expect((await send({})).reason).toBe(SUDO_TARGET);
     expect(asks).toHaveLength(0);
+    sudo.open(GENERAL, "alice");
+    expect((await send({})).status).toBe("awaiting_approval");
   });
 
   it("starts a session for the person once allowed, and drops it when refused", async () => {

@@ -471,7 +471,7 @@ Use start (a seq from search/list output) to read around a hit.`,
   const peersListTool = tool(
     "list",
     `List the other sessions you can message: conversations the person you're working for can see, newest first.
-Each line: label [ref] · agent · busy|idle|closed · last active (· sudo when it's in sudo mode; only sudo sessions can message it).`,
+Each line: label [ref] · agent · busy|idle|closed · last active (· sudo when it's in sudo mode; your message runs there without sudo unless you're a sudo session too).`,
     {},
     () => peersCall("list", {}),
   );
@@ -747,6 +747,7 @@ Returns the new session's "label [ref]" for mcp__peers__send.`,
       } else if (m.type === "system" && m.subtype === "background_tasks_changed") {
         // The full set of live tasks after each change. Ambient ones are CLI housekeeping.
         liveTasks = (((m as any).tasks ?? []) as any[]).filter((t) => !t.ambient).length;
+        emit({ type: "tasks", live: liveTasks });
         cliIdle = false;
         if (replied && !inTurn) armWait();
       } else if (m.type === "system" && m.subtype === "session_state_changed") {

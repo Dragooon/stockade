@@ -45,6 +45,15 @@ export interface BusEventTurn {
   timestamp: string;
 }
 
+export interface BusEventTasks {
+  kind: "evt:tasks";
+  scope: string;
+  correlationId: string;
+  /** Background tasks the CLI has running now. */
+  live: number;
+  timestamp: string;
+}
+
 export interface BusEventToolStart {
   kind: "evt:tool_start";
   scope: string;
@@ -107,6 +116,7 @@ export type BusWorkerEvent =
   | BusEventToolStart
   | BusEventToolEnd
   | BusEventAssistantText
+  | BusEventTasks
   | BusEventResult
   | BusEventError
   | BusEventStaleSession;

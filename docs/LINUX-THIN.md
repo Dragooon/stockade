@@ -71,10 +71,13 @@ Spec: `specs/SPEC-PEERS.md`. Code: `packages/orchestrator/src/peers.ts`, tools i
   a hop count (limit 6), and raises approvals in the target's own channel with its usual approvers. Its reply
   is posted to the target's channel under `*Message from <label> on behalf of <person>:* <first 300 chars>`
   unless the receiver stays silent (`mcp__agent__no_reply`).
-- A scope in sudo mode takes peer messages only from sudo sessions ("target is in sudo mode; only sudo sessions
-  can message it" otherwise), and runs them in its sudo session (as root), like a person's message there.
-  Sudo sessions can message anywhere their person can see; an expired sudo scope counts as everyday. Peer
-  messages don't keep sudo mode alive. The list tags such scopes `sudo`.
+- Sudo mode doesn't cut a scope off from other sessions. A message from a sudo session runs as root there. One
+  from anyone else (an everyday session, Kepler, another controller) runs as an everyday turn in the same
+  conversation, after the root session's turn and background tasks end, with a platform line saying it has no
+  sudo. The next person's message switches back to root, cutting off an everyday peer turn still running (its
+  sender is told), and warns that the peer text in the conversation is untrusted. So a peer can't run anything
+  as root, but its text stays in what root reads (Shitiz accepted this, 2026-10-31). An expired sudo scope counts
+  as everyday. Peer messages don't keep sudo mode alive. The list tags such scopes `sudo`.
 - Guards: 20 sends per sender scope per 10 minutes, 8,000 characters per message, peer text is never parsed as a command. An `api:` scope can be
   messaged only as a reply, by a session it messaged in the last 24 hours; a scheduled sender's header says
   "no reply possible". Offered to conversations, named `api:` conversations and scheduled runs; not to
@@ -85,7 +88,7 @@ Spec: `specs/SPEC-PEERS.md`. Code: `packages/orchestrator/src/peers.ts`, tools i
 `/sudo [task]` (users with the `sudo` permission: a `sudoer` role held only by the owner) toggles the
 **current conversation** (any channel or thread) into sudo mode: the scope is registered in
 `~/.stockade/sudo-scopes.json`, its everyday session is closed, and the next message continues the *same*
-conversation as `sudo_user`. `/sudo` again (or 60 min without a message) switches it back. A one-off
+conversation as `sudo_user`. `/sudo` again (or 3 hours without a message) switches it back. A one-off
 `[platform: sudo mode ON/OFF/timed out]` line tells the agent. While it's on, everyone with access to the
 conversation can still talk to it (only toggling needs `sudo`; approvals stay owner-only); scheduled tasks never run in it (they fire in an isolated everyday scope).
 

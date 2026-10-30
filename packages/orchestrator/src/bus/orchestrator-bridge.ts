@@ -56,6 +56,9 @@ interface Pending {
   autoContinueRetries: number;
 }
 
+/** A peer message: optional platform lines, then the stamp only the orchestrator writes (text is escaped). */
+const PEER_MESSAGE = /^(?:\[platform:[^\n]*\n)*\[peer: /;
+
 export class OrchestratorBridge {
   /** correlationId → pending promise */
   private readonly pending = new Map<string, Pending>();
@@ -65,6 +68,8 @@ export class OrchestratorBridge {
   private readonly turnEnded = new Map<string, number>();
   /** Scopes running a turn nobody is waiting on (a follow-up, or a message queued during the reply). */
   private readonly unawaitedTurns = new Set<string>();
+  /** Scopes whose CLI has background tasks running (the worker keeps it open for them). */
+  private readonly liveTasks = new Set<string>();
   /** scope → messages a /sudo switch cut off; they go first into the scope's next dispatch. */
   private readonly interrupted = new Map<string, { texts: string[]; meta: Record<string, unknown> }>();
   /** A scope's turn started or ended (controller status events). */
@@ -125,6 +130,12 @@ export class OrchestratorBridge {
         this.onTurnChange?.(scope);
       }
     }
+  }
+
+  /** Would closing this scope's session now stop work: a turn, or a background task it started? */
+  hasRunningWork(scope: string): boolean {
+    if (!this.sessionManager.get(scope)) this.liveTasks.delete(scope);
+    return this.isTurnRunning(scope) || this.liveTasks.has(scope);
   }
 
   /** Is a turn running in this scope (any dispatch in flight)? */
@@ -229,20 +240,26 @@ export class OrchestratorBridge {
    * without reaching into the session manager directly.
    */
   async closeSession(scope: string, reason: string): Promise<void> {
-    if (reason === "sudo_on" || reason === "sudo_off") this.holdUnanswered(scope);
+    if (reason === "sudo_on" || reason === "sudo_off") this.holdUnanswered(scope, reason);
     await this.sessionManager.closeSession(scope, reason);
     this.unawaitedTurns.delete(scope);
+    this.liveTasks.delete(scope);
   }
 
   /**
    * A /sudo switch ends the scope's turn and no result will come: settle its dispatches and
    * keep their messages for the next one, so none is lost and the scope doesn't show busy.
+   * A peer's message never moves into a root session: its sender is told instead.
    */
-  private holdUnanswered(scope: string): void {
+  private holdUnanswered(scope: string, reason: "sudo_on" | "sudo_off"): void {
     for (const [cid, p] of this.pending) {
       if (p.scope !== scope) continue;
       clearTimeout(p.timeoutHandle);
       this.pending.delete(cid);
+      if (reason === "sudo_on" && PEER_MESSAGE.test(p.originalText)) {
+        p.resolve({ text: "", silent: true, dropped: "a person's message switched that conversation back to sudo mode and cut its turn off, so it may only have partly run" });
+        continue;
+      }
       const held = this.interrupted.get(scope) ?? { texts: [], meta: this.buildRetryMeta(p) };
       // Its mode note is out of date now; the switch brings its own.
       held.texts.push(p.originalText.replace(/^\[platform: sudo mode[^\n]*\n/, ""));
@@ -442,6 +459,11 @@ export class OrchestratorBridge {
         log(`[bus] ${scope.slice(0, 30)} turn ${event.turns}: ${parts.join(" ")}`);
         break;
       }
+
+      case "evt:tasks":
+        if (event.live > 0) this.liveTasks.add(scope);
+        else this.liveTasks.delete(scope);
+        break;
 
       case "evt:tool_start":
         log(`[bus] ${scope.slice(0, 30)} tool: ${event.toolName}`);

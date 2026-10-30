@@ -36,7 +36,6 @@ export const PEER_START_WINDOW_MS = 3_600_000;
 export const PEER_PREVIEW_CHARS = 300;
 
 export const NOT_FOUND = "no visible session matches";
-export const SUDO_TARGET = "target is in sudo mode; only sudo sessions can message it";
 export const REMOTE_START = "no peer host is called that";
 /** Longest notice another controller may send about a conversation (D4). */
 export const PEER_NOTICE_MAX_CHARS = 2_000;
@@ -193,7 +192,7 @@ export interface PeerDeliveryMeta {
   userId: string;
   userPlatform: string;
   hops: number;
-  /** The sender's session runs as root. Only then may the message land in a sudo-mode scope. */
+  /** The sender's session runs as root. Only then does the message run as root in a sudo-mode scope. */
   fromSudo: boolean;
   /** The sender is a principal (by name): it participates as itself, platform api. */
   principal?: string;
@@ -210,9 +209,9 @@ export interface PeerDeps {
   describe(scope: string): Promise<string>;
   status(scope: string): PeerStatus;
   lastActive(scope: string, agentId: string): number | null;
-  /** Is the scope in sudo mode? An expired one isn't (its state is cleared). The list's `sudo` tag and the send guard. */
+  /** Is the scope in sudo mode? An expired one isn't (its state is cleared). The list's `sudo` tag; a message there waits for a running root turn. */
   inSudo(scope: string): boolean;
-  /** Does the scope's open session run as root (a sudo session)? The sender side of the sudo guard. */
+  /** Does the scope's open session run as root (a sudo session)? Only such a sender's message runs as root. */
   runsAsRoot(scope: string): boolean;
   /** Display name for the person (RBAC username), or null for nobody. */
   personName(userId: string, userPlatform: string): string | null;
@@ -420,8 +419,9 @@ export class PeerService implements PeerProvider {
       if (from.principal) this.notify(from.principal.name, text);
       if (from.remote && !from.notice) void this.noticeRemote(from.remote, entry, text, "undelivered");
     });
-    // Local delivery is immediate: it starts a turn, or joins the running one (anyone's).
-    return "delivered";
+    // Local delivery is immediate: it starts a turn, or joins the running one (anyone's). The
+    // exception: everyday senders wait for a running root turn in a scope in sudo mode.
+    return !meta.fromSudo && this.deps.inSudo(entry.scope) && this.deps.status(entry.scope) === "busy" ? "queued" : "delivered";
   }
 
   /** All providers' entries for the caller, newest first, capped. */
@@ -483,11 +483,6 @@ export class PeerService implements PeerProvider {
       if (!agentId || !(await this.deps.canView({ agentId, ...viewerOf(caller) }, target.scope))) {
         return `Error: ${NOT_FOUND}`;
       }
-    }
-    // Sudo sessions can message anywhere their person can see; only sudo sessions can message a
-    // scope in sudo mode, since the message would run there as root (Shitiz, 2026-10-26).
-    if (!target.host && this.deps.inSudo(target.scope) && !this.fromSudo(caller)) {
-      return `Error: ${SUDO_TARGET}`;
     }
     // A principal's turn runs as the principal: it must be able to use the target's agent itself.
     if (caller.principal && !this.deps.canUseAgent?.(caller.userId, caller.userPlatform, target.agentId)) {
@@ -584,7 +579,6 @@ export class PeerService implements PeerProvider {
     if (!text.ok) return refused(text.error);
     const target = await this.localTarget(caller, body.to);
     if (typeof target === "string") return refused(target);
-    if (this.deps.inSudo(target.scope)) return refused(SUDO_TARGET);
     const pairings = this.deps.pairings;
     if (!pairings || !this.deps.askPairing) return refused("conversations from other controllers aren't available here");
     const pairing = pairings.state(caller.scope, target.scope);
@@ -612,10 +606,6 @@ export class PeerService implements PeerProvider {
       pairings.decide(caller.scope, target.scope, decision === "allow");
       if (decision === "deny") {
         await this.noticeRemote(remote, target, `${link.person} denied the conversation with ${target.label}: refused for 24 hours.`, "denied");
-        return;
-      }
-      if (this.deps.inSudo(target.scope)) {
-        await this.noticeRemote(remote, target, `Your message to ${target.label} wasn't delivered: ${SUDO_TARGET}.`, "undelivered");
         return;
       }
       this.noteInbound(target.scope, caller);
@@ -718,7 +708,6 @@ export class PeerService implements PeerProvider {
       return at !== undefined && now - at < PEER_API_REPLY_WINDOW_MS;
     };
     if (!wroteTo(caller.scope) && !wroteTo(`remote:${remote.host}:*`)) return refused(NOT_FOUND);
-    if (this.deps.inSudo(target.scope)) return refused(SUDO_TARGET);
     if (!this.takeRateSlot(caller.scope)) return refused(`rate limit (${PEER_RATE_LIMIT} sends per ${PEER_RATE_WINDOW_MS / 60_000} minutes)`);
     // The other side's person allowed it: the conversation is open both ways.
     if (body.outcome === "allowed") {
@@ -816,11 +805,6 @@ export class PeerService implements PeerProvider {
       pairings.decide(principal.name, target.scope, decision === "allow");
       if (decision === "deny") {
         this.notify(principal.name, `${principal.forPerson} denied messages to ${entryName(target)}: refused for 24 hours.`);
-        return;
-      }
-      // Sudo mode may have started while it waited: a principal never messages a sudo-mode scope.
-      if (this.deps.inSudo(target.scope)) {
-        this.notify(principal.name, `Your message to ${entryName(target)} wasn't delivered: ${SUDO_TARGET}.`);
         return;
       }
       this.noteInbound(target.scope, caller);
