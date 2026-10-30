@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isResumePlaceholder, TranscriptReader } from "../src/controller-transcript.js";
+import { isResumePlaceholder, projectTranscript, TranscriptReader } from "../src/controller-transcript.js";
 
 describe("TranscriptReader", () => {
   let dir: string;
@@ -49,5 +49,30 @@ describe("isResumePlaceholder", () => {
     expect(isResumePlaceholder(assistant("claude-opus-5-5", "No response requested."))).toBe(false);
     expect(isResumePlaceholder(assistant("<synthetic>", "API Error: 529"))).toBe(false);
     expect(isResumePlaceholder({ type: "user", uuid: "u", message: { content: "No response requested." } })).toBe(false);
+  });
+});
+
+describe("projectTranscript", () => {
+  it("keeps queued prompts in send order, as text only", () => {
+    const projected = projectTranscript([
+      { type: "queue-operation", operation: "enqueue", timestamp: "t1", sessionId: "s", content: "second prompt" },
+      { type: "assistant", uuid: "a1", message: { content: [{ type: "text", text: "reply" }, { type: "tool_use", name: "Bash" }] } },
+      { type: "queue-operation", operation: "dequeue", timestamp: "t2", sessionId: "s" },
+      { type: "attachment", uuid: "q1", cwd: "/secret", attachment: { type: "queued_command", prompt: "second prompt", source_uuid: "x" } },
+    ]);
+    expect(projected).toEqual([
+      { type: "queue-operation", operation: "enqueue", timestamp: "t1", content: "second prompt", id: "line-0" },
+      { type: "assistant", uuid: "a1", message: { role: "assistant", content: [{ type: "text", text: "reply" }] } },
+      { type: "queue-operation", operation: "dequeue", timestamp: "t2", id: "line-2" },
+      { type: "attachment", uuid: "q1", attachment: { type: "queued_command", prompt: "second prompt" } },
+    ]);
+  });
+
+  it("drops task notifications from the queue and other attachments", () => {
+    expect(projectTranscript([
+      { type: "queue-operation", operation: "enqueue", content: "<task-notification>tool output</task-notification>" },
+      { type: "attachment", uuid: "q1", attachment: { type: "queued_command", prompt: "<task-notification>tool output</task-notification>" } },
+      { type: "attachment", uuid: "f1", attachment: { type: "file", content: "secret" } },
+    ])).toEqual([]);
   });
 });

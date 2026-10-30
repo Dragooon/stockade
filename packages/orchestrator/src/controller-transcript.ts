@@ -113,15 +113,31 @@ function textBlocks(content: unknown): Array<{ type: "text"; text: string }> {
     .map((block) => ({ type: "text", text: block.text }));
 }
 
+/** A queued prompt's text, or "" for what isn't one: a task notification carries tool output. */
+function queuedPromptText(content: unknown): string {
+  const text = typeof content === "string" ? content : textBlocks(content).map((block) => block.text).join("\n");
+  return text.trimStart().startsWith("<task-notification") ? "" : text;
+}
+
 /**
  * The projection `mcp__sessions__read` shows (D3b §5), in the raw-record shape: user and
- * assistant text only. No tool calls, tool output, thinking, attachments, cwd or sidechains,
- * so tool output fetched for other people never reaches the app.
+ * assistant text only, plus the queue records that say when a prompt was sent, so a client
+ * can keep send order. No tool calls, tool output, thinking, other attachments, cwd or
+ * sidechains, so tool output fetched for other people never reaches the app.
  */
 export function projectTranscript(records: TranscriptRecord[]): TranscriptRecord[] {
   const projected: TranscriptRecord[] = [];
   for (const record of records) {
-    if (record.isSidechain || typeof record.uuid !== "string") continue;
+    if (record.isSidechain) continue;
+    if (record.type === "queue-operation") {
+      const time = typeof record.timestamp === "string" ? { timestamp: record.timestamp } : {};
+      if (record.operation === "dequeue") projected.push({ type: "queue-operation", operation: "dequeue", ...time });
+      if (record.operation !== "enqueue") continue;
+      const content = queuedPromptText(record.content);
+      if (content.trim()) projected.push({ type: "queue-operation", operation: "enqueue", ...time, content });
+      continue;
+    }
+    if (typeof record.uuid !== "string") continue;
     const message = record.message as { content?: unknown; id?: unknown; model?: unknown } | undefined;
     const base = {
       uuid: record.uuid,
@@ -153,7 +169,13 @@ export function projectTranscript(records: TranscriptRecord[]): TranscriptRecord
           content: blocks,
         },
       });
+      continue;
+    }
+    const attachment = record.attachment as { type?: unknown; prompt?: unknown } | undefined;
+    if (record.type === "attachment" && attachment?.type === "queued_command") {
+      const prompt = queuedPromptText(attachment.prompt);
+      if (prompt.trim()) projected.push({ type: "attachment", ...base, attachment: { type: "queued_command", prompt } });
     }
   }
-  return projected;
+  return withRecordIds(projected);
 }
