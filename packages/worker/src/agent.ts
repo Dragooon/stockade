@@ -67,6 +67,8 @@ const NO_REPLY_TOOL = "mcp__agent__no_reply";
 // orchestrator's 1 h session idle timeout, which would close the session anyway.
 const FOLLOWUP_WAIT_MS = 50 * 60_000;
 const FOLLOWUP_GRACE_MS = 3 * 60_000;
+// After the CLI reports idle: long enough for a message already on its stdin to start a turn.
+const IDLE_QUIET_MS = 2_000;
 
 const STALE_SESSION_PATTERNS = [
   "No conversation found",
@@ -100,8 +102,9 @@ function formatModelUsage(modelUsage: Record<string, Record<string, unknown>>): 
  * message (and any mid-session injections) before / during the loop.
  *
  * On stale session: emits `stale_session` and returns (orchestrator retries).
- * On success: emits `result` and returns, unless background tasks are still
- * running: then it stays to emit one more `result` per later turn (follow-ups).
+ * On success: emits `result`, then returns once the CLI reports idle with no
+ * background tasks left. Later turns (a message queued during the reply, a task
+ * finishing) each emit one more `result` (follow-ups).
  * On error: propagates the error (caller emits `error`).
  */
 export async function runAgentSession(
@@ -637,6 +640,7 @@ Returns the new session's "label [ref]" for mcp__peers__send.`,
   let liveTasks = 0;
   let replied = false;
   let inTurn = true;
+  let cliIdle = false;
   let stopping = false;
   let waitTimer: ReturnType<typeof setTimeout> | undefined;
   const q = query({ prompt: channel as any, options: options as any });
@@ -647,12 +651,13 @@ Returns the new session's "label [ref]" for mcp__peers__send.`,
     console.log(`[worker] closing the CLI (${why})`);
     (q as any).close?.();
   };
-  // Idle after the reply: wait for live tasks, but not forever (a server started in
-  // the background never ends). With none left, give a just-finished task's
-  // notification turn a moment to start.
+  // After the reply: wait for live tasks, but not forever (a server started in the
+  // background never ends). With none left, the CLI's idle report ends it; until that
+  // arrives (a queued turn may still be running, a just-finished task's notification
+  // turn may still start), wait longer.
   const armWait = () => {
     clearTimeout(waitTimer);
-    const ms = liveTasks > 0 ? FOLLOWUP_WAIT_MS : FOLLOWUP_GRACE_MS;
+    const ms = liveTasks > 0 ? FOLLOWUP_WAIT_MS : cliIdle ? IDLE_QUIET_MS : FOLLOWUP_GRACE_MS;
     const why = liveTasks > 0 ? `${liveTasks} task(s) still running after ${ms / 60_000} min` : "no tasks left";
     waitTimer = setTimeout(() => stop(why), ms);
   };
@@ -681,6 +686,7 @@ Returns the new session's "label [ref]" for mcp__peers__send.`,
       // It sees what was pushed before it; anything later gets a queued turn of its own.
       if (!inTurn && (m.type === "assistant" || m.type === "user" || (m.type === "system" && m.subtype === "init"))) {
         inTurn = true;
+        cliIdle = false;
         seenPushes = channel.pushedCount;
         clearTimeout(waitTimer);
       }
@@ -741,7 +747,18 @@ Returns the new session's "label [ref]" for mcp__peers__send.`,
       } else if (m.type === "system" && m.subtype === "background_tasks_changed") {
         // The full set of live tasks after each change. Ambient ones are CLI housekeeping.
         liveTasks = (((m as any).tasks ?? []) as any[]).filter((t) => !t.ambient).length;
+        cliIdle = false;
         if (replied && !inTurn) armWait();
+      } else if (m.type === "system" && m.subtype === "session_state_changed") {
+        // The authoritative turn-over signal: idle comes only after the CLI's queue has
+        // drained. A result isn't one. A message pushed during the reply's last API call
+        // runs as its own turn right after that result, whose queued_turn_count says 0;
+        // closing the CLI on it killed that turn and lost the message.
+        cliIdle = (m as any).state === "idle";
+        if (replied && cliIdle) {
+          inTurn = false;
+          armWait();
+        }
       } else if ("result" in m) {
         // On resume, a background task orphaned by an earlier query is reported first,
         // as a result with no model call: origin task-notification, num_turns 0, empty
@@ -775,9 +792,8 @@ Returns the new session's "label [ref]" for mcp__peers__send.`,
         replied = true;
         silentAt = -1;
 
-        const queued = Number((m as any).queued_turn_count ?? 0);
-        if (channel.closed || (liveTasks === 0 && queued === 0)) break;
-        console.log(`[worker] ${liveTasks} background task(s) live${queued ? `, ${queued} turn(s) queued` : ""}: keeping the CLI for follow-ups`);
+        if (channel.closed) break;
+        if (liveTasks > 0) console.log(`[worker] ${liveTasks} background task(s) live: keeping the CLI for follow-ups`);
         armWait();
       }
     }

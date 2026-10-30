@@ -80,6 +80,18 @@ export class TranscriptReader {
   }
 }
 
+/**
+ * The placeholder the CLI writes on resume after a turn that was cut off before answering.
+ * Nobody wrote it, so no reader sees it.
+ */
+export function isResumePlaceholder(record: TranscriptRecord): boolean {
+  if (record.type !== "assistant") return false;
+  const message = record.message as { model?: unknown; content?: unknown } | undefined;
+  if (message?.model !== "<synthetic>") return false;
+  const blocks = textBlocks(message.content);
+  return blocks.length === 1 && blocks[0].text === "No response requested.";
+}
+
 /** The id a client pages by: the record's uuid, or `line-<n>` for the few record types without one. */
 export function transcriptRecordId(record: TranscriptRecord, index: number): string {
   if (typeof record.uuid === "string" && record.uuid) return record.uuid;

@@ -587,6 +587,20 @@ function remoteLinkFor(person: string): RemoteLink | null {
   return identity ? { person, userId: identity[1], userPlatform: identity[0] } : null;
 }
 
+/**
+ * A /sudo switch cut off a running turn: its message goes to the new session, once the toggle
+ * has settled. A message sent before then carries it instead.
+ */
+function resumeAfterSudoSwitch(scope: string): void {
+  if (!bridge.hasInterrupted(scope)) return;
+  setTimeout(() => {
+    if (!bridge.hasInterrupted(scope)) return;
+    const note = sudoNotes.get(scope);
+    sudoNotes.delete(scope);
+    bridge.resumeInterrupted(scope, sudoRegistry.state(scope) === "active", note ?? "");
+  }, 1_500);
+}
+
 /** /sudo on, from Discord or the app: the next message resumes the conversation as the sudo user. */
 async function sudoOn(scope: string, openedBy: string, who: string): Promise<void> {
   sudoRegistry.open(scope, openedBy);
@@ -595,6 +609,7 @@ async function sudoOn(scope: string, openedBy: string, who: string): Promise<voi
     console.error(`[sudo] closeSession failed for ${scope.slice(0, 60)}:`, err));
   console.log(`[sudo] on ${scope} by ${who}`);
   notifyControllers(scope);
+  resumeAfterSudoSwitch(scope);
 }
 
 /** /sudo off; false if the scope wasn't in sudo mode. */
@@ -605,6 +620,7 @@ async function sudoOff(scope: string, who: string): Promise<boolean> {
     console.error(`[sudo] closeSession failed for ${scope.slice(0, 60)}:`, err));
   console.log(`[sudo] off ${scope} by ${who}`);
   notifyControllers(scope);
+  resumeAfterSudoSwitch(scope);
   return true;
 }
 

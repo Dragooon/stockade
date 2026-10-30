@@ -387,6 +387,10 @@ export class SessionManager {
       let workerEnv: Record<string, string> = {
         CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1",
         CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
+        // The worker ends a query on the CLI's idle report (see runAgentSession).
+        CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
+        // The login's claude.ai connectors aren't ours to use, and each reconnect lands in the turn.
+        ENABLE_CLAUDEAI_MCP_SERVERS: "false",
         MAX_THINKING_TOKENS: agentConfig.model?.includes("opus") ? "128000" : "64000",
         REDIS_URL: deps.redisUrl,
         // Safety margin for slow MCP server cold-starts (e.g. chrome-devtools-mcp

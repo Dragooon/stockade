@@ -19,7 +19,7 @@
 import { createHash } from "node:crypto";
 import type { Participant } from "./participants.js";
 import type { ScopeBinding } from "./scope-bindings.js";
-import { projectTranscript, transcriptRecordId, withRecordIds, type TranscriptRecord } from "./controller-transcript.js";
+import { isResumePlaceholder, projectTranscript, transcriptRecordId, withRecordIds, type TranscriptRecord } from "./controller-transcript.js";
 import { answersError, type ApprovalBehaviour, type ApprovalHubEvent, type ControllerApproval, type ControllerApprovals } from "./controller-approvals.js";
 import type { GatekeeperReview } from "./gatekeeper.js";
 import type { AskQuestion, ChannelAttachment } from "./types.js";
@@ -425,7 +425,8 @@ export class ControllerService {
    * app: scope counts as P's before anyone has written in it.
    */
   private readable(scope: string, records: TranscriptRecord[]): TranscriptRecord[] {
-    return this.rawFor(scope) ? withRecordIds(records) : projectTranscript(records);
+    const written = records.filter((record) => !isResumePlaceholder(record));
+    return this.rawFor(scope) ? withRecordIds(written) : projectTranscript(written);
   }
 
   /** Does P get the raw form? A principal working for P (Kepler) counts as P; anyone else doesn't. */

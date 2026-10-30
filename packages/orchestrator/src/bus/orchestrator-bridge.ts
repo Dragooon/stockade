@@ -63,6 +63,10 @@ export class OrchestratorBridge {
   private readonly inFlight = new Map<string, number>();
   /** scope → when its last turn ended (epoch ms, since this process started). */
   private readonly turnEnded = new Map<string, number>();
+  /** Scopes running a turn nobody is waiting on (a follow-up, or a message queued during the reply). */
+  private readonly unawaitedTurns = new Set<string>();
+  /** scope → messages a /sudo switch cut off; they go first into the scope's next dispatch. */
+  private readonly interrupted = new Map<string, { texts: string[]; meta: Record<string, unknown> }>();
   /** A scope's turn started or ended (controller status events). */
   onTurnChange?: (scope: string) => void;
   /** Posts a follow-up (a result nobody is waiting on) to the scope's channel. */
@@ -99,6 +103,11 @@ export class OrchestratorBridge {
     text: string,
     meta: Record<string, unknown>,
   ): Promise<ChannelResponse> {
+    const held = this.interrupted.get(scope);
+    if (held) {
+      this.interrupted.delete(scope);
+      text = [...held.texts, text].filter(Boolean).join("\n\n");
+    }
     // Every message goes straight to the worker: one arriving mid-turn is injected into the
     // running turn, whoever sent it (channel members are willing participants; the latest
     // sender's identity applies). The count is only for the busy/idle status peers shows.
@@ -120,12 +129,19 @@ export class OrchestratorBridge {
 
   /** Is a turn running in this scope (any dispatch in flight)? */
   isTurnRunning(scope: string): boolean {
-    return (this.inFlight.get(scope) ?? 0) > 0;
+    return (this.inFlight.get(scope) ?? 0) > 0 || this.unawaitedTurnRunning(scope);
+  }
+
+  private unawaitedTurnRunning(scope: string): boolean {
+    if (!this.unawaitedTurns.has(scope)) return false;
+    if (this.sessionManager.get(scope)) return true;
+    this.unawaitedTurns.delete(scope);
+    return false;
   }
 
   /** Scopes with a turn running right now. */
   busyScopes(): string[] {
-    return [...this.inFlight.keys()];
+    return [...new Set([...this.inFlight.keys(), ...[...this.unawaitedTurns].filter((scope) => this.unawaitedTurnRunning(scope))])];
   }
 
   /** When the scope's last turn ended (epoch ms), or null if none has since startup. */
@@ -213,7 +229,40 @@ export class OrchestratorBridge {
    * without reaching into the session manager directly.
    */
   async closeSession(scope: string, reason: string): Promise<void> {
+    if (reason === "sudo_on" || reason === "sudo_off") this.holdUnanswered(scope);
     await this.sessionManager.closeSession(scope, reason);
+    this.unawaitedTurns.delete(scope);
+  }
+
+  /**
+   * A /sudo switch ends the scope's turn and no result will come: settle its dispatches and
+   * keep their messages for the next one, so none is lost and the scope doesn't show busy.
+   */
+  private holdUnanswered(scope: string): void {
+    for (const [cid, p] of this.pending) {
+      if (p.scope !== scope) continue;
+      clearTimeout(p.timeoutHandle);
+      this.pending.delete(cid);
+      const held = this.interrupted.get(scope) ?? { texts: [], meta: this.buildRetryMeta(p) };
+      // Its mode note is out of date now; the switch brings its own.
+      held.texts.push(p.originalText.replace(/^\[platform: sudo mode[^\n]*\n/, ""));
+      this.interrupted.set(scope, held);
+      p.resolve({ text: "", stopReason: "interrupted" });
+    }
+  }
+
+  /** Does the scope have messages a /sudo switch cut off, waiting for a dispatch? */
+  hasInterrupted(scope: string): boolean {
+    return this.interrupted.has(scope);
+  }
+
+  /** Dispatch what a /sudo switch cut off, with no new message to carry it. The reply posts as a follow-up. */
+  resumeInterrupted(scope: string, sudo: boolean, note: string): void {
+    const held = this.interrupted.get(scope);
+    if (!held) return;
+    this.sendAndWait(scope, note, { ...held.meta, sudo }).then((response) => {
+      if (!response.silent && (response.text.trim() || response.files?.length)) this.followupHandler?.(scope, response);
+    }).catch((err) => console.error(`[bus] resuming ${scope.slice(0, 40)} failed:`, err));
   }
 
   /**
@@ -315,7 +364,9 @@ export class OrchestratorBridge {
         const attempt = p.autoContinueRetries + 1;
         log(`[bus] ⏱ timeout ${p.scope.slice(0, 30)} — auto-continuing (${attempt}/${MAX_AUTO_CONTINUE})`);
         const continueMeta = { ...this.buildRetryMeta(p), _autoContinueRetries: attempt };
-        this.sendAndWait(p.scope, "continue", continueMeta).then(p.resolve).catch(() =>
+        // A live session may just be slow: nudge it. With none left, its turn is gone: send the message again.
+        const retryText = this.sessionManager.get(p.scope) ? "continue" : p.originalText;
+        this.sendAndWait(p.scope, retryText, continueMeta).then(p.resolve).catch(() =>
           p.resolve({ text: "Error: dispatch timed out" })
         );
       } else {
@@ -325,20 +376,20 @@ export class OrchestratorBridge {
   }
 
   /**
-   * Build the meta to use for a retried dispatch (worker_restart or stale_session).
+   * Build the meta to use for a retried dispatch (worker_restart, auto-continue, /sudo
+   * switch or stale_session).
    * Forwards the FULL original SessionMeta — dropping `agentId`, `parentAgentId`,
    * `parentCwd`, or `forceParentCwd` causes inline subagents to be re-dispatched
    * as standalone, hitting the wrong worker container and creating dual workers
    * for the same scope (root cause of "Unknown callback token" failures).
    *
-   * `persistRecovery` controls whether the fresh session's id is written back to
-   * sessions.db. Default false (ephemeral) for worker_restart / auto-continue,
-   * where the existing db binding is still resumable and must be preserved. The
-   * stale_session path passes true: there the old binding is dead, so the recovery
-   * MUST persist or the scope re-resumes the dead id on every future message
-   * (permanent history-less cold-loop).
+   * By default the retry resumes the scope's conversation, as the original would: a fresh
+   * session there has no history, and its reply lands in a transcript the app doesn't read.
+   * The stale_session path passes `fresh`: there the old binding is dead, so it starts a new
+   * session and MUST persist its id, or the scope re-resumes the dead id on every future
+   * message (permanent history-less cold-loop).
    */
-  private buildRetryMeta(p: Pending, persistRecovery = false): Record<string, unknown> {
+  private buildRetryMeta(p: Pending, fresh = false): Record<string, unknown> {
     return {
       userId: p.meta.userId,
       userPlatform: p.meta.userPlatform,
@@ -350,10 +401,16 @@ export class OrchestratorBridge {
       forceParentCwd: p.meta.forceParentCwd,
       sudo: p.meta.sudo,
       hops: p.meta.hops,
-      noSession: true,            // don't try to resume the (dead/stale) SDK session
-      ephemeral: !persistRecovery, // but DO persist the recovery when asked (stale path)
+      noSession: fresh ? true : p.meta.noSession,
+      ephemeral: fresh ? false : p.meta.ephemeral,
       onPartial: p.onPartial,
     };
+  }
+
+  private endUnawaitedTurn(scope: string): void {
+    if (!this.unawaitedTurns.delete(scope)) return;
+    this.turnEnded.set(scope, Date.now());
+    this.onTurnChange?.(scope);
   }
 
   private handleWorkerEvent(scope: string, event: BusWorkerEvent): void {
@@ -368,10 +425,16 @@ export class OrchestratorBridge {
         // never idle-closed or declared timed-out mid-task (which previously
         // raced into a cold, history-less session — see armTimeout / touch).
         this.sessionManager.touch(scope);
+        let awaited = false;
         for (const [cid, p] of this.pending) {
           if (p.scope !== scope) continue;
+          awaited = true;
           clearTimeout(p.timeoutHandle);
           p.timeoutHandle = this.armTimeout(cid, p.scope);
+        }
+        if (!awaited && !this.unawaitedTurns.has(scope)) {
+          this.unawaitedTurns.add(scope);
+          this.onTurnChange?.(scope);
         }
         const parts = [`${event.input}in/${event.output}out`];
         if (event.cacheRead > 0) parts.push(`cache_read:${event.cacheRead}`);
@@ -407,6 +470,7 @@ export class OrchestratorBridge {
       }
 
       case "evt:result": {
+        this.endUnawaitedTurn(scope);
         const p = this.pending.get(event.correlationId);
         const preview = event.text.slice(0, 100).replace(/\n/g, " ");
         const emptyMark = event.silent ? " (silent: no_reply)" : event.text.length === 0 ? " ⚠ EMPTY" : "";
@@ -445,6 +509,7 @@ export class OrchestratorBridge {
       }
 
       case "evt:error": {
+        this.endUnawaitedTurn(scope);
         const p = this.pending.get(event.correlationId);
         if (!p) break;
         clearTimeout(p.timeoutHandle);

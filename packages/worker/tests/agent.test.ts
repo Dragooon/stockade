@@ -192,6 +192,54 @@ describe("runAgentSession", () => {
     expect(results[0].stopReason).toBe("end_turn");
   });
 
+  describe("end of a query", () => {
+    const idle = { type: "system", subtype: "session_state_changed", state: "idle" };
+    const say = (text: string, input_tokens: number) => ({ type: "assistant", message: { usage: { input_tokens, output_tokens: 3 }, content: [{ type: "text", text }] } });
+    /** Yields the messages, then stays open until closed, like a CLI waiting on stdin. */
+    function openStream(messages: Record<string, unknown>[]) {
+      let closed: () => void;
+      const ended = new Promise<void>((resolve) => { closed = resolve; });
+      return {
+        close: vi.fn(() => closed()),
+        async *[Symbol.asyncIterator]() {
+          for (const message of messages) yield message;
+          await ended;
+        },
+      };
+    }
+
+    it("emits the turn of a message queued during the reply, though the reply's result says none is queued", async () => {
+      const stream = openStream([
+        { session_id: "s" },
+        say("First answer", 10),
+        { result: "First answer", stop_reason: "end_turn", num_turns: 2, queued_turn_count: 0 },
+        say("PINEAPPLE", 20),
+        { result: "PINEAPPLE", stop_reason: "end_turn", num_turns: 1, queued_turn_count: 0 },
+        idle,
+      ]);
+      mockQuery.mockReturnValue(stream);
+      const channel = new ConversationChannel();
+      channel.push("first");
+      const events: any[] = [];
+      await runAgentSession(BASE_REQUEST, channel, (ev) => events.push(ev));
+
+      expect(events.filter((e) => e.type === "result").map((e) => e.text)).toEqual(["First answer", "PINEAPPLE"]);
+      expect(stream.close).toHaveBeenCalledOnce();
+    });
+
+    it("does not close the CLI on a result alone: a queued turn may be starting", async () => {
+      const stream = openStream([{ session_id: "s" }, { result: "Done", stop_reason: "end_turn", num_turns: 1 }]);
+      mockQuery.mockReturnValue(stream);
+      const channel = new ConversationChannel();
+      channel.push("go");
+      const running = runAgentSession(BASE_REQUEST, channel, () => {});
+      await new Promise((resolve) => setTimeout(resolve, 2_300));
+      expect(stream.close).not.toHaveBeenCalled();
+      channel.close();
+      await running;
+    }, 5_000);
+  });
+
   describe("background follow-ups", () => {
     const tasks = (...ids: string[]) => ({ type: "system", subtype: "background_tasks_changed", tasks: ids.map((task_id) => ({ task_id, task_type: "local_bash", description: "sweep" })) });
     const say = (text: string, input_tokens: number) => ({ type: "assistant", message: { usage: { input_tokens, output_tokens: 3 }, content: [{ type: "text", text }] } });
@@ -208,8 +256,6 @@ describe("runAgentSession", () => {
           { type: "system", subtype: "init" },
           say("Shortlist: 3 lots", 20),
           { result: "Shortlist: 3 lots", stop_reason: "end_turn", num_turns: 1, origin: { kind: "task-notification" } },
-          // Past the point it should stop reading: no tasks left after the follow-up.
-          { result: "never read", stop_reason: "end_turn", num_turns: 1 },
         ]),
       );
       const channel = new ConversationChannel();
@@ -248,15 +294,17 @@ describe("runAgentSession", () => {
           { session_id: "s" },
           { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "w", task_type: "watcher", description: "", ambient: true }] },
           { result: "done", stop_reason: "end_turn", num_turns: 1 },
-          { result: "never read", stop_reason: "end_turn", num_turns: 1 },
+          { type: "system", subtype: "session_state_changed", state: "idle" },
         ]),
       );
       const channel = new ConversationChannel();
       channel.push("hi");
-      setTimeout(() => channel.close(), 10);
+      const logged = vi.spyOn(console, "log");
       const events: any[] = [];
       await runAgentSession(BASE_REQUEST, channel, (ev) => events.push(ev));
       expect(events.filter((e) => e.type === "result").map((e) => e.text)).toEqual(["done"]);
+      expect(logged.mock.calls.flat().join("\n")).not.toContain("background task(s) live");
+      logged.mockRestore();
     });
 
     it("closes the CLI when the session closes while a task still runs", async () => {
