@@ -7,6 +7,39 @@ export function initSessionsTable(db: Database.Database): void {
   db.exec(
     "CREATE TABLE IF NOT EXISTS sessions (scope TEXT PRIMARY KEY, session_id TEXT NOT NULL)"
   );
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS scope_labels (scope TEXT PRIMARY KEY, label TEXT NOT NULL)"
+  );
+}
+
+/**
+ * The name /rename gave a scope, or null if it has none.
+ */
+export function getScopeLabel(
+  db: Database.Database,
+  scope: string
+): string | null {
+  const row = db
+    .prepare("SELECT label FROM scope_labels WHERE scope = ?")
+    .get(scope) as { label: string } | undefined;
+  return row?.label ?? null;
+}
+
+/**
+ * Set a scope's /rename name, or clear it with null.
+ */
+export function setScopeLabel(
+  db: Database.Database,
+  scope: string,
+  label: string | null
+): void {
+  if (label === null) {
+    db.prepare("DELETE FROM scope_labels WHERE scope = ?").run(scope);
+    return;
+  }
+  db.prepare(
+    "INSERT INTO scope_labels (scope, label) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET label = excluded.label"
+  ).run(scope, label);
 }
 
 /**

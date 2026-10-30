@@ -11,7 +11,7 @@ import { resolveAgent, resolveBinding } from "./router.js";
 import { checkAccess, hasPermission, resolveUser } from "./rbac.js";
 import { SudoRegistry } from "./sudo.js";
 import { agentTranscriptDirs } from "./run-as.js";
-import { initSessionsTable, getSessionId, setSessionId, deleteSession, getAllSessions } from "./sessions.js";
+import { initSessionsTable, getSessionId, setSessionId, deleteSession, getAllSessions, getScopeLabel, setScopeLabel } from "./sessions.js";
 import { PeerService, escapePeerText, type PeerCaller, type RemoteLink, type RemotePeerHost } from "./peers.js";
 import { HttpRemotePeerHost } from "./peer-remote.js";
 import { PeerPairings } from "./peer-pairings.js";
@@ -732,6 +732,8 @@ for (const entry of config.platform.controller?.tokens ?? []) {
     canView: (scope, agentId) => userCanViewScope({ agentId, userId, userPlatform, scope }, scope),
     agentForScope: peerAgentForScope,
     describe: describeScope,
+    customLabel: (scope) => getScopeLabel(db, scope),
+    setCustomLabel: (scope, label) => setScopeLabel(db, scope, label),
     fallbackLabel: discordFallbackLabel,
     status: (scope) => (bridge.isTurnRunning(scope) ? "busy" : sessionManager.get(scope) ? "idle" : "closed"),
     lastTurnEnded: (scope) => bridge.lastTurnEnded(scope),

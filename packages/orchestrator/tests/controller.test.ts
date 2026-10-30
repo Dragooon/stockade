@@ -426,6 +426,35 @@ describe("ControllerService: writing (§4, §7)", () => {
     expect(w.sent).toEqual([{ scope: APP, text: "hello" }, { scope: APP, text: "again" }]);
   });
 
+  it("/rename names the session without reaching the agent, and with no name goes back to the default", async () => {
+    const labels = new Map<string, string>();
+    const w = world({
+      customLabel: (scope: string) => labels.get(scope) ?? null,
+      setCustomLabel: (scope: string, label: string | null) => {
+        if (label === null) labels.delete(scope);
+        else labels.set(scope, label);
+      },
+    });
+    bindScope(w.db, { scope: APP, agentId: "main", person: "shitiz", origin: "app" });
+    const id = controllerSessionId(APP);
+    expect(await w.service.send(id, "  /rename   Land   search ")).toEqual({ delivered: true, queued: false });
+    expect(w.sent).toEqual([]);
+    expect((await w.service.find(id))?.label).toBe("Land search");
+    await w.service.send(id, "/rename");
+    expect((await w.service.find(id))?.label).toBe(`label of ${APP}`);
+    await w.service.send(id, "/renamed it");
+    await w.service.send(id, "please /rename this");
+    expect(w.sent.map((message) => message.text)).toEqual(["/renamed it", "please /rename this"]);
+  });
+
+  it("refuses to /rename a read-only session", async () => {
+    const setCustomLabel = vi.fn();
+    const w = world({ setCustomLabel });
+    recordParticipant(w.db, DISCORD, "shitiz", "discord");
+    await expect(w.service.send(controllerSessionId(DISCORD), "/rename x")).rejects.toMatchObject({ status: 403, code: "read_only" });
+    expect(setCustomLabel).not.toHaveBeenCalled();
+  });
+
   it("refuses Discord scopes as read_only, unknown ids as not_found, and empty text", async () => {
     const w = world();
     recordParticipant(w.db, DISCORD, "shitiz", "discord");

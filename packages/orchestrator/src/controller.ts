@@ -99,6 +99,9 @@ export const TRANSCRIPT_MAX_LIMIT = 1000;
 /** How often a busy session's transcript is checked for new records while an app is connected. */
 export const TRANSCRIPT_FOLLOW_MS = 1000;
 export const CONTROLLER_MESSAGE_MAX_CHARS = 100_000;
+/** Longest name /rename keeps. */
+const RENAME_MAX_LENGTH = 200;
+
 /**
  * How long GET sessions waits on visibility checks and labels (Discord lookups, slow while its
  * caches are cold after a restart). Rows still resolving then are sent later as `session` events.
@@ -123,6 +126,10 @@ export interface ControllerDeps {
   canView: (scope: string, agentId: string) => Promise<boolean>;
   agentForScope: (scope: string) => string | null;
   describe: (scope: string) => Promise<string>;
+  /** The name /rename gave the scope, shown instead of describe's label. */
+  customLabel?: (scope: string) => string | null;
+  /** Without it, /rename goes to the agent like any other message. */
+  setCustomLabel?: (scope: string, label: string | null) => void;
   /** The label shown while describe is still resolving (default: the scope), e.g. `<#channel>`. */
   fallbackLabel?: (scope: string) => string;
   /** GET sessions' wait for slow lookups (default SESSIONS_LIST_BUDGET_MS). */
@@ -172,6 +179,15 @@ export function controllerSessionId(scope: string): string {
 /** A participation row written by an agent acting for the person, not the person writing. */
 function isAgentRow(row: Participant): boolean {
   return row.platform === "peer" || row.platform === "api";
+}
+
+/** The name in a `/rename [name]` message (null name: back to the default label), or null for any other message. */
+function renameCommand(text: unknown): { name: string | null } | null {
+  if (typeof text !== "string") return null;
+  const match = /^\/rename(?:\s+([\s\S]*))?$/.exec(text.trim());
+  if (!match) return null;
+  const name = (match[1] ?? "").replace(/\s+/g, " ").trim().slice(0, RENAME_MAX_LENGTH);
+  return { name: name || null };
 }
 
 export class ControllerService {
@@ -302,6 +318,12 @@ export class ControllerService {
     if (!session) throw new ControllerError(404, "not_found");
     if (!session.writable) throw new ControllerError(403, "read_only", "This session is read-only here.");
     const fileIds = checkedFileIds(files);
+    const newName = fileIds.length === 0 && this.deps.setCustomLabel ? renameCommand(text) : null;
+    if (newName !== null) {
+      this.deps.setCustomLabel!(session.scope, newName.name);
+      await this.notify(session.scope);
+      return { delivered: true, queued: false };
+    }
     if (fileIds.length > 0 && !this.deps.files) throw new ControllerError(404, "unsupported", "Files aren't supported here");
     const noText = text === undefined || text === null || (typeof text === "string" && !text.trim());
     const message = fileIds.length > 0 && noText ? "" : checkedText(text);
@@ -562,7 +584,7 @@ export class ControllerService {
       id,
       ref: id.slice(0, 6),
       scope,
-      label,
+      label: this.deps.customLabel?.(scope) ?? label,
       agentId: this.deps.agentForScope(scope),
       status,
       lastActive,
