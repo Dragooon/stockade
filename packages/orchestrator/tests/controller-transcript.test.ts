@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isResumePlaceholder, projectTranscript, TranscriptReader } from "../src/controller-transcript.js";
+import { isResumePlaceholder, latestSessionTitle, projectTranscript, TranscriptReader } from "../src/controller-transcript.js";
 
 describe("TranscriptReader", () => {
   let dir: string;
@@ -12,6 +12,14 @@ describe("TranscriptReader", () => {
     file = join(dir, "s.jsonl");
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("finds the newest session title, skipping bad lines, and returns null without one", () => {
+    expect(latestSessionTitle(file)).toBeNull();
+    writeFileSync(file, '{"uuid":"a"}\n');
+    expect(latestSessionTitle(file)).toBeNull();
+    writeFileSync(file, '{"type":"ai-title","aiTitle":"Old"}\n{"type":"ai-title","aiTitle":"New"}\n{"uuid":"a"}\n{"type":"ai-title","aiTi');
+    expect(latestSessionTitle(file)).toBe("New");
+  });
 
   it("parses appended lines only, waits for a line still being written, and skips corrupt lines", () => {
     const reader = new TranscriptReader();

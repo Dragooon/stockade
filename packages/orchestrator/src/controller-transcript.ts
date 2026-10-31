@@ -5,7 +5,7 @@
  * parsed again from the start.
  */
 
-import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 
 /** One raw record of a Claude Code transcript (a parsed JSONL line). */
 export type TranscriptRecord = Record<string, unknown>;
@@ -17,6 +17,41 @@ interface CachedFile {
 }
 
 const CHUNK_BYTES = 4 * 1024 * 1024;
+const TITLE_TAIL_BYTES = 256 * 1024;
+
+/**
+ * The title Claude Code gave a session: the last `ai-title` record near the end of its JSONL.
+ * Reads only the tail, so it's cheap enough to call for every row of a list.
+ */
+export function latestSessionTitle(path: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const size = fstatSync(fd).size;
+    const length = Math.min(TITLE_TAIL_BYTES, size);
+    const buffer = Buffer.alloc(length);
+    const read = readSync(fd, buffer, 0, length, size - length);
+    const lines = buffer.subarray(0, read).toString("utf8").split("\n");
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (!lines[index].includes('"ai-title"')) continue;
+      try {
+        const record = JSON.parse(lines[index]);
+        if (record?.type === "ai-title" && typeof record.aiTitle === "string" && record.aiTitle.trim()) {
+          return record.aiTitle.trim();
+        }
+      } catch {
+        // The tail can start mid-line, and a line can be half written.
+      }
+    }
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
 
 export class TranscriptReader {
   private files = new Map<string, CachedFile>();

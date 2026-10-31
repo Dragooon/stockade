@@ -22,7 +22,7 @@ import {
 import { initScopeBindingsTable, getScopeBinding, isBoundScope, scopesBoundTo, bindScope, unbindScope } from "./scope-bindings.js";
 import { ControllerService } from "./controller.js";
 import { ControllerFileStore } from "./controller-files.js";
-import { TranscriptReader } from "./controller-transcript.js";
+import { latestSessionTitle, TranscriptReader } from "./controller-transcript.js";
 import { ControllerApprovals } from "./controller-approvals.js";
 import { mountControllerRoutes } from "./api/controller-routes.js";
 import { mountPeerPrincipalRoutes } from "./api/peer-principal-routes.js";
@@ -414,8 +414,14 @@ async function describeScope(scope: string): Promise<string> {
   if (scope.startsWith("terminal:")) return `terminal session of ${scope.split(":")[2]}`;
   if (isBoundScope(scope)) {
     const binding = getScopeBinding(db, scope);
+    if (!binding) return scope;
+    // Other sessions pick a session by this label, and a bare id doesn't say what it's about.
+    const sessionId = getSessionId(db, scope);
+    const path = sessionId ? transcriptPath(binding.agentId, sessionId) : null;
+    const title = getScopeLabel(db, scope) ?? (path ? latestSessionTitle(path) : null);
+    if (title) return title;
     const kind = scope.startsWith("app:") ? "app session" : "peer session";
-    return binding ? `${kind} ${scope.split(":").at(-1)} of ${binding.person}` : scope;
+    return `${kind} ${scope.split(":").at(-1)} of ${binding.person}`;
   }
   return scope;
 }
