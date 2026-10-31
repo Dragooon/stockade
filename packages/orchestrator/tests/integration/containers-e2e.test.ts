@@ -282,7 +282,7 @@ describe("Shared container lifecycle", () => {
     const url = await manager.ensure("main", sharedAgent, "scope-alice");
 
     // Returns correct URL
-    expect(url).toBe("http://localhost:3001");
+    expect(url).toBe("http://127.0.0.1:3001");
 
     // Docker image was built (because imageExists returned false)
     const buildCalls = mockExeca.mock.calls.filter(
@@ -348,7 +348,7 @@ describe("Shared container lifecycle", () => {
     const url2 = await manager.ensure("main", sharedAgent, "scope-bob");
 
     expect(url1).toBe(url2);
-    expect(url1).toBe("http://localhost:3001");
+    expect(url1).toBe("http://127.0.0.1:3001");
     expect(manager.size).toBe(1);
 
     // Container was only created once
@@ -363,7 +363,7 @@ describe("Shared container lifecycle", () => {
 
     // First ensure — healthy
     const url1 = await manager.ensure("main", sharedAgent, "scope-alice");
-    expect(url1).toBe("http://localhost:3001");
+    expect(url1).toBe("http://127.0.0.1:3001");
 
     // Simulate container death — health check fails on next call
     let healthCallCount = 0;
@@ -422,7 +422,7 @@ describe("Shared container lifecycle", () => {
     const url2 = await manager.ensure("main", sharedAgent, "scope-alice");
 
     // URL is the same (port 3001 was released and re-allocated)
-    expect(url2).toBe("http://localhost:3001");
+    expect(url2).toBe("http://127.0.0.1:3001");
 
     // Old container was stopped and removed
     const stopCalls = mockExeca.mock.calls.filter(
@@ -480,7 +480,7 @@ describe("Shared container lifecycle", () => {
     expect(manager.size).toBe(0);
 
     const url = await manager.ensure("main", sharedAgent, "scope-2");
-    expect(url).toBe("http://localhost:3001");
+    expect(url).toBe("http://127.0.0.1:3001");
   });
 
   // Skipped: shutdownAll now stops without removing (containers preserved for restart)
@@ -532,8 +532,8 @@ describe("Session-isolated containers", () => {
     const url2 = await manager.ensure("sandbox", sessionAgent, "discord:456:bob");
 
     expect(url1).not.toBe(url2);
-    expect(url1).toBe("http://localhost:3001");
-    expect(url2).toBe("http://localhost:3002");
+    expect(url1).toBe("http://127.0.0.1:3001");
+    expect(url2).toBe("http://127.0.0.1:3002");
     expect(manager.size).toBe(2);
 
     // Two separate containers were created
@@ -590,10 +590,10 @@ describe("Session-isolated containers", () => {
 
     // Shared container and bob's session container still accessible
     const sharedUrl = manager.getUrl("main", sharedAgent, "discord:123:alice");
-    expect(sharedUrl).toBe("http://localhost:3001");
+    expect(sharedUrl).toBe("http://127.0.0.1:3001");
 
     const bobUrl = manager.getUrl("sandbox", sessionAgent, "discord:456:bob");
-    expect(bobUrl).toBe("http://localhost:3003");
+    expect(bobUrl).toBe("http://127.0.0.1:3003");
   });
 });
 
@@ -709,9 +709,9 @@ describe("Port allocation through full flow", () => {
     const url2 = await manager.ensure("agent-b", sharedAgent, "scope");
     const url3 = await manager.ensure("agent-c", sharedAgent, "scope");
 
-    expect(url1).toBe("http://localhost:3001");
-    expect(url2).toBe("http://localhost:3002");
-    expect(url3).toBe("http://localhost:3003");
+    expect(url1).toBe("http://127.0.0.1:3001");
+    expect(url2).toBe("http://127.0.0.1:3002");
+    expect(url3).toBe("http://127.0.0.1:3003");
 
     // All three ports are different
     const ports = [url1, url2, url3].map((u) =>
@@ -725,17 +725,17 @@ describe("Port allocation through full flow", () => {
     const { manager } = createManager();
 
     const url1 = await manager.ensure("agent-a", sharedAgent, "scope");
-    expect(url1).toBe("http://localhost:3001");
+    expect(url1).toBe("http://127.0.0.1:3001");
 
     const url2 = await manager.ensure("agent-b", sharedAgent, "scope");
-    expect(url2).toBe("http://localhost:3002");
+    expect(url2).toBe("http://127.0.0.1:3002");
 
     // Tear down agent-a, releasing port 3001
     await manager.teardown("agent-a");
 
     // Next allocation should reuse port 3001
     const url3 = await manager.ensure("agent-c", sharedAgent, "scope");
-    expect(url3).toBe("http://localhost:3001");
+    expect(url3).toBe("http://127.0.0.1:3001");
   });
 });
 
@@ -1146,7 +1146,7 @@ describe("Concurrent ensure deduplication", () => {
     // All three resolve to the same URL (shared mode, same agentId)
     expect(url1).toBe(url2);
     expect(url2).toBe(url3);
-    expect(url1).toBe("http://localhost:3001");
+    expect(url1).toBe("http://127.0.0.1:3001");
 
     // Only one container was created despite three concurrent calls
     const createCalls = mockExeca.mock.calls.filter(

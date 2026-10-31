@@ -32,21 +32,26 @@ import type {
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 
 async function isRedisAvailable(): Promise<boolean> {
+  const bus = new EventBus({ redisUrl: REDIS_URL });
   try {
-    const bus = new EventBus({ redisUrl: REDIS_URL });
-    // publishMessage exercises the pub connection
-    await bus.publishEvent("_probe", {
-      kind: "evt:result",
-      scope: "_probe",
-      correlationId: "probe",
-      text: "ping",
-      sdkSessionId: "probe",
-      stopReason: "end_turn",
-      timestamp: new Date().toISOString(),
-    });
+    // publishMessage exercises the pub connection. With no Redis it waits for one instead of
+    // failing, so give up before the hook's own timeout.
+    await Promise.race([
+      bus.publishEvent("_probe", {
+        kind: "evt:result",
+        scope: "_probe",
+        correlationId: "probe",
+        text: "ping",
+        sdkSessionId: "probe",
+        stopReason: "end_turn",
+        timestamp: new Date().toISOString(),
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Redis probe timed out")), 2_000)),
+    ]);
     await bus.shutdown();
     return true;
   } catch {
+    bus.shutdown().catch(() => {});
     return false;
   }
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -47,11 +47,18 @@ const agentWithVolumes: AgentConfig = {
 };
 
 describe("provisionContainer", () => {
+  const originalHome = process.env.HOME;
+
   beforeEach(() => {
+    // Host credentials are mounted only if they exist, so give each test a home that has them.
+    process.env.HOME = resolve(tmpBase, "home");
+    mkdirSync(resolve(tmpBase, "home", ".claude"), { recursive: true });
+    writeFileSync(resolve(tmpBase, "home", ".claude", ".credentials.json"), "{}");
     vi.clearAllMocks();
   });
 
   afterEach(() => {
+    process.env.HOME = originalHome;
     if (existsSync(tmpBase)) {
       rmSync(tmpBase, { recursive: true, force: true });
     }

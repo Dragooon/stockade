@@ -102,7 +102,7 @@ describe("ContainerManager", () => {
     it("starts a new container on first call", async () => {
       const url = await manager.ensure("main", sharedAgent, "scope-alice");
 
-      expect(url).toBe("http://localhost:3001");
+      expect(url).toBe("http://127.0.0.1:3001");
       expect(docker.createContainer).toHaveBeenCalledTimes(1);
       expect(docker.startContainer).toHaveBeenCalledWith("container-abc123");
       expect(manager.size).toBe(1);
@@ -145,7 +145,7 @@ describe("ContainerManager", () => {
       expect(docker.removeContainer).toHaveBeenCalled();
       expect(docker.createContainer).toHaveBeenCalledTimes(2);
       // Port 3001 was released by teardown and re-allocated
-      expect(url2).toBe("http://localhost:3001");
+      expect(url2).toBe("http://127.0.0.1:3001");
     });
   });
 
@@ -368,7 +368,7 @@ describe("ContainerManager", () => {
     it("returns URL for running container", async () => {
       await manager.ensure("main", sharedAgent, "scope-1");
       const url = manager.getUrl("main", sharedAgent, "scope-1");
-      expect(url).toBe("http://localhost:3001");
+      expect(url).toBe("http://127.0.0.1:3001");
     });
 
     it("returns null for non-running container", () => {
@@ -430,7 +430,7 @@ describe("ContainerManager", () => {
 
       // Both promises should resolve to the same URL
       expect(url1).toBe(url2);
-      expect(url1).toBe("http://localhost:3001");
+      expect(url1).toBe("http://127.0.0.1:3001");
       expect(manager.size).toBe(1);
     });
   });
@@ -445,7 +445,7 @@ describe("ContainerManager", () => {
 
       const url = await manager.ensure("main", sharedAgent, "scope1");
 
-      expect(url).toBe("http://localhost:3001");
+      expect(url).toBe("http://127.0.0.1:3001");
       expect(docker.createContainer).toHaveBeenCalledTimes(1);
       expect(docker.startContainer).toHaveBeenCalledTimes(1);
       // fetch was called multiple times for health check retries
