@@ -386,7 +386,6 @@ export class SessionManager {
       let proxyToken: string | undefined;
       let workerEnv: Record<string, string> = {
         CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING: "1",
-        CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
         // The worker ends a query on the CLI's idle report (see runAgentSession).
         CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
         // The login's claude.ai connectors aren't ours to use, and each reconnect lands in the turn.

@@ -415,8 +415,8 @@ export function buildSdkSettings(
     // local MCP servers stay available without per-child duplication.
     // User-global settings remain excluded.
     settingSources: ["project"],
-    // Auto-compact when context exceeds 200k tokens to prevent runaway JSONL growth.
-    autoCompactWindow: 300000,
+    // Compact at 500k tokens to prevent runaway JSONL growth.
+    autoCompactWindow: 500000,
     permissions: {
       ...(skillAllow.length ? { allow: skillAllow } : {}),
       deny: [
