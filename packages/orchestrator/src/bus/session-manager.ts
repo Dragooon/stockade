@@ -29,6 +29,7 @@ import {
   updateCallbackSession,
 } from "../api/sessions.js";
 import { resolveAgent, resolveBinding } from "../router.js";
+import { scopeOverrideFor } from "../config.js";
 import { onHost } from "../host-url.js";
 import {
   buildSystemPrompt,
@@ -306,6 +307,16 @@ export class SessionManager {
         // Sub-agent scopes: "subagent:{agentId}:..." or "self-spawn:{agentId}:..."
         agentId = scope.split(":")[1] ?? "unknown";
       }
+    }
+
+    // A scope_overrides entry for this exact scope wins over the agent default and any binding override,
+    // whichever way the agent was chosen (app sessions are bound by id, not by a channel binding).
+    const scopeOverride = scopeOverrideFor(deps.platform, scope);
+    if (scopeOverride) {
+      bindingOverride = {
+        model: scopeOverride.model ?? bindingOverride.model,
+        effort: scopeOverride.effort ?? bindingOverride.effort,
+      };
     }
 
     const baseConfig: AgentConfig = deps.allAgents.agents[agentId];

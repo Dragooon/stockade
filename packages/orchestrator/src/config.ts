@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import yaml from "js-yaml";
 import { z } from "zod";
-import type { AgentsConfig, PlatformConfig, PathsConfig } from "./types.js";
+import type { AgentsConfig, PlatformConfig, PathsConfig, ScopeOverride } from "./types.js";
 import {
   containerConfigSchema,
   containersConfigSchema,
@@ -133,6 +133,14 @@ const channelBindingSchema = z.object({
   effort: z.enum(["low", "medium", "high", "max"]).optional(),
 });
 
+// Per-session overrides: this scope (e.g. one app session) runs on this model/effort instead of its
+// agent's default or its channel binding's override.
+const scopeOverrideSchema = z.object({
+  scope: z.string().min(1),
+  model: z.string().optional(),
+  effort: z.enum(["low", "medium", "high", "max"]).optional(),
+});
+
 const pathsConfigSchema = z.object({
   data_dir: z.string().optional(),
   agents_dir: z.string().optional(),
@@ -185,7 +193,13 @@ const unifiedConfigSchema = z.object({
   }).optional(),
   controller: controllerConfigSchema.optional(),
   peers: peersConfigSchema.optional(),
+  scope_overrides: z.array(scopeOverrideSchema).default([]),
 });
+
+/** The config's model/effort override for exactly this scope, or null when it has none. */
+export function scopeOverrideFor(platform: PlatformConfig, scope: string): ScopeOverride | null {
+  return platform.scope_overrides?.find((entry) => entry.scope === scope) ?? null;
+}
 
 // --- Environment variable substitution ---
 
@@ -290,6 +304,7 @@ export function loadConfig(configDir: string, projectRoot?: string): {
     redis: parsed.redis,
     controller: parsed.controller,
     peers: parsed.peers,
+    scope_overrides: parsed.scope_overrides,
   };
 
   // Resolve paths with smart defaults

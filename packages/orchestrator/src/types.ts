@@ -168,6 +168,15 @@ export interface PlatformConfig {
   redis?: { url: string; session_idle_timeout_sec?: number };
   controller?: ControllerConfig;
   peers?: PeersConfig;
+  /** Per-scope model/effort overrides (config `scope_overrides`). */
+  scope_overrides?: ScopeOverride[];
+}
+
+/** One scope pinned to a model/effort, e.g. a single app session. */
+export interface ScopeOverride {
+  scope: string;
+  model?: string;
+  effort?: "low" | "medium" | "high" | "max";
 }
 
 /** Peer principals (D3b §10): agents outside Stockade with their own identity and token. */

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { loadConfig, substituteEnvVars, resolvePaths, PLATFORM_HOME } from "../src/config.js";
+import { loadConfig, substituteEnvVars, resolvePaths, PLATFORM_HOME, scopeOverrideFor } from "../src/config.js";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `config-test-${randomUUID()}`);
@@ -563,6 +563,50 @@ peers:
 
   it("throws when config.yaml is missing", () => {
     // tmpDir exists but contains no config.yaml
+    expect(() => loadConfig(tmpDir)).toThrow();
+  });
+});
+
+describe("scope_overrides", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("defaults to no overrides", () => {
+    writeYaml(tmpDir, "config.yaml", VALID_CONFIG);
+    const config = loadConfig(tmpDir);
+    expect(config.platform.scope_overrides).toEqual([]);
+    expect(scopeOverrideFor(config.platform, "app:shitiz:abc")).toBeNull();
+  });
+
+  it("finds the override for exactly that scope", () => {
+    writeYaml(tmpDir, "config.yaml", `${VALID_CONFIG}
+scope_overrides:
+  - scope: "app:shitiz:abc"
+    model: claude-fable-5-2
+    effort: high
+`);
+    const config = loadConfig(tmpDir);
+    expect(scopeOverrideFor(config.platform, "app:shitiz:abc")).toEqual({
+      scope: "app:shitiz:abc",
+      model: "claude-fable-5-2",
+      effort: "high",
+    });
+    expect(scopeOverrideFor(config.platform, "app:shitiz:abcd")).toBeNull();
+  });
+
+  it("rejects an unknown effort", () => {
+    writeYaml(tmpDir, "config.yaml", `${VALID_CONFIG}
+scope_overrides:
+  - scope: "app:shitiz:abc"
+    effort: extreme
+`);
     expect(() => loadConfig(tmpDir)).toThrow();
   });
 });
